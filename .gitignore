@@ -1,0 +1,31 @@
+/target/
+
+# Sandbox artifacts (character special devices)
+/HEAD
+/config
+/hooks
+/objects
+/refs
+**/*.rs.bk
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+.venv/
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Environment
+.env

@@ -1,0 +1,17 @@
+[package]
+name = "ferrosync-py"
+description = "Python bindings for ferrosync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_ferrosync"
+crate-type = ["cdylib"]
+
+[dependencies]
+ferrosync-core = { workspace = true }
+pyo3 = { workspace = true }
+tokio = { workspace = true }
