@@ -24,6 +24,7 @@ const SEC_TO_UNIX_EPOCH: i64 = 11_644_473_600;
 const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
 
 /// Windows file attribute: directory.
+#[cfg(test)]
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 /// Windows file attribute: reparse point (symlinks, junctions).
