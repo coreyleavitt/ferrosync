@@ -4,13 +4,14 @@
 //! against the source file using a rolling checksum, and sends delta tokens
 //! (literal data + block match references) to the receiver.
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::delta::checksum;
 use crate::delta::matcher::{self, MatchOp};
 use crate::delta::sum::{self, SumStruct};
 use crate::delta::token;
 use crate::error::ProtocolError;
+use crate::protocol::compress::Compressor;
 use crate::protocol::handshake::ChecksumType;
 use crate::protocol::varint;
 
@@ -19,7 +20,8 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 /// Process a single file: read signatures, match against source, send tokens.
 ///
 /// Wire format sent to receiver:
-/// - file_index (i32)
+/// - file_index (NDX-encoded)
+/// - sum_head (4x i32: count, blength, s2length, remainder)
 /// - tokens (data/block_match/eof)
 /// - file-level checksum (checksum_len bytes)
 pub async fn send_file_delta<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
@@ -39,27 +41,8 @@ pub async fn send_file_delta<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     // Write file index.
     varint::write_int(token_writer, file_index).await?;
 
-    // Write tokens.
-    for op in &ops {
-        match op {
-            MatchOp::Data(data) => {
-                token::send_data(token_writer, data).await?;
-            }
-            MatchOp::BlockMatch(idx) => {
-                token::send_block_match(token_writer, *idx).await?;
-            }
-        }
-    }
-    token::send_eof(token_writer).await?;
-
-    // Write file-level checksum.
-    let file_sum = checksum::file_checksum(source_data, seed, checksum_type);
-    token_writer
-        .write_all(&file_sum)
-        .await
-        .map_err(ProtocolError::Io)?;
-
-    Ok(())
+    // Write tokens + checksum.
+    write_tokens_and_checksum(token_writer, &ops, source_data, seed, checksum_type).await
 }
 
 /// Signal end of sender output (no more files).
@@ -80,10 +63,32 @@ pub async fn send_file_delta_with_sums<W: AsyncWrite + Unpin>(
 
     varint::write_int(token_writer, file_index).await?;
 
+    write_tokens_and_checksum(token_writer, &ops, source_data, seed, checksum_type).await
+}
+
+/// Process a single file with compressed token output.
+pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    sig_reader: &mut R,
+    token_writer: &mut W,
+    file_index: i32,
+    source_data: &[u8],
+    seed: i32,
+    checksum_type: ChecksumType,
+    compressor: &mut Compressor,
+) -> Result<()> {
+    let sums = sum::read_sums(sig_reader).await?;
+    let ops = matcher::match_blocks(source_data, &sums, seed, checksum_type);
+
+    varint::write_int(token_writer, file_index).await?;
+
     for op in &ops {
         match op {
-            MatchOp::Data(data) => token::send_data(token_writer, data).await?,
-            MatchOp::BlockMatch(idx) => token::send_block_match(token_writer, *idx).await?,
+            MatchOp::Data(data) => {
+                token::send_data_compressed(token_writer, data, compressor).await?;
+            }
+            MatchOp::BlockMatch(idx) => {
+                token::send_block_match(token_writer, *idx).await?;
+            }
         }
     }
     token::send_eof(token_writer).await?;
@@ -97,7 +102,27 @@ pub async fn send_file_delta_with_sums<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-use tokio::io::AsyncWriteExt;
+/// Write tokens and file-level checksum.
+async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    ops: &[MatchOp],
+    source_data: &[u8],
+    seed: i32,
+    checksum_type: ChecksumType,
+) -> Result<()> {
+    for op in ops {
+        match op {
+            MatchOp::Data(data) => token::send_data(w, data).await?,
+            MatchOp::BlockMatch(idx) => token::send_block_match(w, *idx).await?,
+        }
+    }
+    token::send_eof(w).await?;
+
+    let file_sum = checksum::file_checksum(source_data, seed, checksum_type);
+    w.write_all(&file_sum).await.map_err(ProtocolError::Io)?;
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -144,15 +169,13 @@ mod tests {
     #[tokio::test]
     async fn test_send_file_delta_from_stream() {
         let basis = vec![0xABu8; 3000];
-        let source = basis.clone(); // identical
+        let source = basis.clone();
         let seed = 99;
 
-        // Encode signatures.
         let sums = sum::compute_signatures(&basis, seed, ChecksumType::Md5);
         let mut sig_buf = Vec::new();
         sum::write_sums(&mut sig_buf, &sums).await.unwrap();
 
-        // Run sender.
         let mut sig_cursor = Cursor::new(&sig_buf);
         let mut token_buf = Vec::new();
         send_file_delta(

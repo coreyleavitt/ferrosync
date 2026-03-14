@@ -116,6 +116,34 @@ pub struct TransferOptions {
     /// Timeout in seconds (`--timeout`).
     pub timeout: Option<u64>,
 
+    // --- Basis directories ---
+    /// Hard-link to files in these dirs if unchanged (`--link-dest`).
+    pub link_dest: Vec<PathBuf>,
+    /// Copy files from these dirs if unchanged (`--copy-dest`).
+    pub copy_dest: Vec<PathBuf>,
+    /// Skip files that are unchanged in these dirs (`--compare-dest`).
+    pub compare_dest: Vec<PathBuf>,
+
+    // --- Backup ---
+    /// Create backups of overwritten/deleted files (`-b` / `--backup`).
+    pub backup: bool,
+    /// Directory for backup files (`--backup-dir`).
+    pub backup_dir: Option<PathBuf>,
+    /// Suffix for backup files (`--suffix`, default "~").
+    pub suffix: String,
+
+    // --- Partial ---
+    /// Directory for storing partial transfers (`--partial-dir`).
+    pub partial_dir: Option<PathBuf>,
+
+    // --- Append ---
+    /// Append data to shorter files (`--append`).
+    pub append: bool,
+
+    // --- Files-from ---
+    /// Read file list from this path (`--files-from`).
+    pub files_from: Option<PathBuf>,
+
     // --- Misc ---
     /// Don't cross filesystem boundaries (`-x` / `--one-file-system`).
     pub one_file_system: bool,
@@ -157,6 +185,15 @@ impl Default for TransferOptions {
             max_size: None,
             min_size: None,
             timeout: None,
+            link_dest: Vec::new(),
+            copy_dest: Vec::new(),
+            compare_dest: Vec::new(),
+            backup: false,
+            backup_dir: None,
+            suffix: "~".to_string(),
+            partial_dir: None,
+            append: false,
+            files_from: None,
             one_file_system: false,
             numeric_ids: false,
             sparse: false,
@@ -360,6 +397,51 @@ impl TransferOptionsBuilder {
 
     pub fn sparse(mut self, v: bool) -> Self {
         self.opts.sparse = v;
+        self
+    }
+
+    pub fn link_dest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.link_dest.push(path.into());
+        self
+    }
+
+    pub fn copy_dest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.copy_dest.push(path.into());
+        self
+    }
+
+    pub fn compare_dest(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.compare_dest.push(path.into());
+        self
+    }
+
+    pub fn backup(mut self, v: bool) -> Self {
+        self.opts.backup = v;
+        self
+    }
+
+    pub fn backup_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.backup_dir = Some(path.into());
+        self
+    }
+
+    pub fn suffix(mut self, s: impl Into<String>) -> Self {
+        self.opts.suffix = s.into();
+        self
+    }
+
+    pub fn partial_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.partial_dir = Some(path.into());
+        self
+    }
+
+    pub fn append(mut self, v: bool) -> Self {
+        self.opts.append = v;
+        self
+    }
+
+    pub fn files_from(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.files_from = Some(path.into());
         self
     }
 

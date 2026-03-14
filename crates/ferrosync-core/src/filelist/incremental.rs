@@ -40,7 +40,7 @@ pub struct SubFileList {
 }
 
 /// State for receiving incremental file lists.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct IncrementalReceiver {
     /// NDX encoding state for reading file list index markers.
     pub ndx_state: NdxState,
@@ -48,7 +48,23 @@ pub struct IncrementalReceiver {
     pub next_ndx: i32,
 }
 
+impl Default for IncrementalReceiver {
+    fn default() -> Self {
+        Self::new(true)
+    }
+}
+
 impl IncrementalReceiver {
+    /// Create a new receiver. When `inc_recurse` is true (protocol >= 30
+    /// with CF_INC_RECURSE), the first flist starts at ndx_start=1 to match
+    /// rsync's `flist_new()` behavior.
+    pub fn new(inc_recurse: bool) -> Self {
+        Self {
+            ndx_state: NdxState::default(),
+            next_ndx: if inc_recurse { 1 } else { 0 },
+        }
+    }
+
     /// Read the next NDX marker from the stream.
     ///
     /// Returns the raw NDX value. Callers should check:
@@ -73,17 +89,36 @@ impl IncrementalReceiver {
         dir_ndx: i32,
         opts: &FileListOptions,
     ) -> Result<SubFileList> {
+        let mut delta_state = DeltaState::default();
+        self.recv_sub_flist_with_state(r, dir_ndx, opts, &mut delta_state)
+            .await
+    }
+
+    /// Receive a sub-file-list using an external delta state.
+    ///
+    /// rsync's encoder uses static delta state that carries across all
+    /// sub-flists. When reading from a real rsync sender, use a single
+    /// `DeltaState` across all sub-flist reads.
+    pub async fn recv_sub_flist_with_state<R: AsyncRead + Unpin>(
+        &mut self,
+        r: &mut R,
+        dir_ndx: i32,
+        opts: &FileListOptions,
+        delta_state: &mut DeltaState,
+    ) -> Result<SubFileList> {
         let ndx_start = self.next_ndx;
         let mut entries = Vec::new();
-        let mut delta_state = DeltaState::default();
 
         loop {
-            match recv_file_entry(r, &mut delta_state, opts).await? {
+            match recv_file_entry(r, delta_state, opts).await? {
                 ReadEntryResult::Entry(entry) => {
                     self.next_ndx += 1;
                     entries.push(entry);
                 }
                 ReadEntryResult::EndOfList { io_error } => {
+                    // Add +1 gap to match rsync's flist_new:
+                    // next flist ndx_start = prev.ndx_start + prev.used + 1
+                    self.next_ndx += 1;
                     return Ok(SubFileList {
                         dir_ndx,
                         ndx_start,

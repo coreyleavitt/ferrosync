@@ -101,15 +101,17 @@ pub async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) -> Result
 
 /// Maximum value encodable by the compact varint format.
 ///
-/// rsync's varint encoding supports up to 3 extra bytes + 4 data bits in the
-/// prefix byte = 28 bits total. Values above this must use `write_int` or
-/// `write_longint` instead.
-pub const VARINT_MAX: u32 = 0x0FFF_FFFF;
+/// Maximum value for the varint encoding.
+///
+/// rsync's varint uses up to 5 wire bytes: 1 prefix byte + 4 extra bytes.
+/// For values > 0x0FFFFFFF, the prefix byte is 0xF0 (no data bits) and all
+/// 32 bits come from the 4 extra bytes. This covers the full u32 range.
+pub const VARINT_MAX: u32 = u32::MAX;
 
 /// Read a compact variable-length 32-bit integer (protocol >= 30).
 ///
 /// The first byte's high bits encode the number of extra bytes via the
-/// `INT_BYTE_EXTRA` lookup table. Supports values up to 28 bits.
+/// `INT_BYTE_EXTRA` lookup table. Supports the full u32 range (1-5 bytes).
 pub async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
     let mut ch = [0u8; 1];
     r.read_exact(&mut ch).await?;
@@ -120,29 +122,33 @@ pub async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
         return Ok(ch as u32);
     }
 
-    // rsync's read_varint rejects extra >= 4 (overflow for a 4-byte union).
-    if extra >= 4 {
+    // rsync's varint encoding supports extra=4 (total 5 wire bytes). When
+    // extra=4, the first byte is always 0xF0 and the masked data bits are 0,
+    // so the 4 extra bytes contain the complete 32-bit value. Only reject
+    // extra > 4 (values 0xF8+ which would need > 32 data bits).
+    if extra > 4 {
         return Err(ProtocolError::InvalidVarint);
     }
 
     let mut b = [0u8; 4];
     r.read_exact(&mut b[..extra]).await?;
 
-    // The data bits from the first byte go into the highest position.
-    let bit = 1u8 << (7 - extra + 1);
-    b[extra] = ch & (bit - 1);
+    if extra < 4 {
+        // The data bits from the first byte go into the highest position.
+        let bit = 1u8 << (7 - extra + 1);
+        b[extra] = ch & (bit - 1);
+    }
+    // When extra=4, all 4 bytes already contain the full u32 value.
+    // The first byte (0xF0-0xF7) carries no additional data bits for
+    // valid varints (max 28-bit values), so we skip the assignment.
 
     Ok(u32::from_le_bytes(b))
 }
 
 /// Write a compact variable-length 32-bit integer (protocol >= 30).
 ///
-/// Values must be <= `VARINT_MAX` (0x0FFFFFFF). For larger values, use
-/// `write_int` instead.
+/// Encodes any u32 value in 1-5 bytes using prefix-coded variable length.
 pub async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()> {
-    if x > VARINT_MAX {
-        return Err(ProtocolError::InvalidVarint);
-    }
 
     let mut b = [0u8; 5]; // b[0] = prefix byte, b[1..4] = LE value bytes
     let le = x.to_le_bytes();
@@ -210,7 +216,7 @@ pub async fn read_varlong<R: AsyncRead + Unpin>(
 
     if extra > 0 {
         let extra_start = min_bytes - 1;
-        if extra_start + extra > 8 {
+        if extra_start + extra >= 8 {
             return Err(ProtocolError::InvalidVarint);
         }
         r.read_exact(&mut result[extra_start..extra_start + extra])
@@ -597,11 +603,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_varint_overflow() {
-        // Values > VARINT_MAX should be rejected.
-        let mut buf = Vec::new();
-        assert!(write_varint(&mut buf, 0x1000_0000).await.is_err());
-        assert!(write_varint(&mut buf, 0xFFFF_FFFF).await.is_err());
+    async fn test_varint_full_range() {
+        // All u32 values should encode and decode correctly.
+        let cases: &[u32] = &[0x1000_0000, 0x354b_43ea, 0xFFFF_FFFF];
+        for &val in cases {
+            let mut buf = Vec::new();
+            write_varint(&mut buf, val).await.unwrap();
+            assert_eq!(buf.len(), 5, "value {val:#x} should use 5 bytes");
+            let mut cursor = Cursor::new(&buf);
+            assert_eq!(read_varint(&mut cursor).await.unwrap(), val);
+        }
     }
 
     #[tokio::test]

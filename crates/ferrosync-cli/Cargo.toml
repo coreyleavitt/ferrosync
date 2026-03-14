@@ -11,6 +11,10 @@ repository.workspace = true
 name = "ferrosync"
 path = "src/main.rs"
 
+[[bin]]
+name = "frsync"
+path = "src/main.rs"
+
 [dependencies]
 ferrosync-core = { workspace = true }
 clap = { workspace = true }

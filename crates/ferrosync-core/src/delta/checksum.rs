@@ -58,12 +58,28 @@ pub fn checksum2(data: &[u8], seed: i32, checksum_type: ChecksumType) -> Vec<u8>
     }
 }
 
-/// Compute a whole-file checksum for final verification.
+/// Compute a whole-file transfer checksum for final verification.
 ///
-/// Same algorithm as `checksum2` but always returns the full (untruncated)
-/// digest.
-pub fn file_checksum(data: &[u8], seed: i32, checksum_type: ChecksumType) -> Vec<u8> {
-    checksum2(data, seed, checksum_type)
+/// Unlike block-level `checksum2`, the file-level transfer checksum does
+/// NOT include the seed for MD5 and modern MD4. Only old MD4 variants
+/// (not used since protocol 30) hash the seed. This matches rsync's
+/// `sum_init`/`sum_update`/`sum_end` flow.
+pub fn file_checksum(data: &[u8], _seed: i32, checksum_type: ChecksumType) -> Vec<u8> {
+    match checksum_type {
+        ChecksumType::Md4 => {
+            use md4::{Digest, Md4};
+            let mut h = Md4::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        ChecksumType::Md5 => {
+            use md5::{Digest, Md5};
+            let mut h = Md5::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        ChecksumType::None => vec![0; checksum_type.digest_len()],
+    }
 }
 
 /// State for an incremental rolling checksum that can be updated byte-by-byte
@@ -191,12 +207,18 @@ mod tests {
     }
 
     #[test]
-    fn test_file_checksum_matches_checksum2() {
+    fn test_file_checksum_no_seed() {
+        // file_checksum does NOT include the seed (unlike checksum2).
         let data = b"file contents";
         let seed = 42;
-        assert_eq!(
+        // With seed, checksum2 differs from seedless file_checksum.
+        assert_ne!(
             file_checksum(data, seed, ChecksumType::Md5),
             checksum2(data, seed, ChecksumType::Md5),
         );
+        // file_checksum is plain MD5 of data.
+        use md5::{Digest, Md5};
+        let expected = Md5::digest(data).to_vec();
+        assert_eq!(file_checksum(data, seed, ChecksumType::Md5), expected);
     }
 }

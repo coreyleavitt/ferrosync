@@ -205,6 +205,96 @@ impl FileSystem for UnixFileSystem {
         let m = std::fs::metadata(path).map_err(|e| Self::map_io_err(path, e))?;
         Ok(m.dev())
     }
+
+    fn write_file_inplace(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|e| Self::map_io_err(path, e))?;
+
+        file.write_all(data).map_err(|e| Self::map_io_err(path, e))?;
+
+        if let Some(m) = mode {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(m))
+                .map_err(|e| Self::map_io_err(path, e))?;
+        }
+        Ok(())
+    }
+
+    fn write_file_sparse(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|e| Self::map_io_err(path, e))?;
+
+        const BLOCK_SIZE: usize = 4096;
+        let mut offset = 0usize;
+
+        while offset < data.len() {
+            let end = (offset + BLOCK_SIZE).min(data.len());
+            let block = &data[offset..end];
+
+            if block.iter().all(|&b| b == 0) {
+                file.seek(SeekFrom::Current(block.len() as i64))
+                    .map_err(|e| Self::map_io_err(path, e))?;
+            } else {
+                file.write_all(block)
+                    .map_err(|e| Self::map_io_err(path, e))?;
+            }
+
+            offset = end;
+        }
+
+        // If file ends with zeros, the seek left the length short; fix it.
+        if !data.is_empty() {
+            file.set_len(data.len() as u64)
+                .map_err(|e| Self::map_io_err(path, e))?;
+        }
+
+        if let Some(m) = mode {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(m))
+                .map_err(|e| Self::map_io_err(path, e))?;
+        }
+        Ok(())
+    }
+
+    fn append_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| Self::map_io_err(path, e))?;
+
+        file.write_all(data).map_err(|e| Self::map_io_err(path, e))?;
+
+        if let Some(m) = mode {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(m))
+                .map_err(|e| Self::map_io_err(path, e))?;
+        }
+        Ok(())
+    }
+
+    fn hard_link(&self, target: &Path, link_path: &Path) -> Result<()> {
+        std::fs::hard_link(target, link_path).map_err(|e| Self::map_io_err(link_path, e))
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        std::fs::rename(from, to).map_err(|e| Self::map_io_err(from, e))
+    }
+
+    fn copy_file(&self, src: &Path, dst: &Path) -> Result<()> {
+        std::fs::copy(src, dst)
+            .map_err(|e| Self::map_io_err(src, e))
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]

@@ -66,6 +66,30 @@ impl Default for FileListOptions {
     }
 }
 
+impl FileListOptions {
+    /// Create codec options from a negotiated protocol and transfer options.
+    ///
+    /// This bridges the handshake output to the file list codec, ensuring
+    /// protocol version-specific behavior is correctly applied.
+    pub fn from_protocol(
+        proto: &crate::protocol::handshake::NegotiatedProtocol,
+        opts: &crate::options::TransferOptions,
+    ) -> Self {
+        Self {
+            protocol_version: proto.version,
+            xfer_flags_as_varint: proto.varint_flist_flags,
+            preserve_uid: opts.preserve_owner,
+            preserve_gid: opts.preserve_group || opts.preserve_owner,
+            preserve_devices: opts.preserve_devices,
+            preserve_specials: opts.preserve_specials,
+            preserve_links: opts.preserve_links,
+            preserve_hard_links: false,
+            always_checksum: opts.checksum_mode,
+            checksum_len: proto.checksum.digest_len(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Delta state shared between encoder and decoder
 // ---------------------------------------------------------------------------
@@ -154,6 +178,16 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     } else {
         read_byte(r).await? as usize
     };
+
+    // Guard against malicious name lengths (MAXPATHLEN is typically 4096).
+    const MAX_NAME_LEN: usize = 64 * 1024;
+    if prefix_len + suffix_len > MAX_NAME_LEN {
+        return Err(ProtocolError::WireValueOutOfRange {
+            field: "filename_len",
+            value: (prefix_len + suffix_len) as i64,
+            max: MAX_NAME_LEN as i64,
+        });
+    }
 
     let mut name = Vec::with_capacity(prefix_len + suffix_len);
     if prefix_len > 0 {
@@ -249,6 +283,13 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     // --- Symlink target ---
     let link_target = if (mode & S_IFMT) == WIRE_S_IFLNK && opts.preserve_links {
         let link_len = read_varint30(r, pv).await? as usize;
+        if link_len > MAX_NAME_LEN {
+            return Err(ProtocolError::WireValueOutOfRange {
+                field: "symlink_target_len",
+                value: link_len as i64,
+                max: MAX_NAME_LEN as i64,
+            });
+        }
         let mut buf = vec![0u8; link_len];
         r.read_exact(&mut buf).await?;
         buf

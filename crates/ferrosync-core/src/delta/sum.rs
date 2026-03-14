@@ -114,7 +114,7 @@ pub fn compute_signatures(
         offset = end;
     }
 
-    let remainder = if data.len() % blength as usize == 0 {
+    let remainder = if data.len().is_multiple_of(blength as usize) {
         blength
     } else {
         (data.len() % blength as usize) as i32
@@ -174,10 +174,30 @@ pub async fn write_sums<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Maximum block count from the wire (16M blocks = ~16 TiB at 1 MiB/block).
+const MAX_BLOCK_COUNT: i32 = 16 * 1024 * 1024;
+
 /// Read block signatures from the wire.
 pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
     let head = read_sum_head(r).await?;
-    let mut sums = Vec::with_capacity(head.count.max(0) as usize);
+
+    // Validate wire values to prevent OOM from crafted input.
+    if head.count < 0 || head.count > MAX_BLOCK_COUNT {
+        return Err(ProtocolError::WireValueOutOfRange {
+            field: "sum_count",
+            value: head.count as i64,
+            max: MAX_BLOCK_COUNT as i64,
+        });
+    }
+    if head.s2length < 0 || head.s2length > 64 {
+        return Err(ProtocolError::WireValueOutOfRange {
+            field: "sum_s2length",
+            value: head.s2length as i64,
+            max: 64,
+        });
+    }
+
+    let mut sums = Vec::with_capacity(head.count as usize);
 
     for _ in 0..head.count {
         let mut sum1_buf = [0u8; 4];

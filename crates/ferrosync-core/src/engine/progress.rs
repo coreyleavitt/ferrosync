@@ -47,6 +47,15 @@ pub enum ProgressEvent {
         /// File name.
         name: Vec<u8>,
     },
+    /// Itemized change description for a file (`--itemize-changes`).
+    FileItemized {
+        /// File index.
+        index: i32,
+        /// File name.
+        name: Vec<u8>,
+        /// Itemized change flags.
+        changes: ItemizedChanges,
+    },
     /// Overall transfer progress.
     OverallProgress {
         /// Files completed so far.
@@ -58,6 +67,48 @@ pub enum ProgressEvent {
         /// Total bytes to transfer.
         bytes_total: u64,
     },
+}
+
+/// Itemized change flags for `--itemize-changes` (`-i`).
+///
+/// Format matches rsync's 11-character itemize string: `YXcstpoguax`.
+#[derive(Debug, Clone)]
+pub struct ItemizedChanges {
+    /// Update type: `>` (receiving), `<` (sending), `c` (creating),
+    /// `.` (unchanged attributes), `*` (deleting).
+    pub update_type: char,
+    /// File type: `f` (file), `d` (directory), `L` (symlink),
+    /// `D` (device), `S` (special).
+    pub file_type: char,
+    /// Checksum differs.
+    pub checksum_changed: bool,
+    /// Size differs.
+    pub size_changed: bool,
+    /// Timestamp differs.
+    pub time_changed: bool,
+    /// Permissions differ.
+    pub perms_changed: bool,
+    /// Owner differs.
+    pub owner_changed: bool,
+    /// Group differs.
+    pub group_changed: bool,
+}
+
+impl std::fmt::Display for ItemizedChanges {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}...",
+            self.update_type,
+            self.file_type,
+            if self.checksum_changed { 'c' } else { '.' },
+            if self.size_changed { 's' } else { '.' },
+            if self.time_changed { 't' } else { '.' },
+            if self.perms_changed { 'p' } else { '.' },
+            if self.owner_changed { 'o' } else { '.' },
+            if self.group_changed { 'g' } else { '.' },
+        )
+    }
 }
 
 /// Callback type for progress events.
