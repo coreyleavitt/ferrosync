@@ -872,7 +872,10 @@ fn sync_files(
             .map_err(|e| FilesystemError::new_err(format!("failed to create runtime: {e}")))?;
 
         rt.block_on(async {
+            #[cfg(unix)]
             let fs = ferrosync_core::fs::unix::UnixFileSystem::new();
+            #[cfg(windows)]
+            let fs = ferrosync_core::fs::windows::WindowsFileSystem::new();
             let mut progress = match callback {
                 Some(cb) => ProgressTracker::with_callback(cb),
                 None => ProgressTracker::new(),
