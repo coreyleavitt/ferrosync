@@ -4,7 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "ferrosync"
-requires-python = ">=3.12"
+dynamic = ["version"]
+requires-python = ">=3.11"
 description = "Python bindings for ferrosync - rsync wire protocol in Rust"
 license = { text = "MIT OR Apache-2.0" }
 classifiers = [

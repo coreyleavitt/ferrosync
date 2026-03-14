@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ferrosync/ferrosync"
 
@@ -33,11 +33,15 @@ md4 = "0.10"
 # Compression
 flate2 = "1"
 
+# SSH transport (native, pure Rust)
+russh = "0.57"
+ssh2-config = "0.7"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # Python bindings
-pyo3 = { version = "0.23", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 
 # Testing
 tempfile = "3"

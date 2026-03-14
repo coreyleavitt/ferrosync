@@ -7,6 +7,9 @@
 #[cfg(unix)]
 pub mod unix;
 
+#[cfg(windows)]
+pub mod windows;
+
 mod metadata;
 
 pub use metadata::FileMetadata;
@@ -68,6 +71,33 @@ pub trait FileSystem: Send + Sync {
 
     /// Get the device ID for a path (for `--one-file-system`).
     fn device_id(&self, path: &Path) -> Result<u64>;
+
+    /// Write data to a file in-place (overwrites directly, no atomic rename).
+    /// Used with `--inplace`. Preserves the file's inode.
+    fn write_file_inplace(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+        self.write_file(path, data, mode)
+    }
+
+    /// Write data to a file with sparse optimization.
+    /// Zero-filled blocks are converted to file holes.
+    fn write_file_sparse(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+        self.write_file(path, data, mode)
+    }
+
+    /// Append data to the end of a file (creating it if needed).
+    fn append_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+        // Default: just write the full data (implementations can optimize).
+        self.write_file(path, data, mode)
+    }
+
+    /// Create a hard link from `link_path` pointing to `target`.
+    fn hard_link(&self, target: &Path, link_path: &Path) -> Result<()>;
+
+    /// Rename/move a file or directory.
+    fn rename(&self, from: &Path, to: &Path) -> Result<()>;
+
+    /// Copy a file from `src` to `dst`.
+    fn copy_file(&self, src: &Path, dst: &Path) -> Result<()>;
 }
 
 /// A directory entry returned by [`FileSystem::read_dir`].

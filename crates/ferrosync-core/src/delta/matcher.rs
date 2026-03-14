@@ -143,7 +143,7 @@ pub fn apply_ops(basis: &[u8], ops: &[MatchOp], blength: usize, remainder: usize
             MatchOp::BlockMatch(idx) => {
                 let idx = *idx as usize;
                 let offset = idx * blength;
-                let len = if idx == block_count - 1 && remainder > 0 && remainder < blength {
+                let len = if block_count > 0 && idx == block_count - 1 && remainder > 0 && remainder < blength {
                     remainder
                 } else {
                     blength

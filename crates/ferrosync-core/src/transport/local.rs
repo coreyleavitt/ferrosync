@@ -139,6 +139,7 @@ async fn monitor_child(mut child: Child) {
             } else {
                 String::new()
             };
+            eprintln!("[rsync] exit code={:?}, stderr: {}", s.code(), stderr.trim());
             tracing::warn!(
                 code = s.code(),
                 stderr = %stderr.trim(),

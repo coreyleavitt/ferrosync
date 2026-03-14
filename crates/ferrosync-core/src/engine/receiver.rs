@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::delta::checksum;
 use crate::delta::token::{self, Token};
 use crate::error::ProtocolError;
+use crate::protocol::compress::Decompressor;
 use crate::protocol::handshake::ChecksumType;
 use crate::protocol::varint;
 
@@ -52,7 +53,7 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     } else {
         0
     };
-    let remainder = if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
+    let remainder = if blength > 0 && !basis_data.is_empty() && !basis_data.len().is_multiple_of(blength) {
         basis_data.len() % blength
     } else {
         blength
@@ -67,7 +68,7 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
             Token::BlockMatch(idx) => {
                 let idx = idx as usize;
                 let offset = idx * blength;
-                let len = if idx == block_count - 1 && remainder > 0 && remainder < blength {
+                let len = if block_count > 0 && idx == block_count - 1 && remainder > 0 && remainder < blength {
                     remainder
                 } else {
                     blength
@@ -82,6 +83,69 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     }
 
     // Read and verify file-level checksum.
+    let digest_len = checksum_type.digest_len();
+    let mut received_checksum = vec![0u8; digest_len];
+    r.read_exact(&mut received_checksum)
+        .await
+        .map_err(ProtocolError::Io)?;
+
+    let computed_checksum = checksum::file_checksum(&output, seed, checksum_type);
+    if received_checksum != computed_checksum {
+        return Err(ProtocolError::ChecksumMismatch {
+            expected: hex_encode(&received_checksum),
+            actual: hex_encode(&computed_checksum),
+        });
+    }
+
+    Ok(output)
+}
+
+/// Receive tokens with decompression and reconstruct a file.
+///
+/// Same as [`recv_file_delta`] but decompresses data tokens using the
+/// provided decompressor.
+pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
+    r: &mut R,
+    basis_data: &[u8],
+    blength: usize,
+    seed: i32,
+    checksum_type: ChecksumType,
+    decompressor: &mut Decompressor,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let block_count = if blength > 0 && !basis_data.is_empty() {
+        basis_data.len().div_ceil(blength)
+    } else {
+        0
+    };
+    let remainder = if blength > 0 && !basis_data.is_empty() && !basis_data.len().is_multiple_of(blength) {
+        basis_data.len() % blength
+    } else {
+        blength
+    };
+
+    loop {
+        match token::recv_token_compressed(r, decompressor).await? {
+            Token::Data(data) => {
+                output.extend_from_slice(&data);
+            }
+            Token::BlockMatch(idx) => {
+                let idx = idx as usize;
+                let offset = idx * blength;
+                let len = if block_count > 0 && idx == block_count - 1 && remainder > 0 && remainder < blength {
+                    remainder
+                } else {
+                    blength
+                };
+                let end = (offset + len).min(basis_data.len());
+                if offset < basis_data.len() {
+                    output.extend_from_slice(&basis_data[offset..end]);
+                }
+            }
+            Token::EndOfFile => break,
+        }
+    }
+
     let digest_len = checksum_type.digest_len();
     let mut received_checksum = vec![0u8; digest_len];
     r.read_exact(&mut received_checksum)
@@ -120,15 +184,10 @@ mod tests {
         let seed = 42;
         let sums = sum::compute_signatures(b"", seed, ChecksumType::Md5);
 
-        // Sender writes tokens.
+        // Sender writes: file_index + tokens + checksum.
         let mut buf = Vec::new();
         sender::send_file_delta_with_sums(
-            &mut buf,
-            0,
-            source,
-            &sums,
-            seed,
-            ChecksumType::Md5,
+            &mut buf, 0, source, &sums, seed, ChecksumType::Md5,
         )
         .await
         .unwrap();
@@ -138,15 +197,10 @@ mod tests {
         let idx = recv_file_index(&mut cursor).await.unwrap();
         assert_eq!(idx, Some(0));
 
-        let result = recv_file_delta(
-            &mut cursor,
-            b"",
-            sums.head.blength as usize,
-            seed,
-            ChecksumType::Md5,
-        )
-        .await
-        .unwrap();
+        let blength = if sums.head.blength > 0 { sums.head.blength as usize } else { 700 };
+        let result = recv_file_delta(&mut cursor, b"", blength, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
 
         assert_eq!(result, source);
     }
@@ -159,12 +213,7 @@ mod tests {
 
         let mut buf = Vec::new();
         sender::send_file_delta_with_sums(
-            &mut buf,
-            0,
-            &data,
-            &sums,
-            seed,
-            ChecksumType::Md5,
+            &mut buf, 0, &data, &sums, seed, ChecksumType::Md5,
         )
         .await
         .unwrap();
@@ -173,15 +222,10 @@ mod tests {
         let idx = recv_file_index(&mut cursor).await.unwrap();
         assert_eq!(idx, Some(0));
 
-        let result = recv_file_delta(
-            &mut cursor,
-            &data,
-            sums.head.blength as usize,
-            seed,
-            ChecksumType::Md5,
-        )
-        .await
-        .unwrap();
+        let blength = if sums.head.blength > 0 { sums.head.blength as usize } else { 700 };
+        let result = recv_file_delta(&mut cursor, &data, blength, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
 
         assert_eq!(result, data);
     }
@@ -201,12 +245,7 @@ mod tests {
 
         let mut buf = Vec::new();
         sender::send_file_delta_with_sums(
-            &mut buf,
-            3,
-            &source,
-            &sums,
-            seed,
-            ChecksumType::Md5,
+            &mut buf, 3, &source, &sums, seed, ChecksumType::Md5,
         )
         .await
         .unwrap();
@@ -215,15 +254,10 @@ mod tests {
         let idx = recv_file_index(&mut cursor).await.unwrap();
         assert_eq!(idx, Some(3));
 
-        let result = recv_file_delta(
-            &mut cursor,
-            &basis,
-            sums.head.blength as usize,
-            seed,
-            ChecksumType::Md5,
-        )
-        .await
-        .unwrap();
+        let blength = if sums.head.blength > 0 { sums.head.blength as usize } else { 700 };
+        let result = recv_file_delta(&mut cursor, &basis, blength, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
 
         assert_eq!(result, source);
     }
@@ -233,12 +267,11 @@ mod tests {
         let source = b"test data";
         let seed = 42;
 
-        // Build valid tokens but corrupt the checksum.
+        // Build valid tokens but corrupt the checksum (no sum head in manual construction).
         let mut buf = Vec::new();
         crate::protocol::varint::write_int(&mut buf, 0).await.unwrap();
         token::send_data(&mut buf, source).await.unwrap();
         token::send_eof(&mut buf).await.unwrap();
-        // Write wrong checksum.
         let digest_len = ChecksumType::Md5.digest_len();
         buf.extend_from_slice(&vec![0xFF; digest_len]);
 

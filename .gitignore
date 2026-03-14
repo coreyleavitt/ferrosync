@@ -29,3 +29,8 @@ dist/
 
 # Environment
 .env
+
+# Claude Code
+CLAUDE.md
+.claude/
+.mcp.json

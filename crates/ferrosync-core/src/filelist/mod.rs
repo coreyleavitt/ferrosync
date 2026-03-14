@@ -9,6 +9,7 @@
 
 pub mod codec;
 pub mod entry;
+pub mod exchange;
 pub mod incremental;
 pub mod sort;
 pub mod xmit;

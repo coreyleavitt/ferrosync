@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::delta::sum;
 use crate::error::ProtocolError;
+use crate::protocol::compress::{Compressor, Decompressor};
 use crate::protocol::handshake::ChecksumType;
 
 use super::generator;
@@ -104,7 +105,7 @@ pub async fn transfer_file(
             return Ok(Vec::new());
         }
 
-        // Compute block length from basis to know how to interpret block refs.
+        // Compute block length from basis (receiver already knows the params).
         let sums = sum::compute_signatures(&recv_basis, recv_seed, recv_ct);
         let blength = if sums.head.blength > 0 {
             sums.head.blength as usize
@@ -118,7 +119,115 @@ pub async fn transfer_file(
     // Wait for all tasks.
     let (gen_result, send_result, recv_result) =
         tokio::try_join!(gen_handle, send_handle, recv_handle)
-            .map_err(|e| ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| ProtocolError::Io(std::io::Error::other(e)))?;
+
+    gen_result?;
+    send_result?;
+    recv_result
+}
+
+/// Transfer a single file with compression on the sender->receiver channel.
+///
+/// Same as [`transfer_file`] but compresses delta tokens with the given
+/// compression level (1-9).
+pub async fn transfer_file_compressed(
+    source_data: &[u8],
+    basis_data: &[u8],
+    seed: i32,
+    checksum_type: ChecksumType,
+    compress_level: u32,
+) -> Result<Vec<u8>> {
+    let (gen_write, gen_read) = tokio::io::duplex(64 * 1024);
+    let (send_write, send_read) = tokio::io::duplex(64 * 1024);
+
+    let gen_seed = seed;
+    let gen_ct = checksum_type;
+    let basis_owned = basis_data.to_vec();
+    let source_owned = source_data.to_vec();
+
+    let gen_handle = tokio::spawn(async move {
+        let mut w = gen_write;
+        let result =
+            generator::send_file_signatures(&mut w, 0, &basis_owned, gen_seed, gen_ct).await;
+        if let Err(e) = &result {
+            tracing::error!("generator error: {e}");
+        }
+        generator::send_generator_done(&mut w).await.ok();
+        w.shutdown().await.ok();
+        result
+    });
+
+    let send_seed = seed;
+    let send_ct = checksum_type;
+    let send_handle = tokio::spawn(async move {
+        let mut r = gen_read;
+        let mut w = send_write;
+        let mut compressor = Compressor::new(compress_level);
+
+        let result = async {
+            let idx = generator::recv_file_index(&mut r).await?;
+            if idx.is_none() {
+                sender::send_sender_done(&mut w).await?;
+                return Ok(());
+            }
+
+            sender::send_file_delta_compressed(
+                &mut r,
+                &mut w,
+                0,
+                &source_owned,
+                send_seed,
+                send_ct,
+                &mut compressor,
+            )
+            .await?;
+
+            sender::send_sender_done(&mut w).await?;
+            Ok::<(), ProtocolError>(())
+        }
+        .await;
+
+        if let Err(e) = &result {
+            tracing::error!("sender error: {e}");
+        }
+        w.shutdown().await.ok();
+        result
+    });
+
+    let recv_basis = basis_data.to_vec();
+    let recv_seed = seed;
+    let recv_ct = checksum_type;
+    let recv_handle = tokio::spawn(async move {
+        let mut r = send_read;
+        let mut decompressor = Decompressor::new();
+
+        let idx = receiver::recv_file_index(&mut r).await?;
+        if idx.is_none() {
+            return Ok(Vec::new());
+        }
+
+        // Compute block length from basis (receiver already knows the params).
+        let sums = sum::compute_signatures(&recv_basis, recv_seed, recv_ct);
+        let blength = if sums.head.blength > 0 {
+            sums.head.blength as usize
+        } else {
+            700
+        };
+
+        receiver::recv_file_delta_compressed(
+            &mut r,
+            &recv_basis,
+            blength,
+            recv_seed,
+            recv_ct,
+            &mut decompressor,
+        )
+        .await
+    });
+
+    let (gen_result, send_result, recv_result) =
+        tokio::try_join!(gen_handle, send_handle, recv_handle)
+            .map_err(|e| ProtocolError::Io(std::io::Error::other(e)))?;
 
     gen_result?;
     send_result?;
@@ -154,7 +263,6 @@ mod tests {
             basis.push((i % 256) as u8);
         }
         let mut source = basis.clone();
-        // Modify a few bytes.
         source[5000] = 0xFF;
         source[5001] = 0xFE;
         source[5002] = 0xFD;
@@ -186,7 +294,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_transfer_large_file() {
-        // ~100KB file to test chunking.
         let mut data = Vec::with_capacity(100_000);
         for i in 0..100_000 {
             data.push((i * 37 % 256) as u8);
@@ -201,12 +308,46 @@ mod tests {
     async fn test_transfer_appended_data() {
         let basis = vec![42u8; 5000];
         let mut source = basis.clone();
-        source.extend_from_slice(&[0xBB; 1000]); // append data
+        source.extend_from_slice(&[0xBB; 1000]);
 
         let result = transfer_file(&source, &basis, 10, ChecksumType::Md5)
             .await
             .unwrap();
         assert_eq!(result, source);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_new_file() {
+        let source = b"Hello, world! This is a brand new file with some data.";
+        let result = transfer_file_compressed(source, b"", 42, ChecksumType::Md5, 6)
+            .await
+            .unwrap();
+        assert_eq!(result, source);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_modified_file() {
+        let mut basis = Vec::new();
+        for i in 0..10000 {
+            basis.push((i % 256) as u8);
+        }
+        let mut source = basis.clone();
+        source[5000] = 0xFF;
+        source[5001] = 0xFE;
+
+        let result = transfer_file_compressed(&source, &basis, 7, ChecksumType::Md5, 6)
+            .await
+            .unwrap();
+        assert_eq!(result, source);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_compressed_identical() {
+        let data = vec![0xABu8; 5000];
+        let result = transfer_file_compressed(&data, &data, 99, ChecksumType::Md5, 6)
+            .await
+            .unwrap();
+        assert_eq!(result, data);
     }
 
     #[tokio::test]

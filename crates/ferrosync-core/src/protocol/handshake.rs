@@ -309,9 +309,15 @@ where
     }
 
     // Step 2: Compatibility flags (proto >= 30).
+    //
+    // rsync 3.2+ (proto 32) sends compat_flags as a varint to support
+    // flags above bit 7. Even when the negotiated version is < 32, the
+    // server may still use varint encoding (its code path is based on
+    // its own version, not the negotiated one). Using read_varint is
+    // safe for all proto >= 30 since values < 128 encode identically
+    // as both a single byte and a varint.
     let mut flags = 0u32;
     if version >= 30 {
-        // The server sends compat_flags; client reads.
         flags = varint::read_varint(r).await?;
     }
 
@@ -406,6 +412,8 @@ where
     }
 
     // Step 2: Build and send compat_flags (proto >= 30).
+    //
+    // Always use varint encoding for consistency with modern rsync.
     let mut flags = 0u32;
     if version >= 30 {
         flags = build_compat_flags_from_client_info(client_info);
@@ -601,7 +609,7 @@ mod tests {
         // Server sends its protocol version.
         varint::write_int(&mut server_output, 31).await.unwrap();
 
-        // Server sends compat_flags (all our default flags).
+        // Server sends compat_flags as varint.
         let flags = compat_flags::DEFAULT | compat_flags::INC_RECURSE;
         varint::write_varint(&mut server_output, flags).await.unwrap();
 

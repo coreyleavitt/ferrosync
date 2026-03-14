@@ -7,7 +7,10 @@
 //! - **SSH:** Spawn `ssh <host> rsync --server ...` (Phase 6).
 //! - **Daemon:** TCP connection to port 873 (Phase 6).
 
+pub mod daemon;
 pub mod local;
+pub mod ssh;
+pub mod ssh_config;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 

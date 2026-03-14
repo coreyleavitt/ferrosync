@@ -25,6 +25,13 @@ pub enum ProtocolError {
     #[error("invalid varint encoding")]
     InvalidVarint,
 
+    #[error("wire value out of range: {field} = {value} (max {max})")]
+    WireValueOutOfRange {
+        field: &'static str,
+        value: i64,
+        max: i64,
+    },
+
     #[error("checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 
@@ -65,6 +72,12 @@ pub enum TransportError {
 
     #[error("command not found: {command}")]
     CommandNotFound { command: String },
+
+    #[error("host key verification failed for {host}")]
+    HostKeyMismatch { host: String },
+
+    #[error("host key not found for {host} (strict mode)")]
+    HostKeyNotFound { host: String },
 
     #[error("transport I/O error: {0}")]
     Io(#[from] std::io::Error),
