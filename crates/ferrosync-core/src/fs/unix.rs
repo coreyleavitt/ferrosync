@@ -117,52 +117,13 @@ impl FileSystem for UnixFileSystem {
     }
 
     fn set_mtime(&self, path: &Path, mtime: i64, mtime_nsec: u32) -> Result<()> {
-        let times = [
-            // atime: preserve by using current
-            libc::timespec {
-                tv_sec: 0,
-                tv_nsec: libc::UTIME_OMIT,
-            },
-            // mtime: set to desired value
-            libc::timespec {
-                tv_sec: mtime,
-                tv_nsec: mtime_nsec as i64,
-            },
-        ];
-
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
-            path: path.to_path_buf(),
-            source: std::sync::Arc::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path contains null byte",
-            )),
-        })?;
-
-        let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
-        if ret != 0 {
-            return Err(Self::map_io_err(path, std::io::Error::last_os_error()));
-        }
-        Ok(())
+        let ft = filetime::FileTime::from_unix_time(mtime, mtime_nsec);
+        filetime::set_file_mtime(path, ft).map_err(|e| Self::map_io_err(path, e))
     }
 
     fn set_owner(&self, path: &Path, uid: u32, gid: u32) -> Result<()> {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
-            path: path.to_path_buf(),
-            source: std::sync::Arc::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path contains null byte",
-            )),
-        })?;
-
-        let ret = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
-        if ret != 0 {
-            return Err(Self::map_io_err(path, std::io::Error::last_os_error()));
-        }
-        Ok(())
+        std::os::unix::fs::chown(path, Some(uid), Some(gid))
+            .map_err(|e| Self::map_io_err(path, e))
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
