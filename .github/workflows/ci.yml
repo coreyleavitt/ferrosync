@@ -87,28 +87,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # Cross-compile check for platforms where we can't run tests
+  # Cross-compile check for aarch64 Linux (no native runner available)
   cross-check:
-    name: Cross-compile check (${{ matrix.target }})
+    name: Cross-compile check (aarch64-linux)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-pc-windows-gnu
-          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: aarch64-unknown-linux-gnu
       - name: Install cross-compile toolchain
-        if: matrix.target == 'x86_64-pc-windows-gnu'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
-      - name: Install cross-compile toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-      - run: cargo check --workspace --target ${{ matrix.target }}
+      - run: cargo check --workspace --target aarch64-unknown-linux-gnu
