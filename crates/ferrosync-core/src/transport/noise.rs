@@ -201,24 +201,22 @@ impl AsyncRead for NoiseReader {
         // Decrypt the message.
         let mut plaintext = vec![0u8; msg_len];
         match me.noise.try_lock() {
-            Ok(mut transport) => {
-                match transport.read_message(&encrypted, &mut plaintext) {
-                    Ok(len) => {
-                        plaintext.truncate(len);
-                        let to_copy = len.min(buf.remaining());
-                        buf.put_slice(&plaintext[..to_copy]);
-                        if to_copy < len {
-                            me.read_buf = plaintext;
-                            me.read_pos = to_copy;
-                        }
-                        Poll::Ready(Ok(()))
+            Ok(mut transport) => match transport.read_message(&encrypted, &mut plaintext) {
+                Ok(len) => {
+                    plaintext.truncate(len);
+                    let to_copy = len.min(buf.remaining());
+                    buf.put_slice(&plaintext[..to_copy]);
+                    if to_copy < len {
+                        me.read_buf = plaintext;
+                        me.read_pos = to_copy;
                     }
-                    Err(e) => Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("Noise decrypt error: {e}"),
-                    ))),
+                    Poll::Ready(Ok(()))
                 }
-            }
+                Err(e) => Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Noise decrypt error: {e}"),
+                ))),
+            },
             Err(_) => {
                 cx.waker().wake_by_ref();
                 Poll::Pending
@@ -278,17 +276,11 @@ impl AsyncWrite for NoiseWriter {
         }
     }
 
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().tcp_writer).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.get_mut().tcp_writer).poll_shutdown(cx)
     }
 }
@@ -308,10 +300,7 @@ impl NoiseDaemonTransport {
     }
 
     /// Perform the Noise handshake as the initiator.
-    async fn handshake(
-        config: &NoiseConfig,
-        tcp: &mut TcpStream,
-    ) -> Result<TransportState> {
+    async fn handshake(config: &NoiseConfig, tcp: &mut TcpStream) -> Result<TransportState> {
         let mut builder = Builder::new(config.pattern.protocol_name().parse().map_err(|e| {
             TransportError::ConnectionFailed {
                 message: format!("invalid Noise protocol name: {e}"),
@@ -327,11 +316,12 @@ impl NoiseDaemonTransport {
             builder = builder.psk(0, psk);
         }
 
-        let mut handshake = builder.build_initiator().map_err(|e| {
-            TransportError::ConnectionFailed {
-                message: format!("Noise handshake init failed: {e}"),
-            }
-        })?;
+        let mut handshake =
+            builder
+                .build_initiator()
+                .map_err(|e| TransportError::ConnectionFailed {
+                    message: format!("Noise handshake init failed: {e}"),
+                })?;
 
         let mut buf = vec![0u8; MAX_NOISE_MSG_LEN];
 
@@ -367,11 +357,12 @@ impl NoiseDaemonTransport {
             }
         }
 
-        let transport = handshake.into_transport_mode().map_err(|e| {
-            TransportError::ConnectionFailed {
-                message: format!("Noise transport mode transition failed: {e}"),
-            }
-        })?;
+        let transport =
+            handshake
+                .into_transport_mode()
+                .map_err(|e| TransportError::ConnectionFailed {
+                    message: format!("Noise transport mode transition failed: {e}"),
+                })?;
 
         Ok(transport)
     }
@@ -389,20 +380,17 @@ impl Transport for NoiseDaemonTransport {
                 "connecting via Noise protocol"
             );
 
-            let mut tcp = tokio::time::timeout(
-                self.config.connect_timeout,
-                TcpStream::connect(&addr),
-            )
-            .await
-            .map_err(|_| TransportError::ConnectionFailed {
-                message: format!("connection to {addr} timed out"),
-            })?
-            .map_err(|e| TransportError::ConnectionFailed {
-                message: format!("TCP connection to {addr} failed: {e}"),
-            })?;
+            let mut tcp =
+                tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(&addr))
+                    .await
+                    .map_err(|_| TransportError::ConnectionFailed {
+                        message: format!("connection to {addr} timed out"),
+                    })?
+                    .map_err(|e| TransportError::ConnectionFailed {
+                        message: format!("TCP connection to {addr} failed: {e}"),
+                    })?;
 
-            let transport_state =
-                Self::handshake(&self.config, &mut tcp).await?;
+            let transport_state = Self::handshake(&self.config, &mut tcp).await?;
 
             tracing::debug!(addr = %addr, "Noise handshake completed");
 
@@ -474,14 +462,9 @@ mod tests {
     #[test]
     fn test_noise_builder_xx() {
         let (private_key, _public_key) = generate_keypair();
-        let result = Builder::new(
-            NoisePattern::XX
-                .protocol_name()
-                .parse()
-                .unwrap(),
-        )
-        .local_private_key(&private_key)
-        .build_initiator();
+        let result = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
+            .local_private_key(&private_key)
+            .build_initiator();
         assert!(result.is_ok());
     }
 
@@ -490,15 +473,10 @@ mod tests {
         let (init_priv, _) = generate_keypair();
         let (_, remote_pub) = generate_keypair();
 
-        let result = Builder::new(
-            NoisePattern::IK
-                .protocol_name()
-                .parse()
-                .unwrap(),
-        )
-        .local_private_key(&init_priv)
-        .remote_public_key(&remote_pub)
-        .build_initiator();
+        let result = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
+            .local_private_key(&init_priv)
+            .remote_public_key(&remote_pub)
+            .build_initiator();
         assert!(result.is_ok());
     }
 
@@ -509,19 +487,15 @@ mod tests {
         let (init_priv, _init_pub) = generate_keypair();
         let (resp_priv, _resp_pub) = generate_keypair();
 
-        let mut initiator = Builder::new(
-            NoisePattern::XX.protocol_name().parse().unwrap(),
-        )
-        .local_private_key(&init_priv)
-        .build_initiator()
-        .unwrap();
+        let mut initiator = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
+            .local_private_key(&init_priv)
+            .build_initiator()
+            .unwrap();
 
-        let mut responder = Builder::new(
-            NoisePattern::XX.protocol_name().parse().unwrap(),
-        )
-        .local_private_key(&resp_priv)
-        .build_responder()
-        .unwrap();
+        let mut responder = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
+            .local_private_key(&resp_priv)
+            .build_responder()
+            .unwrap();
 
         let mut buf = vec![0u8; MAX_NOISE_MSG_LEN];
         let mut msg = vec![0u8; MAX_NOISE_MSG_LEN];
@@ -546,21 +520,13 @@ mod tests {
 
         // Test data exchange.
         let plaintext = b"hello from initiator";
-        let len = init_transport
-            .write_message(plaintext, &mut buf)
-            .unwrap();
-        let len = resp_transport
-            .read_message(&buf[..len], &mut msg)
-            .unwrap();
+        let len = init_transport.write_message(plaintext, &mut buf).unwrap();
+        let len = resp_transport.read_message(&buf[..len], &mut msg).unwrap();
         assert_eq!(&msg[..len], plaintext);
 
         let reply = b"hello from responder";
-        let len = resp_transport
-            .write_message(reply, &mut buf)
-            .unwrap();
-        let len = init_transport
-            .read_message(&buf[..len], &mut msg)
-            .unwrap();
+        let len = resp_transport.write_message(reply, &mut buf).unwrap();
+        let len = init_transport.read_message(&buf[..len], &mut msg).unwrap();
         assert_eq!(&msg[..len], reply);
     }
 
@@ -570,20 +536,16 @@ mod tests {
         let (init_priv, _init_pub) = generate_keypair();
         let (resp_priv, resp_pub) = generate_keypair();
 
-        let mut initiator = Builder::new(
-            NoisePattern::IK.protocol_name().parse().unwrap(),
-        )
-        .local_private_key(&init_priv)
-        .remote_public_key(&resp_pub)
-        .build_initiator()
-        .unwrap();
+        let mut initiator = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
+            .local_private_key(&init_priv)
+            .remote_public_key(&resp_pub)
+            .build_initiator()
+            .unwrap();
 
-        let mut responder = Builder::new(
-            NoisePattern::IK.protocol_name().parse().unwrap(),
-        )
-        .local_private_key(&resp_priv)
-        .build_responder()
-        .unwrap();
+        let mut responder = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
+            .local_private_key(&resp_priv)
+            .build_responder()
+            .unwrap();
 
         let mut buf = vec![0u8; MAX_NOISE_MSG_LEN];
         let mut msg = vec![0u8; MAX_NOISE_MSG_LEN];
@@ -618,12 +580,10 @@ mod tests {
         let server_handle = tokio::spawn(async move {
             let (mut reader, mut writer) = tokio::io::split(server_stream);
 
-            let mut responder = Builder::new(
-                NoisePattern::XX.protocol_name().parse().unwrap(),
-            )
-            .local_private_key(&resp_priv)
-            .build_responder()
-            .unwrap();
+            let mut responder = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
+                .local_private_key(&resp_priv)
+                .build_responder()
+                .unwrap();
 
             let mut buf = vec![0u8; MAX_NOISE_MSG_LEN];
 
@@ -639,10 +599,7 @@ mod tests {
 
                 if !responder.is_handshake_finished() && responder.is_my_turn() {
                     let len = responder.write_message(&[], &mut buf).unwrap();
-                    writer
-                        .write_all(&(len as u16).to_be_bytes())
-                        .await
-                        .unwrap();
+                    writer.write_all(&(len as u16).to_be_bytes()).await.unwrap();
                     writer.write_all(&buf[..len]).await.unwrap();
                     writer.flush().await.unwrap();
                 }
@@ -653,22 +610,17 @@ mod tests {
 
         let (mut reader, mut writer) = tokio::io::split(client_stream);
 
-        let mut initiator = Builder::new(
-            NoisePattern::XX.protocol_name().parse().unwrap(),
-        )
-        .local_private_key(&init_priv)
-        .build_initiator()
-        .unwrap();
+        let mut initiator = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
+            .local_private_key(&init_priv)
+            .build_initiator()
+            .unwrap();
 
         let mut buf = vec![0u8; MAX_NOISE_MSG_LEN];
 
         while !initiator.is_handshake_finished() {
             if initiator.is_my_turn() {
                 let len = initiator.write_message(&[], &mut buf).unwrap();
-                writer
-                    .write_all(&(len as u16).to_be_bytes())
-                    .await
-                    .unwrap();
+                writer.write_all(&(len as u16).to_be_bytes()).await.unwrap();
                 writer.write_all(&buf[..len]).await.unwrap();
                 writer.flush().await.unwrap();
             }

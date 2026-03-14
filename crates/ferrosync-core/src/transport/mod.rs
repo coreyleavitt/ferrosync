@@ -57,7 +57,5 @@ impl Drop for TransportStreams {
 /// accept incoming connections by implementing `connect()` on a listener wrapper.
 pub trait Transport: Send {
     /// Establish the connection and return read/write streams.
-    fn connect(
-        self: Box<Self>,
-    ) -> Pin<Box<dyn Future<Output = Result<TransportStreams>> + Send>>;
+    fn connect(self: Box<Self>) -> Pin<Box<dyn Future<Output = Result<TransportStreams>> + Send>>;
 }

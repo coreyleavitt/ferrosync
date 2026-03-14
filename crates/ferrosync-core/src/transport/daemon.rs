@@ -187,138 +187,135 @@ impl Transport for DaemonTransport {
         self: Box<Self>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TransportStreams>> + Send>> {
         Box::pin(async move {
-        let addr = format!("{}:{}", self.config.host, self.config.port);
-        tracing::debug!(
-            addr = %addr,
-            module = %self.config.module,
-            "connecting to rsync daemon"
-        );
+            let addr = format!("{}:{}", self.config.host, self.config.port);
+            tracing::debug!(
+                addr = %addr,
+                module = %self.config.module,
+                "connecting to rsync daemon"
+            );
 
-        let stream = tcp_connect(&addr, self.config.connect_timeout).await?;
-        let (reader, mut writer) = tokio::io::split(stream);
-        let mut reader = BufReader::new(reader);
+            let stream = tcp_connect(&addr, self.config.connect_timeout).await?;
+            let (reader, mut writer) = tokio::io::split(stream);
+            let mut reader = BufReader::new(reader);
 
-        // Step 1: Exchange daemon protocol greetings.
-        let _remote_version = read_greeting(&mut reader).await?;
-        send_greeting(&mut writer).await?;
+            // Step 1: Exchange daemon protocol greetings.
+            let _remote_version = read_greeting(&mut reader).await?;
+            send_greeting(&mut writer).await?;
 
-        // Step 2: Send the module name.
-        writer
-            .write_all(format!("{}\n", self.config.module).as_bytes())
-            .await
-            .map_err(io_err)?;
-        writer.flush().await.map_err(io_err)?;
+            // Step 2: Send the module name.
+            writer
+                .write_all(format!("{}\n", self.config.module).as_bytes())
+                .await
+                .map_err(io_err)?;
+            writer.flush().await.map_err(io_err)?;
 
-        // Step 3: Read response -- could be MOTD lines, then @RSYNCD: or @ERROR:.
-        loop {
-            let line = read_line(&mut reader).await?;
+            // Step 3: Read response -- could be MOTD lines, then @RSYNCD: or @ERROR:.
+            loop {
+                let line = read_line(&mut reader).await?;
 
-            if line.starts_with("@RSYNCD: OK") {
-                break;
-            } else if line.starts_with("@RSYNCD: AUTHREQD ") {
-                let challenge = line
-                    .trim_start_matches("@RSYNCD: AUTHREQD ")
-                    .trim()
-                    .to_string();
-                let response = compute_auth_response(
-                    &challenge,
-                    self.config.user.as_deref().unwrap_or(""),
-                    self.config.password.as_deref().unwrap_or(""),
-                );
-                writer
-                    .write_all(response.as_bytes())
-                    .await
-                    .map_err(io_err)?;
-                writer.flush().await.map_err(io_err)?;
-
-                // Read the result of authentication.
-                let auth_line = read_line(&mut reader).await?;
-                if auth_line.starts_with("@RSYNCD: OK") {
+                if line.starts_with("@RSYNCD: OK") {
                     break;
-                } else if auth_line.starts_with("@ERROR:") {
-                    let msg = auth_line.trim_start_matches("@ERROR:").trim();
-                    if msg.contains("auth failed") {
+                } else if line.starts_with("@RSYNCD: AUTHREQD ") {
+                    let challenge = line
+                        .trim_start_matches("@RSYNCD: AUTHREQD ")
+                        .trim()
+                        .to_string();
+                    let response = compute_auth_response(
+                        &challenge,
+                        self.config.user.as_deref().unwrap_or(""),
+                        self.config.password.as_deref().unwrap_or(""),
+                    );
+                    writer
+                        .write_all(response.as_bytes())
+                        .await
+                        .map_err(io_err)?;
+                    writer.flush().await.map_err(io_err)?;
+
+                    // Read the result of authentication.
+                    let auth_line = read_line(&mut reader).await?;
+                    if auth_line.starts_with("@RSYNCD: OK") {
+                        break;
+                    } else if auth_line.starts_with("@ERROR:") {
+                        let msg = auth_line.trim_start_matches("@ERROR:").trim();
+                        if msg.contains("auth failed") {
+                            return Err(TransportError::AuthFailed {
+                                message: format!(
+                                    "authentication failed on module {}",
+                                    self.config.module
+                                ),
+                            });
+                        }
+                        return Err(TransportError::ConnectionFailed {
+                            message: msg.to_string(),
+                        });
+                    } else {
                         return Err(TransportError::AuthFailed {
-                            message: format!(
-                                "authentication failed on module {}",
-                                self.config.module
-                            ),
+                            message: format!("unexpected response after auth: {auth_line}"),
+                        });
+                    }
+                } else if line.starts_with("@ERROR:") {
+                    let msg = line.trim_start_matches("@ERROR:").trim();
+                    if msg.contains("Unknown module") {
+                        return Err(TransportError::ModuleNotFound {
+                            module: self.config.module.clone(),
                         });
                     }
                     return Err(TransportError::ConnectionFailed {
                         message: msg.to_string(),
                     });
+                } else if line.starts_with("@RSYNCD: EXIT") {
+                    return Err(TransportError::ConnectionFailed {
+                        message: "daemon sent EXIT before module selection completed".to_string(),
+                    });
                 } else {
-                    return Err(TransportError::AuthFailed {
-                        message: format!(
-                            "unexpected response after auth: {auth_line}"
-                        ),
-                    });
+                    // MOTD or informational line -- log and continue.
+                    tracing::debug!(motd = %line, "daemon MOTD");
                 }
-            } else if line.starts_with("@ERROR:") {
-                let msg = line.trim_start_matches("@ERROR:").trim();
-                if msg.contains("Unknown module") {
-                    return Err(TransportError::ModuleNotFound {
-                        module: self.config.module.clone(),
-                    });
-                }
-                return Err(TransportError::ConnectionFailed {
-                    message: msg.to_string(),
-                });
-            } else if line.starts_with("@RSYNCD: EXIT") {
-                return Err(TransportError::ConnectionFailed {
-                    message: "daemon sent EXIT before module selection completed"
-                        .to_string(),
-                });
-            } else {
-                // MOTD or informational line -- log and continue.
-                tracing::debug!(motd = %line, "daemon MOTD");
             }
-        }
 
-        // Step 4: Send arguments (newline-terminated, empty line to finish).
-        let args = self.build_args();
-        for arg in &args {
-            writer
-                .write_all(format!("{arg}\n").as_bytes())
-                .await
-                .map_err(io_err)?;
-        }
-        writer.write_all(b"\n").await.map_err(io_err)?;
-        writer.flush().await.map_err(io_err)?;
+            // Step 4: Send arguments (newline-terminated, empty line to finish).
+            let args = self.build_args();
+            for arg in &args {
+                writer
+                    .write_all(format!("{arg}\n").as_bytes())
+                    .await
+                    .map_err(io_err)?;
+            }
+            writer.write_all(b"\n").await.map_err(io_err)?;
+            writer.flush().await.map_err(io_err)?;
 
-        tracing::debug!(
-            module = %self.config.module,
-            args = ?args,
-            "daemon module selected, starting binary protocol"
-        );
+            tracing::debug!(
+                module = %self.config.module,
+                args = ?args,
+                "daemon module selected, starting binary protocol"
+            );
 
-        // Reassemble the split stream into a single TcpStream.
-        // The BufReader may have buffered data from the text handshake
-        // that belongs to the binary protocol, so we chain it back.
-        let buffered = reader.buffer().to_vec();
-        let inner_reader = reader.into_inner();
-        let stream = inner_reader.unsplit(writer);
+            // Reassemble the split stream into a single TcpStream.
+            // The BufReader may have buffered data from the text handshake
+            // that belongs to the binary protocol, so we chain it back.
+            let buffered = reader.buffer().to_vec();
+            let inner_reader = reader.into_inner();
+            let stream = inner_reader.unsplit(writer);
 
-        if buffered.is_empty() {
-            let (read_half, write_half) = tokio::io::split(stream);
-            Ok(TransportStreams {
-                reader: Box::new(read_half),
-                writer: Box::new(write_half),
-                background_task: None,
-            })
-        } else {
-            // Chain the buffered bytes with the stream for reads;
-            // writes go directly to the stream.
-            let (read_half, write_half) = tokio::io::split(stream);
-            use tokio::io::AsyncReadExt as _;
-            let chained_read = std::io::Cursor::new(buffered).chain(read_half);
-            Ok(TransportStreams {
-                reader: Box::new(chained_read),
-                writer: Box::new(write_half),
-                background_task: None,
-            })
-        }
+            if buffered.is_empty() {
+                let (read_half, write_half) = tokio::io::split(stream);
+                Ok(TransportStreams {
+                    reader: Box::new(read_half),
+                    writer: Box::new(write_half),
+                    background_task: None,
+                })
+            } else {
+                // Chain the buffered bytes with the stream for reads;
+                // writes go directly to the stream.
+                let (read_half, write_half) = tokio::io::split(stream);
+                use tokio::io::AsyncReadExt as _;
+                let chained_read = std::io::Cursor::new(buffered).chain(read_half);
+                Ok(TransportStreams {
+                    reader: Box::new(chained_read),
+                    writer: Box::new(write_half),
+                    background_task: None,
+                })
+            }
         })
     }
 }
@@ -342,9 +339,7 @@ async fn tcp_connect(addr: &str, timeout: Duration) -> Result<TcpStream> {
 /// Read the daemon greeting line: `@RSYNCD: <major>.<minor>\n`.
 ///
 /// Returns the major protocol version.
-async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<u8> {
+async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<u8> {
     let line = read_line(reader).await?;
 
     if !line.starts_with("@RSYNCD: ") {
@@ -357,24 +352,23 @@ async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(
 
     // Version may be "31" or "31.0".
     let major_str = version_str.split('.').next().unwrap_or(version_str);
-    let major: u8 = major_str.parse().map_err(|_| {
-        TransportError::ConnectionFailed {
+    let major: u8 = major_str
+        .parse()
+        .map_err(|_| TransportError::ConnectionFailed {
             message: format!("invalid daemon version: {version_str}"),
-        }
-    })?;
+        })?;
 
     tracing::debug!(version = %version_str, "daemon greeting received");
     Ok(major)
 }
 
 /// Send our daemon protocol greeting.
-async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-) -> Result<()> {
-    let greeting = format!(
-        "@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n"
-    );
-    writer.write_all(greeting.as_bytes()).await.map_err(io_err)?;
+async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W) -> Result<()> {
+    let greeting = format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n");
+    writer
+        .write_all(greeting.as_bytes())
+        .await
+        .map_err(io_err)?;
     writer.flush().await.map_err(io_err)?;
     Ok(())
 }
@@ -383,9 +377,7 @@ async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(
 const MAX_LINE_LENGTH: usize = 8192;
 
 /// Read a single line from the daemon (up to `\n`).
-async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<String> {
+async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<String> {
     let mut line = String::new();
     let bytes_read = reader.read_line(&mut line).await.map_err(io_err)?;
     if bytes_read == 0 {
@@ -412,11 +404,7 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 /// Compute the authentication response for a daemon challenge (for use by TLS transport).
-pub(crate) fn compute_auth_response_for_tls(
-    challenge: &str,
-    user: &str,
-    password: &str,
-) -> String {
+pub(crate) fn compute_auth_response_for_tls(challenge: &str, user: &str, password: &str) -> String {
     compute_auth_response(challenge, user, password)
 }
 
@@ -446,8 +434,7 @@ fn compute_auth_response(challenge: &str, user: &str, password: &str) -> String 
 
 /// Minimal base64 encoder (standard alphabet with padding).
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
 
@@ -817,8 +804,7 @@ mod tests {
             .to_string();
         assert_eq!(challenge, "abc123challenge");
 
-        let response =
-            compute_auth_response(&challenge, "backupuser", "secretpass");
+        let response = compute_auth_response(&challenge, "backupuser", "secretpass");
         writer.write_all(response.as_bytes()).await.unwrap();
         writer.flush().await.unwrap();
 
@@ -902,21 +888,18 @@ mod tests {
     #[tokio::test]
     async fn test_connect_real_daemon() {
         if std::env::var("FERROSYNC_DAEMON_TEST").as_deref() != Ok("1") {
-            eprintln!(
-                "skipping daemon integration test (set FERROSYNC_DAEMON_TEST=1)"
-            );
+            eprintln!("skipping daemon integration test (set FERROSYNC_DAEMON_TEST=1)");
             return;
         }
 
-        let host = std::env::var("FERROSYNC_DAEMON_HOST")
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
+        let host =
+            std::env::var("FERROSYNC_DAEMON_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port: u16 = std::env::var("FERROSYNC_DAEMON_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(DEFAULT_DAEMON_PORT);
 
-        match DaemonTransport::list_modules(&host, port, Duration::from_secs(5)).await
-        {
+        match DaemonTransport::list_modules(&host, port, Duration::from_secs(5)).await {
             Ok(modules) => {
                 eprintln!("daemon modules:");
                 for m in &modules {

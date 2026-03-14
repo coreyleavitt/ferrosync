@@ -41,9 +41,7 @@ pub async fn send_generator_done<W: AsyncWrite + Unpin>(w: &mut W) -> Result<()>
 /// Read a file index from the generator stream.
 ///
 /// Returns `None` if the generator is done (file_index == -1).
-pub async fn recv_file_index<R: tokio::io::AsyncRead + Unpin>(
-    r: &mut R,
-) -> Result<Option<i32>> {
+pub async fn recv_file_index<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Result<Option<i32>> {
     let idx = varint::read_int(r).await?;
     if idx == -1 {
         Ok(None)
@@ -53,9 +51,7 @@ pub async fn recv_file_index<R: tokio::io::AsyncRead + Unpin>(
 }
 
 /// Read block signatures from the generator stream.
-pub async fn recv_file_signatures<R: tokio::io::AsyncRead + Unpin>(
-    r: &mut R,
-) -> Result<SumStruct> {
+pub async fn recv_file_signatures<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
     sum::read_sums(r).await
 }
 

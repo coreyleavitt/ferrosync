@@ -40,7 +40,7 @@ impl Checkpoint {
         if self.block_size == 0 {
             return 0;
         }
-        ((self.file_size as usize) + self.block_size - 1) / self.block_size
+        (self.file_size as usize).div_ceil(self.block_size)
     }
 
     /// Create a new checkpoint with no blocks completed.
@@ -54,7 +54,7 @@ impl Checkpoint {
         let total = if block_size == 0 {
             0
         } else {
-            ((file_size as usize) + block_size - 1) / block_size
+            (file_size as usize).div_ceil(block_size)
         };
         Self {
             file_path,
@@ -122,7 +122,11 @@ impl CheckpointFile {
         buf.push(VERSION);
 
         // file_path as UTF-8 bytes (length-prefixed)
-        let path_bytes = checkpoint.file_path.to_string_lossy().into_owned().into_bytes();
+        let path_bytes = checkpoint
+            .file_path
+            .to_string_lossy()
+            .into_owned()
+            .into_bytes();
         buf.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
         buf.extend_from_slice(&path_bytes);
 
@@ -142,7 +146,7 @@ impl CheckpointFile {
         let count = checkpoint.completed_blocks.len() as u32;
         buf.extend_from_slice(&count.to_le_bytes());
         // Pack bools into bytes (8 per byte)
-        let byte_count = (count as usize + 7) / 8;
+        let byte_count = (count as usize).div_ceil(8);
         for byte_idx in 0..byte_count {
             let mut byte = 0u8;
             for bit in 0..8 {
@@ -235,7 +239,7 @@ impl CheckpointFile {
         let count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
 
-        let byte_count = (count + 7) / 8;
+        let byte_count = count.div_ceil(8);
         if pos + byte_count > data.len() {
             return Err(err());
         }

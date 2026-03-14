@@ -127,21 +127,25 @@ async fn execute_transfer_impl(
     stats.start();
 
     let source_paths = options.source();
-    let dest = options
-        .dest()
-        .ok_or_else(|| FsError::NotFound {
-            path: PathBuf::from("<no destination>"),
-        })?;
+    let dest = options.dest().ok_or_else(|| FsError::NotFound {
+        path: PathBuf::from("<no destination>"),
+    })?;
 
     // Build filter rules from options.
     let filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
 
     // Build the source file list.
-    let source_entries = if let Some(ref files_from) = options.files_from() {
+    let source_entries = if let Some(files_from) = options.files_from() {
         build_file_list_from_file(fs, source_paths, files_from, &filters)?
     } else {
-        build_file_list(fs, source_paths, options.recursive(), &filters, options.one_file_system())?
+        build_file_list(
+            fs,
+            source_paths,
+            options.recursive(),
+            &filters,
+            options.one_file_system(),
+        )?
     };
     stats.total_files = source_entries.len() as u64;
 
@@ -152,9 +156,17 @@ async fn execute_transfer_impl(
     let delete_excluded = options.delete() == DeleteMode::Excluded;
 
     // Handle --delete-before.
-    if options.delete() == DeleteMode::Before || (delete_excluded && options.delete() == DeleteMode::Excluded) {
-        let deleted =
-            delete_extraneous(fs, dest, &source_entries, &filters, options.dry_run(), delete_excluded)?;
+    if options.delete() == DeleteMode::Before
+        || (delete_excluded && options.delete() == DeleteMode::Excluded)
+    {
+        let deleted = delete_extraneous(
+            fs,
+            dest,
+            &source_entries,
+            &filters,
+            options.dry_run(),
+            delete_excluded,
+        )?;
         stats.files_deleted = deleted;
     }
 
@@ -232,7 +244,7 @@ async fn execute_transfer_impl(
 
         // --compare-dest: skip if identical file exists in any compare-dest dir.
         if !options.compare_dest().is_empty()
-            && check_alt_dest(fs, &item.entry, &options.compare_dest()).is_some()
+            && check_alt_dest(fs, &item.entry, options.compare_dest()).is_some()
         {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
@@ -244,7 +256,7 @@ async fn execute_transfer_impl(
 
         // --link-dest: hard-link from alt dir if unchanged.
         if !options.link_dest().is_empty() && !options.dry_run() {
-            if let Some(alt_path) = check_alt_dest(fs, &item.entry, &options.link_dest()) {
+            if let Some(alt_path) = check_alt_dest(fs, &item.entry, options.link_dest()) {
                 if fs.hard_link(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
@@ -260,7 +272,7 @@ async fn execute_transfer_impl(
 
         // --copy-dest: copy from alt dir if unchanged (also use as basis).
         if !options.copy_dest().is_empty() && !options.dry_run() {
-            if let Some(alt_path) = check_alt_dest(fs, &item.entry, &options.copy_dest()) {
+            if let Some(alt_path) = check_alt_dest(fs, &item.entry, options.copy_dest()) {
                 if fs.copy_file(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
@@ -287,8 +299,7 @@ async fn execute_transfer_impl(
         // Checksum mode: compare file-level checksums.
         if options.checksum_mode() {
             if let Ok(dest_data) = fs.read_file(&dest_path) {
-                let src_sum =
-                    checksum::file_checksum(&item.source_data, seed, checksum_type);
+                let src_sum = checksum::file_checksum(&item.source_data, seed, checksum_type);
                 let dst_sum = checksum::file_checksum(&dest_data, seed, checksum_type);
                 if src_sum == dst_sum {
                     stats.files_skipped += 1;
@@ -392,14 +403,17 @@ async fn execute_transfer_impl(
 
         // --backup: create backup before overwriting.
         if options.backup() && fs.lexists(&dest_path) {
-            create_backup(fs, &dest_path, options.suffix(), options.backup_dir().map(|p| p.as_path()))?;
+            create_backup(
+                fs,
+                &dest_path,
+                options.suffix(),
+                options.backup_dir().map(|p| p.as_path()),
+            )?;
         }
 
         // Choose write target (--partial-dir writes to temp location first).
-        let write_path = if let Some(ref partial_dir) = options.partial_dir() {
-            let partial = partial_dir.join(
-                dest_path.file_name().unwrap_or_default(),
-            );
+        let write_path = if let Some(partial_dir) = options.partial_dir() {
+            let partial = partial_dir.join(dest_path.file_name().unwrap_or_default());
             fs.mkdir(partial_dir, 0o755)?;
             partial
         } else {
@@ -478,8 +492,14 @@ async fn execute_transfer_impl(
 
     // Handle --delete-after.
     if options.delete() == DeleteMode::After {
-        let deleted =
-            delete_extraneous(fs, dest, &source_entries, &filters, options.dry_run(), false)?;
+        let deleted = delete_extraneous(
+            fs,
+            dest,
+            &source_entries,
+            &filters,
+            options.dry_run(),
+            false,
+        )?;
         stats.files_deleted = deleted;
     }
 
@@ -504,11 +524,9 @@ async fn execute_transfer_streaming_impl(
     let mut stats = TransferStats::new();
     stats.start();
 
-    let dest = options
-        .dest()
-        .ok_or_else(|| FsError::NotFound {
-            path: PathBuf::from("<no destination>"),
-        })?;
+    let dest = options.dest().ok_or_else(|| FsError::NotFound {
+        path: PathBuf::from("<no destination>"),
+    })?;
 
     let filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
@@ -767,11 +785,18 @@ fn collect_directory(
             continue;
         }
 
-        let child_path =
-            dir_path.join(std::str::from_utf8(&dir_entry.name).unwrap_or("?"));
+        let child_path = dir_path.join(std::str::from_utf8(&dir_entry.name).unwrap_or("?"));
 
         if is_dir {
-            collect_directory(fs, &child_path, &child_name, items, index, filters, root_dev)?;
+            collect_directory(
+                fs,
+                &child_path,
+                &child_name,
+                items,
+                index,
+                filters,
+                root_dev,
+            )?;
         } else {
             let source_data = if dir_entry.metadata.mode & S_IFMT == S_IFREG {
                 fs.read_file(&child_path)?
@@ -892,11 +917,7 @@ fn create_backup(
     backup_dir: Option<&Path>,
 ) -> std::result::Result<(), FsError> {
     let file_name = path.file_name().unwrap_or_default();
-    let backup_name = format!(
-        "{}{}",
-        file_name.to_string_lossy(),
-        suffix
-    );
+    let backup_name = format!("{}{}", file_name.to_string_lossy(), suffix);
 
     let backup_path = if let Some(dir) = backup_dir {
         fs.mkdir(dir, 0o755)?;
@@ -980,7 +1001,8 @@ fn compute_itemized_changes(
     let group_changed =
         (options.preserve_group() || options.preserve_owner()) && dest_meta.gid != src_entry.gid;
 
-    let any_change = size_changed || time_changed || perms_changed || owner_changed || group_changed;
+    let any_change =
+        size_changed || time_changed || perms_changed || owner_changed || group_changed;
     let update_type = if any_change { '>' } else { '.' };
 
     ItemizedChanges {
@@ -1007,8 +1029,10 @@ fn delete_extraneous(
     let mut deleted = 0u64;
 
     // Build a set of source names for quick lookup.
-    let source_names: HashSet<&[u8]> =
-        source_entries.iter().map(|e| e.entry.name.as_slice()).collect();
+    let source_names: HashSet<&[u8]> = source_entries
+        .iter()
+        .map(|e| e.entry.name.as_slice())
+        .collect();
 
     // Walk the destination and remove anything not in source.
     if let Ok(dest_entries) = fs.read_dir(dest) {
@@ -1026,8 +1050,7 @@ fn delete_extraneous(
                 }
             }
 
-            let path =
-                dest.join(std::str::from_utf8(&dest_entry.name).unwrap_or("?"));
+            let path = dest.join(std::str::from_utf8(&dest_entry.name).unwrap_or("?"));
             if !dry_run {
                 if dest_entry.metadata.mode & S_IFMT == S_IFDIR {
                     let _ = fs.remove_dir(&path);
@@ -1173,10 +1196,7 @@ mod tests {
 
         let result = do_transfer(&src, &dst, opts).await;
         assert_eq!(result.stats.files_transferred, 2);
-        assert_eq!(
-            std::fs::read_to_string(dst.join("a.txt")).unwrap(),
-            "aaa"
-        );
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "aaa");
         assert_eq!(
             std::fs::read_to_string(dst.join("sub/b.txt")).unwrap(),
             "bbb"
@@ -1242,8 +1262,10 @@ mod tests {
         // Set both files to the same mtime using libc::utimensat.
         let fs = UnixFileSystem::new();
         let target_mtime: i64 = 1_000_000;
-        fs.set_mtime(&src.join("file.txt"), target_mtime, 0).unwrap();
-        fs.set_mtime(&dst.join("file.txt"), target_mtime, 0).unwrap();
+        fs.set_mtime(&src.join("file.txt"), target_mtime, 0)
+            .unwrap();
+        fs.set_mtime(&dst.join("file.txt"), target_mtime, 0)
+            .unwrap();
 
         let opts = TransferOptions::builder()
             .source(src.join("file.txt"))
@@ -1654,8 +1676,14 @@ mod tests {
             .build();
 
         do_transfer(&src, &dst, opts).await;
-        assert_eq!(std::fs::read_to_string(dst.join("file.txt")).unwrap(), "new");
-        assert_eq!(std::fs::read_to_string(bak.join("file.txt~")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("file.txt")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            std::fs::read_to_string(bak.join("file.txt~")).unwrap(),
+            "old"
+        );
     }
 
     #[tokio::test]
@@ -1873,10 +1901,9 @@ mod tests {
 
         let fs = UnixFileSystem::new();
         let mut progress = ProgressTracker::new();
-        let result =
-            execute_transfer_streaming(&fs, &opts, &protocol, &mut rx, &mut progress)
-                .await
-                .unwrap();
+        let result = execute_transfer_streaming(&fs, &opts, &protocol, &mut rx, &mut progress)
+            .await
+            .unwrap();
 
         assert_eq!(result.stats.files_transferred, 2);
         assert_eq!(result.stats.total_size, 300);
@@ -1934,10 +1961,9 @@ mod tests {
 
         let fs = UnixFileSystem::new();
         let mut progress = ProgressTracker::new();
-        let result =
-            execute_transfer_streaming(&fs, &opts, &protocol, &mut rx, &mut progress)
-                .await
-                .unwrap();
+        let result = execute_transfer_streaming(&fs, &opts, &protocol, &mut rx, &mut progress)
+            .await
+            .unwrap();
 
         assert_eq!(result.stats.directories_created, 1);
         assert_eq!(result.stats.files_transferred, 1);
@@ -1994,10 +2020,9 @@ mod tests {
 
         let fs = UnixFileSystem::new();
         let mut progress = ProgressTracker::new();
-        let result =
-            execute_transfer_streaming(&fs, &opts, &protocol, &mut rx, &mut progress)
-                .await
-                .unwrap();
+        let result = execute_transfer_streaming(&fs, &opts, &protocol, &mut rx, &mut progress)
+            .await
+            .unwrap();
 
         assert_eq!(result.stats.files_transferred, 1);
         assert_eq!(result.stats.files_skipped, 1);

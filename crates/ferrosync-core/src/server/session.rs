@@ -134,10 +134,16 @@ impl ServerSession {
         let client_info = extract_client_info(&self.args);
 
         // Determine if compression is requested (look for `z` in args).
-        let use_compress = self.args.iter().any(|a| a.contains('z') && a.starts_with('-') && !a.starts_with("--"));
+        let use_compress = self
+            .args
+            .iter()
+            .any(|a| a.contains('z') && a.starts_with('-') && !a.starts_with("--"));
 
         // Determine if recursive is requested.
-        let is_recursive = self.args.iter().any(|a| a.contains('r') && a.starts_with('-') && !a.starts_with("--"));
+        let is_recursive = self
+            .args
+            .iter()
+            .any(|a| a.contains('r') && a.starts_with('-') && !a.starts_with("--"));
 
         // Server-side: am_sender is true when server is sending (client is pulling).
         let am_sender = self.direction == TransferDirection::Send;
@@ -211,7 +217,9 @@ impl ServerSession {
             use tokio::io::AsyncReadExt;
             loop {
                 let mut len_buf = [0u8; 4];
-                demux_read.read_exact(&mut len_buf).await
+                demux_read
+                    .read_exact(&mut len_buf)
+                    .await
                     .map_err(SessionError::Io)?;
                 let rule_len = i32::from_le_bytes(len_buf);
                 if rule_len == 0 {
@@ -219,11 +227,12 @@ impl ServerSession {
                 }
                 let abs_len = rule_len.unsigned_abs() as usize;
                 let mut discard = vec![0u8; abs_len];
-                demux_read.read_exact(&mut discard).await
+                demux_read
+                    .read_exact(&mut discard)
+                    .await
                     .map_err(SessionError::Io)?;
             }
         }
-
 
         // Build file list from module path.
         let module_path = &self.module.path;
@@ -246,18 +255,19 @@ impl ServerSession {
         let mut flist_buf = Vec::new();
         exchange::send_file_list(&mut flist_buf, &entries, protocol, &opts)
             .await
-            .map_err(|e| SessionError::Protocol { message: e.to_string() })?;
+            .map_err(|e| SessionError::Protocol {
+                message: e.to_string(),
+            })?;
 
         mplex_out.write_data(&flist_buf).await?;
         mplex_out.flush().await?;
 
         // NDX -> entry index mapping.
-        let ndx_start: i32 =
-            if protocol.incremental_flist && proto_ver >= 30 && is_recursive {
-                1
-            } else {
-                0
-            };
+        let ndx_start: i32 = if protocol.incremental_flist && proto_ver >= 30 && is_recursive {
+            1
+        } else {
+            0
+        };
         let ndx_to_entry: std::collections::HashMap<i32, usize> = entries
             .iter()
             .enumerate()
@@ -271,8 +281,7 @@ impl ServerSession {
         let mut phase: u32 = 0;
 
         loop {
-            let ndx = varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver)
-                .await?;
+            let ndx = varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await?;
 
             if ndx == varint::NDX_DONE {
                 phase += 1;
@@ -422,7 +431,13 @@ impl ServerSession {
         if proto_ver >= 24 {
             // Send a goodbye NDX_DONE (the receiver expects to read one).
             let mut gb_buf = Vec::new();
-            let _ = varint::write_ndx(&mut gb_buf, varint::NDX_DONE, &mut send_ndx_state, proto_ver).await;
+            let _ = varint::write_ndx(
+                &mut gb_buf,
+                varint::NDX_DONE,
+                &mut send_ndx_state,
+                proto_ver,
+            )
+            .await;
             let _ = mplex_out.write_data(&gb_buf).await;
             let _ = mplex_out.flush().await;
             // Read goodbye NDX_DONEs from receiver (best-effort).
@@ -492,12 +507,14 @@ impl ServerSession {
         // Receive file list from client sender.
         let received_flist = exchange::recv_file_list(&mut demux_read, protocol, &opts)
             .await
-            .map_err(|e| SessionError::Protocol { message: e.to_string() })?;
+            .map_err(|e| SessionError::Protocol {
+                message: e.to_string(),
+            })?;
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
 
         // eprintln!("[server-recv] got {} entries", entries.len());
-        for (i, entry) in entries.iter().enumerate() {
+        for _entry in entries.iter() {
             // eprintln!("[server-recv] entry[{}] ndx={} name={} is_file={}", i, entry_ndx[i], String::from_utf8_lossy(&entry.name), entry.is_file());
         }
 
@@ -539,8 +556,7 @@ impl ServerSession {
             let file_ndx = entry_ndx[idx];
             // eprintln!("[server-recv] sending generator for file {} (ndx={})", name_str, file_ndx);
             let mut sig_buf = Vec::new();
-            varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, proto_ver)
-                .await?;
+            varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, proto_ver).await?;
             // iflags: ITEM_TRANSFER (1<<15) signals data transfer needed.
             if proto_ver >= 29 {
                 const ITEM_TRANSFER: u16 = 1 << 15;
@@ -626,8 +642,8 @@ impl ServerSession {
             // The sender responds with NDX_DONE for each phase except the last
             // (it breaks out of the loop on the last one).
             if phase < max_phase {
-                let resp = varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
-                    .await?;
+                let resp =
+                    varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
                 if resp != varint::NDX_DONE {
                     tracing::warn!(ndx = resp, phase, "expected NDX_DONE from sender");
                 }
@@ -826,7 +842,7 @@ fn collect_dir_entries(
     dir_path: &std::path::Path,
     prefix: &[u8],
     entries: &mut Vec<FileEntry>,
-    filters: &FilterRuleList,
+    _filters: &FilterRuleList,
     recursive: bool,
 ) -> Result<(), SessionError> {
     let dir_meta = fs.lstat(dir_path)?;
@@ -855,7 +871,7 @@ fn collect_dir_entries(
         let child_path = dir_path.join(std::str::from_utf8(&child.name).unwrap_or("?"));
 
         if is_dir && recursive {
-            collect_dir_entries(fs, &child_path, &child_name, entries, filters, recursive)?;
+            collect_dir_entries(fs, &child_path, &child_name, entries, _filters, recursive)?;
         } else if !is_dir {
             let entry = child.metadata.to_file_entry(child_name);
             entries.push(entry);
@@ -958,8 +974,7 @@ mod tests {
             ".".to_string(),
             "path/".to_string(),
         ];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
         assert_eq!(session.direction(), TransferDirection::Send);
     }
 
@@ -973,8 +988,7 @@ mod tests {
             ".".to_string(),
             "path/".to_string(),
         ];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
         assert_eq!(session.direction(), TransferDirection::Receive);
     }
 
@@ -987,8 +1001,7 @@ mod tests {
             ".".to_string(),
             "subdir/file.txt".to_string(),
         ];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
         assert_eq!(session.remote_path(), "subdir/file.txt");
     }
 
@@ -996,21 +1009,15 @@ mod tests {
     fn test_remote_path_default() {
         let module = make_test_module("test", true);
         let args = vec!["--server".to_string(), "-r".to_string()];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
         assert_eq!(session.remote_path(), ".");
     }
 
     #[test]
     fn test_remote_path_dot_only() {
         let module = make_test_module("test", true);
-        let args = vec![
-            "--server".to_string(),
-            "-r".to_string(),
-            ".".to_string(),
-        ];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let args = vec!["--server".to_string(), "-r".to_string(), ".".to_string()];
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
         // No path after "." -> returns default.
         assert_eq!(session.remote_path(), ".");
     }
@@ -1051,8 +1058,7 @@ mod tests {
             "--sender".to_string(),
             ".".to_string(),
         ];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
 
         let (mut reader, mut writer) = tokio::io::split(tokio::io::duplex(1024).0);
         let result = session.handle_receive(&mut reader, &mut writer).await;
@@ -1069,8 +1075,7 @@ mod tests {
     async fn test_handle_send_placeholder() {
         let module = make_test_module("test", true);
         let args = vec!["--server".to_string(), ".".to_string()];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
 
         let (mut reader, mut writer) = tokio::io::split(tokio::io::duplex(1024).0);
         let result = session.handle_send(&mut reader, &mut writer).await;
@@ -1085,8 +1090,7 @@ mod tests {
             "--sender".to_string(),
             ".".to_string(),
         ];
-        let session =
-            ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
+        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
 
         let (mut reader, mut writer) = tokio::io::split(tokio::io::duplex(1024).0);
         let result = session.handle_receive(&mut reader, &mut writer).await;

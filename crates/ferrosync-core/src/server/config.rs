@@ -428,10 +428,7 @@ filter = - *.bak
             backup.secrets_file,
             Some(PathBuf::from("/etc/rsyncd.secrets"))
         );
-        assert_eq!(
-            backup.hosts_allow,
-            vec!["192.168.1.0/24", "10.0.0.0/8"]
-        );
+        assert_eq!(backup.hosts_allow, vec!["192.168.1.0/24", "10.0.0.0/8"]);
         assert_eq!(backup.hosts_deny, vec!["*"]);
         assert_eq!(backup.max_connections, 10);
         assert_eq!(backup.timeout, 300);
@@ -568,11 +565,8 @@ path = /tmp/test
 
     #[test]
     fn test_module_defaults() {
-        let config = parse_config_str(
-            "[minimal]\npath = /tmp/minimal\n",
-            Path::new("t.conf"),
-        )
-        .unwrap();
+        let config =
+            parse_config_str("[minimal]\npath = /tmp/minimal\n", Path::new("t.conf")).unwrap();
         let m = &config.modules[0];
         assert!(m.read_only);
         assert!(m.list);

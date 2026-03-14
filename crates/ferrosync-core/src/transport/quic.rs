@@ -86,11 +86,11 @@ fn build_client_config(config: &QuicConfig) -> Result<ClientConfig> {
                 message: format!("failed to parse CA certificate: {e}"),
             })?;
         for cert in certs {
-            root_store.add(cert).map_err(|e| {
-                TransportError::ConnectionFailed {
+            root_store
+                .add(cert)
+                .map_err(|e| TransportError::ConnectionFailed {
                     message: format!("failed to add CA certificate: {e}"),
-                }
-            })?;
+                })?;
         }
     } else {
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -221,22 +221,20 @@ impl Transport for QuicTransport {
                 .unwrap_or(&self.config.host);
 
             // Connect with timeout.
-            let connecting = endpoint.connect(addr, server_name)
-                .map_err(|e| TransportError::ConnectionFailed {
+            let connecting = endpoint.connect(addr, server_name).map_err(|e| {
+                TransportError::ConnectionFailed {
                     message: format!("QUIC connection to {addr_str} failed: {e}"),
-                })?;
-
-            let connection = tokio::time::timeout(
-                self.config.connect_timeout,
-                connecting,
-            )
-            .await
-            .map_err(|_| TransportError::ConnectionFailed {
-                message: format!("QUIC connection to {addr_str} timed out"),
-            })?
-            .map_err(|e| TransportError::ConnectionFailed {
-                message: format!("QUIC handshake with {addr_str} failed: {e}"),
+                }
             })?;
+
+            let connection = tokio::time::timeout(self.config.connect_timeout, connecting)
+                .await
+                .map_err(|_| TransportError::ConnectionFailed {
+                    message: format!("QUIC connection to {addr_str} timed out"),
+                })?
+                .map_err(|e| TransportError::ConnectionFailed {
+                    message: format!("QUIC handshake with {addr_str} failed: {e}"),
+                })?;
 
             tracing::debug!(
                 addr = %addr_str,
@@ -244,11 +242,13 @@ impl Transport for QuicTransport {
             );
 
             // Open a bidirectional stream.
-            let (send, recv) = connection.open_bi().await.map_err(|e| {
-                TransportError::ConnectionFailed {
-                    message: format!("failed to open QUIC bidirectional stream: {e}"),
-                }
-            })?;
+            let (send, recv) =
+                connection
+                    .open_bi()
+                    .await
+                    .map_err(|e| TransportError::ConnectionFailed {
+                        message: format!("failed to open QUIC bidirectional stream: {e}"),
+                    })?;
 
             tracing::debug!("QUIC bidirectional stream opened");
 
@@ -307,8 +307,7 @@ mod tests {
 
     #[test]
     fn test_build_client_config_custom_ca() {
-        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("gen");
+        let ca = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("gen");
         let ca_pem = ca.cert.pem().into_bytes();
 
         let config = QuicConfig {
@@ -328,15 +327,11 @@ mod tests {
 
         // Generate a self-signed certificate.
         let certified_key =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-                .expect("gen");
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("gen");
 
-        let cert_der = rustls::pki_types::CertificateDer::from(
-            certified_key.cert.der().to_vec(),
-        );
-        let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(
-            certified_key.key_pair.serialize_der(),
-        );
+        let cert_der = rustls::pki_types::CertificateDer::from(certified_key.cert.der().to_vec());
+        let key_der =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified_key.key_pair.serialize_der());
 
         // Set up server config with explicit crypto provider.
         let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -353,11 +348,8 @@ mod tests {
         ));
 
         // Bind server to a random port.
-        let server_endpoint = Endpoint::server(
-            server_config,
-            "127.0.0.1:0".parse().unwrap(),
-        )
-        .expect("server endpoint");
+        let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())
+            .expect("server endpoint");
 
         let server_addr = server_endpoint.local_addr().unwrap();
 

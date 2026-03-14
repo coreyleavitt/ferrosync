@@ -169,10 +169,12 @@ impl RollingChecksum {
     /// Roll the window forward: remove `old_byte` from the left, add
     /// `new_byte` on the right.
     pub fn roll(&mut self, old_byte: u8, new_byte: u8) {
-        self.s1 = self.s1
+        self.s1 = self
+            .s1
             .wrapping_add(new_byte as u32)
             .wrapping_sub(old_byte as u32);
-        self.s2 = self.s2
+        self.s2 = self
+            .s2
             .wrapping_add(self.s1)
             .wrapping_sub(self.count.wrapping_mul(old_byte as u32 + self.char_offset));
     }

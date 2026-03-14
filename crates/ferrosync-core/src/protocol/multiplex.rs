@@ -108,6 +108,7 @@ impl MsgCode {
 
 /// A decoded multiplexed message.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum MplexMessage {
     /// Raw transfer data.
     Data(Bytes),
@@ -149,6 +150,7 @@ pub(crate) enum MplexMessage {
 pub(crate) struct MplexReader<R> {
     inner: R,
     /// Remaining bytes of the current MSG_DATA payload.
+    #[allow(dead_code)]
     data_remaining: u32,
 }
 
@@ -198,10 +200,7 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
                 Ok(MplexMessage::Warning(text))
             }
 
-            MsgCode::Error
-            | MsgCode::ErrorXfer
-            | MsgCode::ErrorSocket
-            | MsgCode::ErrorUtf8 => {
+            MsgCode::Error | MsgCode::ErrorXfer | MsgCode::ErrorSocket | MsgCode::ErrorUtf8 => {
                 let text = self.read_text(payload_len).await?;
                 Ok(MplexMessage::Error { code, text })
             }
@@ -240,11 +239,8 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
     /// reading from the current data frame. Otherwise reads the next header
     /// and returns the data payload. Control messages are dispatched to the
     /// provided callback.
-    pub async fn read_data<F>(
-        &mut self,
-        buf: &mut [u8],
-        mut on_control: F,
-    ) -> Result<usize>
+    #[allow(dead_code)]
+    pub async fn read_data<F>(&mut self, buf: &mut [u8], mut on_control: F) -> Result<usize>
     where
         F: FnMut(MplexMessage),
     {
@@ -333,6 +329,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
 
     /// Write a control message carrying a file list index (MSG_REDO,
     /// MSG_SUCCESS, MSG_DELETED, MSG_NO_SEND).
+    #[allow(dead_code)]
     pub(crate) async fn write_index(&mut self, code: MsgCode, idx: i32) -> Result<()> {
         self.write_message(code, &idx.to_le_bytes()).await
     }
@@ -601,7 +598,10 @@ mod tests {
 
         let mut reader = MplexReader::new(Cursor::new(buf));
         let result = reader.read_message().await;
-        assert!(result.is_err(), "truncated data payload should return error");
+        assert!(
+            result.is_err(),
+            "truncated data payload should return error"
+        );
     }
 
     #[tokio::test]
@@ -612,13 +612,16 @@ mod tests {
 
         let mut reader = MplexReader::new(Cursor::new(buf));
         let result = reader.read_message().await;
-        assert!(result.is_err(), "truncated info payload should return error");
+        assert!(
+            result.is_err(),
+            "truncated info payload should return error"
+        );
     }
 
     #[tokio::test]
     async fn test_read_message_invalid_tag_zero() {
         // Tag byte of 0 is below MPLEX_BASE.
-        let hdr: u32 = (0u32 << 24) | 10;
+        let hdr: u32 = 10;
         let mut buf = hdr.to_le_bytes().to_vec();
         buf.extend_from_slice(&[0; 10]);
 
@@ -642,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_message_unknown_message_type() {
         // Tag byte for an unrecognized message code (MPLEX_BASE + 50 = 57).
-        let hdr: u32 = (57u32 << 24) | 0;
+        let hdr: u32 = 57u32 << 24;
         let buf = hdr.to_le_bytes().to_vec();
 
         let mut reader = MplexReader::new(Cursor::new(buf));
@@ -659,7 +662,10 @@ mod tests {
 
         let mut reader = MplexReader::new(Cursor::new(buf));
         let result = reader.read_message().await;
-        assert!(result.is_err(), "truncated index payload should return error");
+        assert!(
+            result.is_err(),
+            "truncated index payload should return error"
+        );
     }
 
     #[tokio::test]
@@ -681,21 +687,23 @@ mod tests {
 
         // First read should succeed.
         let mut data_buf = [0u8; 64];
-        let n = reader
-            .read_data(&mut data_buf, |_| {})
-            .await
-            .unwrap();
+        let n = reader.read_data(&mut data_buf, |_| {}).await.unwrap();
         assert_eq!(&data_buf[..n], b"hello");
 
         // Second read should fail due to truncated payload.
         let result = reader.read_data(&mut data_buf, |_| {}).await;
-        assert!(result.is_err(), "truncated second frame should return error");
+        assert!(
+            result.is_err(),
+            "truncated second frame should return error"
+        );
     }
 
     #[tokio::test]
     async fn test_msg_code_from_tag_all_invalid_values() {
         // Verify that unrecognized tag values return errors, not panics.
-        let invalid_tags: &[u8] = &[11, 12, 13, 20, 21, 23, 30, 40, 41, 43, 50, 80, 85, 87, 99, 103, 200, 255];
+        let invalid_tags: &[u8] = &[
+            11, 12, 13, 20, 21, 23, 30, 40, 41, 43, 50, 80, 85, 87, 99, 103, 200, 255,
+        ];
         for &tag in invalid_tags {
             let result = MsgCode::from_tag(tag);
             assert!(result.is_err(), "tag {tag} should return error");

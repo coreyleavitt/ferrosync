@@ -325,127 +325,239 @@ impl TransferOptions {
             .copy_dests(copy_dest.into_iter().map(PathBuf::from).collect())
             .compare_dests(compare_dest.into_iter().map(PathBuf::from).collect());
 
-        if let Some(d) = dest { builder = builder.dest(PathBuf::from(d)); }
-        if let Some(v) = bwlimit { builder = builder.bwlimit(v); }
-        if let Some(v) = max_size { builder = builder.max_size(v); }
-        if let Some(v) = min_size { builder = builder.min_size(v); }
-        if let Some(v) = timeout { builder = builder.timeout(v); }
-        if let Some(v) = backup_dir { builder = builder.backup_dir(PathBuf::from(v)); }
-        if let Some(v) = partial_dir { builder = builder.partial_dir(PathBuf::from(v)); }
-        if let Some(v) = files_from { builder = builder.files_from(PathBuf::from(v)); }
+        if let Some(d) = dest {
+            builder = builder.dest(PathBuf::from(d));
+        }
+        if let Some(v) = bwlimit {
+            builder = builder.bwlimit(v);
+        }
+        if let Some(v) = max_size {
+            builder = builder.max_size(v);
+        }
+        if let Some(v) = min_size {
+            builder = builder.min_size(v);
+        }
+        if let Some(v) = timeout {
+            builder = builder.timeout(v);
+        }
+        if let Some(v) = backup_dir {
+            builder = builder.backup_dir(PathBuf::from(v));
+        }
+        if let Some(v) = partial_dir {
+            builder = builder.partial_dir(PathBuf::from(v));
+        }
+        if let Some(v) = files_from {
+            builder = builder.files_from(PathBuf::from(v));
+        }
 
-        Self { inner: builder.build() }
+        Self {
+            inner: builder.build(),
+        }
     }
 
     #[getter]
-    fn recursive(&self) -> bool { self.inner.recursive() }
+    fn recursive(&self) -> bool {
+        self.inner.recursive()
+    }
     #[getter]
-    fn preserve_links(&self) -> bool { self.inner.preserve_links() }
+    fn preserve_links(&self) -> bool {
+        self.inner.preserve_links()
+    }
     #[getter]
-    fn preserve_perms(&self) -> bool { self.inner.preserve_perms() }
+    fn preserve_perms(&self) -> bool {
+        self.inner.preserve_perms()
+    }
     #[getter]
-    fn preserve_times(&self) -> bool { self.inner.preserve_times() }
+    fn preserve_times(&self) -> bool {
+        self.inner.preserve_times()
+    }
     #[getter]
-    fn preserve_group(&self) -> bool { self.inner.preserve_group() }
+    fn preserve_group(&self) -> bool {
+        self.inner.preserve_group()
+    }
     #[getter]
-    fn preserve_owner(&self) -> bool { self.inner.preserve_owner() }
+    fn preserve_owner(&self) -> bool {
+        self.inner.preserve_owner()
+    }
     #[getter]
-    fn preserve_devices(&self) -> bool { self.inner.preserve_devices() }
+    fn preserve_devices(&self) -> bool {
+        self.inner.preserve_devices()
+    }
     #[getter]
-    fn preserve_specials(&self) -> bool { self.inner.preserve_specials() }
+    fn preserve_specials(&self) -> bool {
+        self.inner.preserve_specials()
+    }
     #[getter]
-    fn checksum_mode(&self) -> bool { self.inner.checksum_mode() }
+    fn checksum_mode(&self) -> bool {
+        self.inner.checksum_mode()
+    }
     #[getter]
-    fn whole_file(&self) -> bool { self.inner.whole_file() }
+    fn whole_file(&self) -> bool {
+        self.inner.whole_file()
+    }
     #[getter]
-    fn update(&self) -> bool { self.inner.update() }
+    fn update(&self) -> bool {
+        self.inner.update()
+    }
     #[getter]
-    fn inplace(&self) -> bool { self.inner.inplace() }
+    fn inplace(&self) -> bool {
+        self.inner.inplace()
+    }
     #[getter]
-    fn delete(&self) -> DeleteMode { self.inner.delete().into() }
+    fn delete(&self) -> DeleteMode {
+        self.inner.delete().into()
+    }
     #[getter]
-    fn compress(&self) -> bool { self.inner.compress() }
+    fn compress(&self) -> bool {
+        self.inner.compress()
+    }
     #[getter]
-    fn compress_level(&self) -> u32 { self.inner.compress_level() }
+    fn compress_level(&self) -> u32 {
+        self.inner.compress_level()
+    }
     #[getter]
-    fn verbosity(&self) -> Verbosity { self.inner.verbosity().into() }
+    fn verbosity(&self) -> Verbosity {
+        self.inner.verbosity().into()
+    }
     #[getter]
-    fn progress(&self) -> bool { self.inner.progress() }
+    fn progress(&self) -> bool {
+        self.inner.progress()
+    }
     #[getter]
-    fn stats(&self) -> bool { self.inner.stats() }
+    fn stats(&self) -> bool {
+        self.inner.stats()
+    }
     #[getter]
-    fn dry_run(&self) -> bool { self.inner.dry_run() }
+    fn dry_run(&self) -> bool {
+        self.inner.dry_run()
+    }
     #[getter]
-    fn itemize_changes(&self) -> bool { self.inner.itemize_changes() }
+    fn itemize_changes(&self) -> bool {
+        self.inner.itemize_changes()
+    }
     #[getter]
-    fn exclude(&self) -> Vec<String> { self.inner.exclude().to_vec() }
+    fn exclude(&self) -> Vec<String> {
+        self.inner.exclude().to_vec()
+    }
     #[getter]
-    fn include(&self) -> Vec<String> { self.inner.include().to_vec() }
+    fn include(&self) -> Vec<String> {
+        self.inner.include().to_vec()
+    }
     #[getter]
-    fn filter(&self) -> Vec<String> { self.inner.filter().to_vec() }
+    fn filter(&self) -> Vec<String> {
+        self.inner.filter().to_vec()
+    }
     #[getter]
     fn source(&self) -> Vec<String> {
-        self.inner.source().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner
+            .source()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
     }
     #[getter]
     fn dest(&self) -> Option<String> {
         self.inner.dest().map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn bwlimit(&self) -> Option<u64> { self.inner.bwlimit() }
+    fn bwlimit(&self) -> Option<u64> {
+        self.inner.bwlimit()
+    }
     #[getter]
-    fn max_size(&self) -> Option<u64> { self.inner.max_size() }
+    fn max_size(&self) -> Option<u64> {
+        self.inner.max_size()
+    }
     #[getter]
-    fn min_size(&self) -> Option<u64> { self.inner.min_size() }
+    fn min_size(&self) -> Option<u64> {
+        self.inner.min_size()
+    }
     #[getter]
-    fn timeout(&self) -> Option<u64> { self.inner.timeout() }
+    fn timeout(&self) -> Option<u64> {
+        self.inner.timeout()
+    }
     #[getter]
     fn link_dest(&self) -> Vec<String> {
-        self.inner.link_dest().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner
+            .link_dest()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
     }
     #[getter]
     fn copy_dest(&self) -> Vec<String> {
-        self.inner.copy_dest().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner
+            .copy_dest()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
     }
     #[getter]
     fn compare_dest(&self) -> Vec<String> {
-        self.inner.compare_dest().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner
+            .compare_dest()
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
     }
     #[getter]
-    fn backup(&self) -> bool { self.inner.backup() }
+    fn backup(&self) -> bool {
+        self.inner.backup()
+    }
     #[getter]
     fn backup_dir(&self) -> Option<String> {
-        self.inner.backup_dir().map(|p| p.to_string_lossy().into_owned())
+        self.inner
+            .backup_dir()
+            .map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn suffix(&self) -> String { self.inner.suffix().to_owned() }
+    fn suffix(&self) -> String {
+        self.inner.suffix().to_owned()
+    }
     #[getter]
     fn partial_dir(&self) -> Option<String> {
-        self.inner.partial_dir().map(|p| p.to_string_lossy().into_owned())
+        self.inner
+            .partial_dir()
+            .map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn append(&self) -> bool { self.inner.append() }
+    fn append(&self) -> bool {
+        self.inner.append()
+    }
     #[getter]
     fn files_from(&self) -> Option<String> {
-        self.inner.files_from().map(|p| p.to_string_lossy().into_owned())
+        self.inner
+            .files_from()
+            .map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn one_file_system(&self) -> bool { self.inner.one_file_system() }
+    fn one_file_system(&self) -> bool {
+        self.inner.one_file_system()
+    }
     #[getter]
-    fn numeric_ids(&self) -> bool { self.inner.numeric_ids() }
+    fn numeric_ids(&self) -> bool {
+        self.inner.numeric_ids()
+    }
     #[getter]
-    fn sparse(&self) -> bool { self.inner.sparse() }
+    fn sparse(&self) -> bool {
+        self.inner.sparse()
+    }
 
-    fn is_archive(&self) -> bool { self.inner.is_archive() }
+    fn is_archive(&self) -> bool {
+        self.inner.is_archive()
+    }
 
     fn __repr__(&self) -> String {
-        let sources: Vec<_> = self.inner.source().iter()
+        let sources: Vec<_> = self
+            .inner
+            .source()
+            .iter()
             .map(|p| format!("'{}'", p.display()))
             .collect();
         format!(
             "TransferOptions(source=[{}], dest={}, recursive={}, dry_run={})",
             sources.join(", "),
-            self.inner.dest()
+            self.inner
+                .dest()
                 .map(|p| format!("'{}'", p.display()))
                 .unwrap_or_else(|| "None".to_string()),
             self.inner.recursive(),
@@ -468,33 +580,61 @@ pub struct SyncResult {
 #[pymethods]
 impl SyncResult {
     #[getter]
-    fn files_transferred(&self) -> u64 { self.stats.files_transferred }
+    fn files_transferred(&self) -> u64 {
+        self.stats.files_transferred
+    }
     #[getter]
-    fn total_files(&self) -> u64 { self.stats.total_files }
+    fn total_files(&self) -> u64 {
+        self.stats.total_files
+    }
     #[getter]
-    fn bytes_sent(&self) -> u64 { self.stats.bytes_sent }
+    fn bytes_sent(&self) -> u64 {
+        self.stats.bytes_sent
+    }
     #[getter]
-    fn bytes_received(&self) -> u64 { self.stats.bytes_received }
+    fn bytes_received(&self) -> u64 {
+        self.stats.bytes_received
+    }
     #[getter]
-    fn total_size(&self) -> u64 { self.stats.total_size }
+    fn total_size(&self) -> u64 {
+        self.stats.total_size
+    }
     #[getter]
-    fn matched_data(&self) -> u64 { self.stats.matched_data }
+    fn matched_data(&self) -> u64 {
+        self.stats.matched_data
+    }
     #[getter]
-    fn literal_data(&self) -> u64 { self.stats.literal_data }
+    fn literal_data(&self) -> u64 {
+        self.stats.literal_data
+    }
     #[getter]
-    fn files_skipped(&self) -> u64 { self.stats.files_skipped }
+    fn files_skipped(&self) -> u64 {
+        self.stats.files_skipped
+    }
     #[getter]
-    fn files_deleted(&self) -> u64 { self.stats.files_deleted }
+    fn files_deleted(&self) -> u64 {
+        self.stats.files_deleted
+    }
     #[getter]
-    fn symlinks(&self) -> u64 { self.stats.symlinks }
+    fn symlinks(&self) -> u64 {
+        self.stats.symlinks
+    }
     #[getter]
-    fn directories_created(&self) -> u64 { self.stats.directories_created }
+    fn directories_created(&self) -> u64 {
+        self.stats.directories_created
+    }
     #[getter]
-    fn elapsed_secs(&self) -> f64 { self.stats.elapsed.as_secs_f64() }
+    fn elapsed_secs(&self) -> f64 {
+        self.stats.elapsed.as_secs_f64()
+    }
     #[getter]
-    fn transfer_rate(&self) -> f64 { self.stats.transfer_rate() }
+    fn transfer_rate(&self) -> f64 {
+        self.stats.transfer_rate()
+    }
     #[getter]
-    fn speedup(&self) -> f64 { self.stats.speedup() }
+    fn speedup(&self) -> f64 {
+        self.stats.speedup()
+    }
 
     fn __repr__(&self) -> String {
         format!(
@@ -525,27 +665,49 @@ impl PyFileEntry {
         String::from_utf8_lossy(&self.inner.name).into_owned()
     }
     #[getter]
-    fn name_bytes(&self) -> Vec<u8> { self.inner.name.clone() }
+    fn name_bytes(&self) -> Vec<u8> {
+        self.inner.name.clone()
+    }
     #[getter]
-    fn size(&self) -> i64 { self.inner.len }
+    fn size(&self) -> i64 {
+        self.inner.len
+    }
     #[getter]
-    fn mtime(&self) -> i64 { self.inner.mtime }
+    fn mtime(&self) -> i64 {
+        self.inner.mtime
+    }
     #[getter]
-    fn mtime_nsec(&self) -> u32 { self.inner.mtime_nsec }
+    fn mtime_nsec(&self) -> u32 {
+        self.inner.mtime_nsec
+    }
     #[getter]
-    fn mode(&self) -> u32 { self.inner.mode }
+    fn mode(&self) -> u32 {
+        self.inner.mode
+    }
     #[getter]
-    fn uid(&self) -> u32 { self.inner.uid }
+    fn uid(&self) -> u32 {
+        self.inner.uid
+    }
     #[getter]
-    fn gid(&self) -> u32 { self.inner.gid }
+    fn gid(&self) -> u32 {
+        self.inner.gid
+    }
     #[getter]
-    fn is_file(&self) -> bool { self.inner.is_file() }
+    fn is_file(&self) -> bool {
+        self.inner.is_file()
+    }
     #[getter]
-    fn is_dir(&self) -> bool { self.inner.is_dir() }
+    fn is_dir(&self) -> bool {
+        self.inner.is_dir()
+    }
     #[getter]
-    fn is_symlink(&self) -> bool { self.inner.is_symlink() }
+    fn is_symlink(&self) -> bool {
+        self.inner.is_symlink()
+    }
     #[getter]
-    fn is_device(&self) -> bool { self.inner.is_device() }
+    fn is_device(&self) -> bool {
+        self.inner.is_device()
+    }
     #[getter]
     fn link_target(&self) -> Option<String> {
         if self.inner.link_target.is_empty() {
@@ -589,13 +751,22 @@ fn event_to_pydict(py: Python<'_>, event: &ProgressEvent) -> Py<PyAny> {
             let _ = dict.set_item("name", name.to_string_lossy().as_ref());
             let _ = dict.set_item("size", *size);
         }
-        ProgressEvent::FileProgress { index, bytes_transferred, total_size } => {
+        ProgressEvent::FileProgress {
+            index,
+            bytes_transferred,
+            total_size,
+        } => {
             let _ = dict.set_item("type", "file_progress");
             let _ = dict.set_item("index", *index);
             let _ = dict.set_item("bytes_transferred", *bytes_transferred);
             let _ = dict.set_item("total_size", *total_size);
         }
-        ProgressEvent::FileComplete { index, name, literal_bytes, matched_bytes } => {
+        ProgressEvent::FileComplete {
+            index,
+            name,
+            literal_bytes,
+            matched_bytes,
+        } => {
             let _ = dict.set_item("type", "file_complete");
             let _ = dict.set_item("index", *index);
             let _ = dict.set_item("name", name.to_string_lossy().as_ref());
@@ -611,13 +782,22 @@ fn event_to_pydict(py: Python<'_>, event: &ProgressEvent) -> Py<PyAny> {
             let _ = dict.set_item("type", "file_deleted");
             let _ = dict.set_item("name", name.to_string_lossy().as_ref());
         }
-        ProgressEvent::FileItemized { index, name, changes } => {
+        ProgressEvent::FileItemized {
+            index,
+            name,
+            changes,
+        } => {
             let _ = dict.set_item("type", "file_itemized");
             let _ = dict.set_item("index", *index);
             let _ = dict.set_item("name", name.to_string_lossy().as_ref());
             let _ = dict.set_item("changes", changes.to_string());
         }
-        ProgressEvent::OverallProgress { files_done, files_total, bytes_transferred, bytes_total } => {
+        ProgressEvent::OverallProgress {
+            files_done,
+            files_total,
+            bytes_transferred,
+            bytes_total,
+        } => {
             let _ = dict.set_item("type", "overall_progress");
             let _ = dict.set_item("files_done", *files_done);
             let _ = dict.set_item("files_total", *files_total);
@@ -708,7 +888,9 @@ fn sync_files(
             .await
             .map_err(to_py_err)?;
 
-            Ok(SyncResult { stats: result.stats })
+            Ok(SyncResult {
+                stats: result.stats,
+            })
         })
     })
 }
@@ -728,7 +910,10 @@ fn _ferrosync(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("TransportError", m.py().get_type::<TransportError>())?;
     m.add("FilesystemError", m.py().get_type::<FilesystemError>())?;
     m.add("FilterError", m.py().get_type::<FilterError>())?;
-    m.add("ChecksumMismatchError", m.py().get_type::<ChecksumMismatchError>())?;
+    m.add(
+        "ChecksumMismatchError",
+        m.py().get_type::<ChecksumMismatchError>(),
+    )?;
 
     // Enum classes.
     m.add_class::<DeleteMode>()?;

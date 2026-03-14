@@ -19,9 +19,9 @@ fn generate_incompressible_data(size: usize) -> Vec<u8> {
 
 fn bench_compress(c: &mut Criterion) {
     let sizes: &[usize] = &[
-        1024,           // 1 KiB
-        64 * 1024,      // 64 KiB
-        1024 * 1024,    // 1 MiB
+        1024,        // 1 KiB
+        64 * 1024,   // 64 KiB
+        1024 * 1024, // 1 MiB
     ];
 
     let mut group = c.benchmark_group("compress_compressible");
@@ -30,38 +30,26 @@ fn bench_compress(c: &mut Criterion) {
         let data = generate_compressible_data(size);
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("zlib_6", size),
-            &data,
-            |b, data| {
-                let mut comp = Compressor::new(6);
-                b.iter(|| {
-                    comp.reset();
-                    comp.compress(data).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("zlib_6", size), &data, |b, data| {
+            let mut comp = Compressor::new(6);
+            b.iter(|| {
+                comp.reset();
+                comp.compress(data).unwrap()
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("zstd_3", size),
-            &data,
-            |b, data| {
-                let mut comp = Compressor::new_zstd(3).unwrap();
-                b.iter(|| {
-                    comp.reset();
-                    comp.compress(data).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("zstd_3", size), &data, |b, data| {
+            let mut comp = Compressor::new_zstd(3).unwrap();
+            b.iter(|| {
+                comp.reset();
+                comp.compress(data).unwrap()
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("lz4", size),
-            &data,
-            |b, data| {
-                let mut comp = Compressor::new_lz4();
-                b.iter(|| comp.compress(data).unwrap());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lz4", size), &data, |b, data| {
+            let mut comp = Compressor::new_lz4();
+            b.iter(|| comp.compress(data).unwrap());
+        });
     }
 
     group.finish();
@@ -72,49 +60,33 @@ fn bench_compress(c: &mut Criterion) {
         let data = generate_incompressible_data(size);
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("zlib_6", size),
-            &data,
-            |b, data| {
-                let mut comp = Compressor::new(6);
-                b.iter(|| {
-                    comp.reset();
-                    comp.compress(data).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("zlib_6", size), &data, |b, data| {
+            let mut comp = Compressor::new(6);
+            b.iter(|| {
+                comp.reset();
+                comp.compress(data).unwrap()
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("zstd_3", size),
-            &data,
-            |b, data| {
-                let mut comp = Compressor::new_zstd(3).unwrap();
-                b.iter(|| {
-                    comp.reset();
-                    comp.compress(data).unwrap()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("zstd_3", size), &data, |b, data| {
+            let mut comp = Compressor::new_zstd(3).unwrap();
+            b.iter(|| {
+                comp.reset();
+                comp.compress(data).unwrap()
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("lz4", size),
-            &data,
-            |b, data| {
-                let mut comp = Compressor::new_lz4();
-                b.iter(|| comp.compress(data).unwrap());
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lz4", size), &data, |b, data| {
+            let mut comp = Compressor::new_lz4();
+            b.iter(|| comp.compress(data).unwrap());
+        });
     }
 
     group.finish();
 }
 
 fn bench_decompress(c: &mut Criterion) {
-    let sizes: &[usize] = &[
-        1024,
-        64 * 1024,
-        1024 * 1024,
-    ];
+    let sizes: &[usize] = &[1024, 64 * 1024, 1024 * 1024];
 
     let mut group = c.benchmark_group("decompress");
 

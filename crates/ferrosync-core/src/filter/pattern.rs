@@ -106,11 +106,7 @@ impl Pattern {
                 _ => {
                     // Accumulate literal bytes.
                     let start = i;
-                    while i < pat.len()
-                        && pat[i] != b'*'
-                        && pat[i] != b'?'
-                        && pat[i] != b'['
-                    {
+                    while i < pat.len() && pat[i] != b'*' && pat[i] != b'?' && pat[i] != b'[' {
                         i += 1;
                     }
                     segments.push(Segment::Literal(pat[start..i].to_vec()));
@@ -121,10 +117,7 @@ impl Pattern {
         Ok(segments)
     }
 
-    fn parse_char_class(
-        pat: &[u8],
-        start: usize,
-    ) -> Result<(Segment, usize), FilterError> {
+    fn parse_char_class(pat: &[u8], start: usize) -> Result<(Segment, usize), FilterError> {
         let mut i = start + 1; // skip '['
         let negated = if i < pat.len() && (pat[i] == b'!' || pat[i] == b'^') {
             i += 1;

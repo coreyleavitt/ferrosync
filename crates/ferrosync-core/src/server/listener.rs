@@ -96,13 +96,12 @@ impl DaemonListener {
     /// This is useful for tests that need to know the OS-assigned port
     /// when binding to port 0.
     pub async fn bind(&self) -> Result<(TcpListener, SocketAddr), ListenerError> {
-        let listener =
-            TcpListener::bind(self.config.bind_addr)
-                .await
-                .map_err(|e| ListenerError::Bind {
-                    addr: self.config.bind_addr,
-                    source: e,
-                })?;
+        let listener = TcpListener::bind(self.config.bind_addr)
+            .await
+            .map_err(|e| ListenerError::Bind {
+                addr: self.config.bind_addr,
+                source: e,
+            })?;
         let local_addr = listener.local_addr().map_err(ListenerError::Io)?;
         Ok((listener, local_addr))
     }
@@ -119,13 +118,12 @@ impl DaemonListener {
     ///
     /// Each accepted connection is spawned as an independent tokio task.
     pub async fn accept_loop(&self) -> Result<(), ListenerError> {
-        let listener =
-            TcpListener::bind(self.config.bind_addr)
-                .await
-                .map_err(|e| ListenerError::Bind {
-                    addr: self.config.bind_addr,
-                    source: e,
-                })?;
+        let listener = TcpListener::bind(self.config.bind_addr)
+            .await
+            .map_err(|e| ListenerError::Bind {
+                addr: self.config.bind_addr,
+                source: e,
+            })?;
 
         tracing::info!(addr = %self.config.bind_addr, "daemon listening");
         self.accept_loop_inner(listener).await
@@ -195,9 +193,7 @@ async fn handle_connection(
     let mut reader = BufReader::new(reader);
 
     // Step 1: Send our greeting.
-    let greeting = format!(
-        "@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n"
-    );
+    let greeting = format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n");
     writer.write_all(greeting.as_bytes()).await?;
     writer.flush().await?;
 
@@ -220,9 +216,7 @@ async fn handle_connection(
     // Step 3: Send MOTD (if any).
     if let Some(ref motd_text) = motd {
         for line in motd_text.lines() {
-            writer
-                .write_all(format!("{line}\n").as_bytes())
-                .await?;
+            writer.write_all(format!("{line}\n").as_bytes()).await?;
         }
     }
 
@@ -256,9 +250,7 @@ async fn handle_connection(
         None => {
             tracing::warn!(peer = %peer_addr, module = %module_name, "unknown module");
             writer
-                .write_all(
-                    format!("@ERROR: Unknown module '{}'\n", module_name).as_bytes(),
-                )
+                .write_all(format!("@ERROR: Unknown module '{}'\n", module_name).as_bytes())
                 .await?;
             return Ok(());
         }
@@ -299,8 +291,7 @@ async fn handle_connection(
             Err(_) => {
                 writer
                     .write_all(
-                        format!("@ERROR: auth failed on module {}\n", module_name)
-                            .as_bytes(),
+                        format!("@ERROR: auth failed on module {}\n", module_name).as_bytes(),
                     )
                     .await?;
                 return Ok(());
@@ -309,9 +300,7 @@ async fn handle_connection(
 
         // Check if user is authorized for this module.
         let authorized_users = module.auth.user_list();
-        if !authorized_users.is_empty()
-            && !authorized_users.iter().any(|u| *u == user)
-        {
+        if !authorized_users.is_empty() && !authorized_users.contains(&user) {
             tracing::warn!(
                 peer = %peer_addr,
                 module = %module_name,
@@ -319,19 +308,14 @@ async fn handle_connection(
                 "user not authorized"
             );
             writer
-                .write_all(
-                    format!("@ERROR: auth failed on module {}\n", module_name)
-                        .as_bytes(),
-                )
+                .write_all(format!("@ERROR: auth failed on module {}\n", module_name).as_bytes())
                 .await?;
             return Ok(());
         }
 
         // Verify credentials against secrets file.
         if let Some(ref secrets_path) = module.auth.secrets_file {
-            if let Err(e) =
-                auth::verify_response(user, client_hash, &challenge, secrets_path)
-            {
+            if let Err(e) = auth::verify_response(user, client_hash, &challenge, secrets_path) {
                 tracing::warn!(
                     peer = %peer_addr,
                     module = %module_name,
@@ -341,8 +325,7 @@ async fn handle_connection(
                 );
                 writer
                     .write_all(
-                        format!("@ERROR: auth failed on module {}\n", module_name)
-                            .as_bytes(),
+                        format!("@ERROR: auth failed on module {}\n", module_name).as_bytes(),
                     )
                     .await?;
                 return Ok(());
@@ -426,12 +409,8 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 /// Parse the major protocol version from a greeting line.
-fn parse_version(
-    greeting: &str,
-) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
-    let version_str = greeting
-        .trim_start_matches("@RSYNCD: ")
-        .trim();
+fn parse_version(greeting: &str) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+    let version_str = greeting.trim_start_matches("@RSYNCD: ").trim();
     let major_str = version_str.split('.').next().unwrap_or(version_str);
     // Strip any trailing auth digest list (space-separated).
     let major_str = major_str.split_whitespace().next().unwrap_or(major_str);
@@ -558,9 +537,8 @@ mod tests {
     #[tokio::test]
     async fn test_server_greeting_format() {
         let mut buf = Vec::new();
-        let greeting = format!(
-            "@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n"
-        );
+        let greeting =
+            format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n");
         buf.extend_from_slice(greeting.as_bytes());
 
         let s = String::from_utf8(buf).unwrap();
@@ -596,9 +574,8 @@ mod tests {
             let mut reader = BufReader::new(reader);
 
             // Send greeting.
-            let greeting = format!(
-                "@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n"
-            );
+            let greeting =
+                format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n");
             writer.write_all(greeting.as_bytes()).await.unwrap();
             writer.flush().await.unwrap();
 
@@ -632,10 +609,7 @@ mod tests {
         assert!(greeting.starts_with("@RSYNCD: 31"));
 
         // Send client greeting.
-        writer
-            .write_all(b"@RSYNCD: 31.0\n")
-            .await
-            .unwrap();
+        writer.write_all(b"@RSYNCD: 31.0\n").await.unwrap();
         writer.flush().await.unwrap();
 
         // Send module name.
@@ -647,7 +621,10 @@ mod tests {
         assert_eq!(ok, "@RSYNCD: OK");
 
         // Send args.
-        writer.write_all(b"--server\n--sender\n.\n\n").await.unwrap();
+        writer
+            .write_all(b"--server\n--sender\n.\n\n")
+            .await
+            .unwrap();
         writer.flush().await.unwrap();
 
         drop(writer);

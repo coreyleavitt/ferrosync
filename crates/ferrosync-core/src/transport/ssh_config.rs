@@ -106,15 +106,11 @@ fn parse_config_for_host(
 
     let params = config.query(host);
 
-    let hostname = params
-        .host_name
-        .unwrap_or_else(|| host.to_string());
+    let hostname = params.host_name.unwrap_or_else(|| host.to_string());
 
     let port = params.port.unwrap_or(22);
 
-    let user = params
-        .user
-        .unwrap_or_else(current_username);
+    let user = params.user.unwrap_or_else(current_username);
 
     let ssh_dir = home_ssh_dir();
     let identity_files = if let Some(files) = params.identity_file {

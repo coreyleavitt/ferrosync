@@ -81,7 +81,10 @@ impl FileEntry {
     /// Extract the dirname portion (everything before the last `/`).
     /// Returns `None` if there is no directory component.
     pub fn dirname(&self) -> Option<&[u8]> {
-        self.name.iter().rposition(|&b| b == b'/').map(|pos| &self.name[..pos])
+        self.name
+            .iter()
+            .rposition(|&b| b == b'/')
+            .map(|pos| &self.name[..pos])
     }
 
     /// Extract the basename portion (everything after the last `/`).
@@ -175,31 +178,52 @@ mod tests {
 
     #[test]
     fn test_file_type_checks() {
-        let e = FileEntry { mode: S_IFREG | 0o644, ..Default::default() };
+        let e = FileEntry {
+            mode: S_IFREG | 0o644,
+            ..Default::default()
+        };
         assert!(e.is_file());
         assert!(!e.is_dir());
 
-        let e = FileEntry { mode: S_IFDIR | 0o755, ..Default::default() };
+        let e = FileEntry {
+            mode: S_IFDIR | 0o755,
+            ..Default::default()
+        };
         assert!(e.is_dir());
         assert!(!e.is_file());
 
-        let e = FileEntry { mode: WIRE_S_IFLNK | 0o777, ..Default::default() };
+        let e = FileEntry {
+            mode: WIRE_S_IFLNK | 0o777,
+            ..Default::default()
+        };
         assert!(e.is_symlink());
 
-        let e = FileEntry { mode: S_IFBLK | 0o660, ..Default::default() };
+        let e = FileEntry {
+            mode: S_IFBLK | 0o660,
+            ..Default::default()
+        };
         assert!(e.is_device());
 
-        let e = FileEntry { mode: S_IFIFO | 0o644, ..Default::default() };
+        let e = FileEntry {
+            mode: S_IFIFO | 0o644,
+            ..Default::default()
+        };
         assert!(e.is_special());
     }
 
     #[test]
     fn test_dirname_basename() {
-        let e = FileEntry { name: b"foo/bar/baz.txt".to_vec(), ..Default::default() };
+        let e = FileEntry {
+            name: b"foo/bar/baz.txt".to_vec(),
+            ..Default::default()
+        };
         assert_eq!(e.dirname(), Some(b"foo/bar".as_slice()));
         assert_eq!(e.basename(), b"baz.txt");
 
-        let e = FileEntry { name: b"simple.txt".to_vec(), ..Default::default() };
+        let e = FileEntry {
+            name: b"simple.txt".to_vec(),
+            ..Default::default()
+        };
         assert_eq!(e.dirname(), None);
         assert_eq!(e.basename(), b"simple.txt");
     }

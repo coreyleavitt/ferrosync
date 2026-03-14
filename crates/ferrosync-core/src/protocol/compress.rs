@@ -24,18 +24,14 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 /// Compress a block of data using raw deflate.
 pub fn compress_block(data: &[u8], level: u32) -> Result<Vec<u8>> {
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
-    encoder
-        .write_all(data)
-        .map_err(ProtocolError::from)?;
+    encoder.write_all(data).map_err(ProtocolError::from)?;
     encoder.finish().map_err(ProtocolError::from)
 }
 
 /// Decompress a raw deflate block.
 pub fn decompress_block(compressed: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = DeflateDecoder::new(Vec::new());
-    decoder
-        .write_all(compressed)
-        .map_err(ProtocolError::from)?;
+    decoder.write_all(compressed).map_err(ProtocolError::from)?;
     decoder.finish().map_err(ProtocolError::from)
 }
 
@@ -164,8 +160,7 @@ struct ZstdCompressor {
 
 impl ZstdCompressor {
     fn new(level: i32) -> Result<Self> {
-        let cctx = zstd::stream::raw::Encoder::new(level)
-            .map_err(ProtocolError::from)?;
+        let cctx = zstd::stream::raw::Encoder::new(level).map_err(ProtocolError::from)?;
         Ok(Self { cctx })
     }
 
@@ -195,7 +190,8 @@ impl ZstdCompressor {
             let mut out_buf = vec![0u8; 256];
             let mut out_buffer = zstd::stream::raw::OutBuffer::around(&mut out_buf);
 
-            let remaining = self.cctx
+            let remaining = self
+                .cctx
                 .flush(&mut out_buffer)
                 .map_err(ProtocolError::from)?;
 
@@ -221,8 +217,7 @@ struct ZstdDecompressor {
 
 impl ZstdDecompressor {
     fn new() -> Result<Self> {
-        let dctx = zstd::stream::raw::Decoder::new()
-            .map_err(ProtocolError::from)?;
+        let dctx = zstd::stream::raw::Decoder::new().map_err(ProtocolError::from)?;
         Ok(Self { dctx })
     }
 
@@ -527,16 +522,21 @@ mod tests {
     fn test_highly_compressible() {
         let data = vec![0u8; 50_000];
         let compressed = compress_block(&data, 6).unwrap();
-        assert!(compressed.len() < 100, "compressed {} bytes to {} bytes", data.len(), compressed.len());
+        assert!(
+            compressed.len() < 100,
+            "compressed {} bytes to {} bytes",
+            data.len(),
+            compressed.len()
+        );
         let decompressed = decompress_block(&compressed).unwrap();
         assert_eq!(decompressed, data);
     }
 
     #[test]
     fn test_incompressible_data() {
-        let data: Vec<u8> = (0..5000).map(|i| {
-            ((i * 7919 + 104729) % 256) as u8
-        }).collect();
+        let data: Vec<u8> = (0..5000)
+            .map(|i| ((i * 7919 + 104729) % 256) as u8)
+            .collect();
         let compressed = compress_block(&data, 6).unwrap();
         let decompressed = decompress_block(&compressed).unwrap();
         assert_eq!(decompressed, data);
@@ -689,7 +689,12 @@ mod tests {
         let data = vec![0u8; 50_000];
         let compressed = compressor.compress(&data).unwrap();
         // All zeros should compress very well.
-        assert!(compressed.len() < 1000, "compressed {} bytes to {} bytes", data.len(), compressed.len());
+        assert!(
+            compressed.len() < 1000,
+            "compressed {} bytes to {} bytes",
+            data.len(),
+            compressed.len()
+        );
         let decompressed = decompressor.decompress(&compressed, data.len()).unwrap();
         assert_eq!(decompressed, data);
     }

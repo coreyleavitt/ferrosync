@@ -115,9 +115,7 @@ pub fn match_blocks(
 }
 
 /// Build a hash table mapping rolling checksums to block indices.
-fn build_hash_table(
-    sums: &[super::sum::SumEntry],
-) -> HashMap<u32, Vec<usize>> {
+fn build_hash_table(sums: &[super::sum::SumEntry]) -> HashMap<u32, Vec<usize>> {
     let mut table: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, entry) in sums.iter().enumerate() {
         table.entry(entry.sum1).or_default().push(i);
@@ -143,7 +141,11 @@ pub fn apply_ops(basis: &[u8], ops: &[MatchOp], blength: usize, remainder: usize
             MatchOp::BlockMatch(idx) => {
                 let idx = *idx as usize;
                 let offset = idx * blength;
-                let len = if block_count > 0 && idx == block_count - 1 && remainder > 0 && remainder < blength {
+                let len = if block_count > 0
+                    && idx == block_count - 1
+                    && remainder > 0
+                    && remainder < blength
+                {
                     remainder
                 } else {
                     blength
@@ -171,8 +173,14 @@ mod tests {
         let ops = match_blocks(&data, &sums, 99, ChecksumType::Md5);
 
         // All blocks should match.
-        let match_count = ops.iter().filter(|op| matches!(op, MatchOp::BlockMatch(_))).count();
-        assert!(match_count > 0, "should have block matches for identical data");
+        let match_count = ops
+            .iter()
+            .filter(|op| matches!(op, MatchOp::BlockMatch(_)))
+            .count();
+        assert!(
+            match_count > 0,
+            "should have block matches for identical data"
+        );
 
         // No (or minimal) literal data.
         let literal_bytes: usize = ops
@@ -182,7 +190,10 @@ mod tests {
                 _ => None,
             })
             .sum();
-        assert!(literal_bytes < sums.head.blength as usize, "minimal literal data expected");
+        assert!(
+            literal_bytes < sums.head.blength as usize,
+            "minimal literal data expected"
+        );
     }
 
     #[test]
@@ -193,7 +204,10 @@ mod tests {
         let ops = match_blocks(&source, &sums, 99, ChecksumType::Md5);
 
         // No blocks should match -- all literal.
-        let match_count = ops.iter().filter(|op| matches!(op, MatchOp::BlockMatch(_))).count();
+        let match_count = ops
+            .iter()
+            .filter(|op| matches!(op, MatchOp::BlockMatch(_)))
+            .count();
         assert_eq!(match_count, 0);
 
         // All data should be literal.

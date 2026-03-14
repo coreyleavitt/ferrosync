@@ -102,7 +102,10 @@ mod tests {
         assert!(!chunks.is_empty());
         assert_eq!(chunks[0].offset, 0);
         for i in 1..chunks.len() {
-            assert_eq!(chunks[i].offset, chunks[i - 1].offset + chunks[i - 1].length);
+            assert_eq!(
+                chunks[i].offset,
+                chunks[i - 1].offset + chunks[i - 1].length
+            );
         }
         let last = chunks.last().unwrap();
         assert_eq!(last.offset + last.length, data.len());

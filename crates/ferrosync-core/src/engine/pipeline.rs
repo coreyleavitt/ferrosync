@@ -44,10 +44,8 @@ pub async fn transfer_file(
     // Generator task: compute signatures from basis, write to gen_write.
     let gen_handle = tokio::spawn(async move {
         let mut w = gen_write;
-        let result = generator::send_file_signatures(
-            &mut w, 0, &basis_owned, gen_seed, gen_ct,
-        )
-        .await;
+        let result =
+            generator::send_file_signatures(&mut w, 0, &basis_owned, gen_seed, gen_ct).await;
         if let Err(e) = &result {
             tracing::error!("generator error: {e}");
         }
@@ -71,15 +69,7 @@ pub async fn transfer_file(
                 return Ok(());
             }
 
-            sender::send_file_delta(
-                &mut r,
-                &mut w,
-                0,
-                &source_owned,
-                send_seed,
-                send_ct,
-            )
-            .await?;
+            sender::send_file_delta(&mut r, &mut w, 0, &source_owned, send_seed, send_ct).await?;
 
             sender::send_sender_done(&mut w).await?;
             Ok::<(), ProtocolError>(())
@@ -352,9 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_transfer_empty_to_empty() {
-        let result = transfer_file(b"", b"", 0, ChecksumType::Md5)
-            .await
-            .unwrap();
+        let result = transfer_file(b"", b"", 0, ChecksumType::Md5).await.unwrap();
         assert!(result.is_empty());
     }
 }
