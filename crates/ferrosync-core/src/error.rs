@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Protocol errors
 // ---------------------------------------------------------------------------
 
 /// Errors originating from rsync wire-protocol encoding/decoding.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProtocolError {
     #[error("unsupported protocol version {version} (supported: 27..=31)")]
     UnsupportedVersion { version: u8 },
@@ -45,7 +46,13 @@ pub enum ProtocolError {
     Handshake { message: String },
 
     #[error("protocol I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(Arc<std::io::Error>),
+}
+
+impl From<std::io::Error> for ProtocolError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(Arc::new(e))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +60,7 @@ pub enum ProtocolError {
 // ---------------------------------------------------------------------------
 
 /// Errors from the transport layer (local subprocess, SSH, daemon).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum TransportError {
     #[error("connection failed: {message}")]
     ConnectionFailed { message: String },
@@ -80,7 +87,13 @@ pub enum TransportError {
     HostKeyNotFound { host: String },
 
     #[error("transport I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(Arc<std::io::Error>),
+}
+
+impl From<std::io::Error> for TransportError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(Arc::new(e))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +101,7 @@ pub enum TransportError {
 // ---------------------------------------------------------------------------
 
 /// Errors from filesystem operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum FsError {
     #[error("path not found: {path}")]
     NotFound { path: PathBuf },
@@ -111,7 +124,7 @@ pub enum FsError {
     #[error("filesystem I/O error at {path}: {source}")]
     Io {
         path: PathBuf,
-        source: std::io::Error,
+        source: Arc<std::io::Error>,
     },
 }
 
@@ -120,7 +133,7 @@ pub enum FsError {
 // ---------------------------------------------------------------------------
 
 /// Errors from filter/exclude/include rule processing.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum FilterError {
     #[error("invalid filter rule: {rule}")]
     InvalidRule { rule: String },
@@ -128,7 +141,7 @@ pub enum FilterError {
     #[error("failed to read filter file {path}: {source}")]
     ReadFile {
         path: PathBuf,
-        source: std::io::Error,
+        source: Arc<std::io::Error>,
     },
 
     #[error("invalid glob pattern: {pattern}: {message}")]
@@ -140,7 +153,7 @@ pub enum FilterError {
 // ---------------------------------------------------------------------------
 
 /// Top-level error type composing all subsystem errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum FerrosyncError {
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
@@ -153,7 +166,4 @@ pub enum FerrosyncError {
 
     #[error(transparent)]
     Filter(#[from] FilterError),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
 }

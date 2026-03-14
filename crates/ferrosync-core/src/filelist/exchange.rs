@@ -46,7 +46,7 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
 
     // inc_recurse requires BOTH the capability flag AND recursive mode.
     // rsync sets inc_recurse=0 when -r is not active, even with CF_INC_RECURSE.
-    if protocol.incremental_flist && protocol.version >= 30 && opts.recursive {
+    if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
         send_file_list_incremental(w, entries, &flist_opts).await
     } else {
         send_file_list_batch(w, entries, &flist_opts).await
@@ -137,7 +137,7 @@ pub async fn recv_file_list<R: AsyncRead + Unpin>(
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
     let (entries, ndx_start, entry_ndx, num_flists) =
-        if protocol.incremental_flist && protocol.version >= 30 && opts.recursive {
+        if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
             // Incremental: entries are already sorted per-flist with correct NDX.
             recv_file_list_incremental(r, &flist_opts).await?
         } else {
@@ -277,7 +277,7 @@ pub async fn recv_file_list_streaming<R: AsyncRead + Unpin>(
 ) -> Result<()> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
-    if protocol.incremental_flist && protocol.version >= 30 && opts.recursive {
+    if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
         recv_file_list_incremental_streaming(r, &flist_opts, tx).await
     } else {
         recv_file_list_batch_streaming(r, &flist_opts, tx).await
@@ -391,6 +391,7 @@ async fn recv_id_list<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::chunker::ChunkingStrategy;
     use crate::filelist::entry::{S_IFDIR, S_IFREG};
     use crate::protocol::handshake::{
         compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
@@ -407,6 +408,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         }
     }
 
@@ -420,6 +422,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: false,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         }
     }
 
@@ -433,6 +436,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: false,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         }
     }
 
@@ -446,6 +450,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: false,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         }
     }
 

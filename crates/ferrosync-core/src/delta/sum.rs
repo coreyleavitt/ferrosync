@@ -17,6 +17,7 @@ use crate::protocol::handshake::ChecksumType;
 use crate::protocol::varint;
 
 use super::checksum::{self, MAX_DIGEST_LEN};
+use super::chunker::{chunk_data, ChunkingStrategy};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -40,6 +41,11 @@ pub struct SumEntry {
     pub sum1: u32,
     /// Strong checksum (checksum2), truncated to s2length bytes.
     pub sum2: Vec<u8>,
+    /// Per-block length for variable-size (CDC) blocks.
+    ///
+    /// `None` for fixed-size blocks (length is implicit from `SumHead::blength`).
+    /// `Some(len)` for CDC blocks where each block has its own length.
+    pub block_len: Option<u32>,
 }
 
 /// Complete set of block signatures for a file.
@@ -107,10 +113,14 @@ pub fn compute_signatures(
         let block = &data[offset..end];
 
         let sum1 = checksum::checksum1(block, char_offset);
-        let strong = checksum::checksum2(block, seed, checksum_type);
+        let strong = checksum::checksum2(block, seed, checksum_type, true);
         let sum2 = strong[..s2length as usize].to_vec();
 
-        sums.push(SumEntry { sum1, sum2 });
+        sums.push(SumEntry {
+            sum1,
+            sum2,
+            block_len: None,
+        });
         offset = end;
     }
 
@@ -118,6 +128,77 @@ pub fn compute_signatures(
         blength
     } else {
         (data.len() % blength as usize) as i32
+    };
+
+    SumStruct {
+        head: SumHead {
+            count: sums.len() as i32,
+            blength,
+            s2length,
+            remainder,
+        },
+        sums,
+    }
+}
+
+/// Compute block signatures using a configurable chunking strategy.
+///
+/// When `strategy` is `Fixed`, this behaves identically to `compute_signatures`.
+/// When `strategy` is `FastCDC`, chunks are determined by content-defined
+/// boundaries, producing variable-size blocks that are resilient to insertions
+/// and deletions.
+pub fn compute_signatures_cdc(
+    data: &[u8],
+    seed: i32,
+    checksum_type: ChecksumType,
+    strategy: &ChunkingStrategy,
+) -> SumStruct {
+    if data.is_empty() {
+        return SumStruct {
+            head: SumHead::default(),
+            sums: Vec::new(),
+        };
+    }
+
+    let is_cdc = matches!(strategy, ChunkingStrategy::FastCDC { .. });
+    let chunks = chunk_data(data, strategy);
+
+    // For the header's blength, use the average chunk size for CDC
+    // or the fixed block size for Fixed.
+    let blength = match strategy {
+        ChunkingStrategy::Fixed { block_size } => *block_size as i32,
+        ChunkingStrategy::FastCDC { avg, .. } => *avg as i32,
+    };
+
+    let file_len = data.len() as i64;
+    let s2length = compute_s2length(file_len, blength);
+    let char_offset = checksum::CHAR_OFFSET_V30;
+
+    let mut sums = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        let block = &data[chunk.offset..chunk.offset + chunk.length];
+
+        let sum1 = checksum::checksum1(block, char_offset);
+        let strong = checksum::checksum2(block, seed, checksum_type, true);
+        let sum2 = strong[..s2length as usize].to_vec();
+
+        let block_len = if is_cdc {
+            Some(chunk.length as u32)
+        } else {
+            None
+        };
+
+        sums.push(SumEntry {
+            sum1,
+            sum2,
+            block_len,
+        });
+    }
+
+    let remainder = if let Some(last) = chunks.last() {
+        last.length as i32
+    } else {
+        0
     };
 
     SumStruct {
@@ -158,6 +239,9 @@ pub async fn read_sum_head<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumHead> {
 }
 
 /// Write block signatures to the wire.
+///
+/// For fixed-size blocks (standard rsync format). Use `write_sums_cdc`
+/// for variable-size CDC blocks.
 pub async fn write_sums<W: AsyncWrite + Unpin>(
     w: &mut W,
     sums: &SumStruct,
@@ -166,12 +250,95 @@ pub async fn write_sums<W: AsyncWrite + Unpin>(
     for entry in &sums.sums {
         w.write_all(&entry.sum1.to_le_bytes())
             .await
-            .map_err(ProtocolError::Io)?;
+            .map_err(ProtocolError::from)?;
         w.write_all(&entry.sum2)
             .await
-            .map_err(ProtocolError::Io)?;
+            .map_err(ProtocolError::from)?;
     }
     Ok(())
+}
+
+/// Write block signatures with per-block lengths (CDC wire format).
+///
+/// When CDC is active, each block signature includes an explicit block
+/// length since blocks are variable-size. The wire format becomes:
+///
+/// ```text
+/// sum_head: count(i32) + blength(i32) + s2length(i32) + remainder(i32)
+/// For each block:
+///   block_len: per-block length (4 bytes, little-endian u32)
+///   sum1: rolling checksum (4 bytes, little-endian u32)
+///   sum2: strong checksum (s2length bytes)
+/// ```
+pub async fn write_sums_cdc<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    sums: &SumStruct,
+) -> Result<()> {
+    write_sum_head(w, &sums.head).await?;
+    for entry in &sums.sums {
+        // Write per-block length (required for CDC).
+        let bl = entry.block_len.unwrap_or(sums.head.blength as u32);
+        w.write_all(&bl.to_le_bytes())
+            .await
+            .map_err(ProtocolError::from)?;
+        w.write_all(&entry.sum1.to_le_bytes())
+            .await
+            .map_err(ProtocolError::from)?;
+        w.write_all(&entry.sum2)
+            .await
+            .map_err(ProtocolError::from)?;
+    }
+    Ok(())
+}
+
+/// Read block signatures with per-block lengths (CDC wire format).
+pub async fn read_sums_cdc<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
+    let head = read_sum_head(r).await?;
+
+    if head.count < 0 || head.count > MAX_BLOCK_COUNT {
+        return Err(ProtocolError::WireValueOutOfRange {
+            field: "sum_count",
+            value: head.count as i64,
+            max: MAX_BLOCK_COUNT as i64,
+        });
+    }
+    if head.s2length < 0 || head.s2length > 64 {
+        return Err(ProtocolError::WireValueOutOfRange {
+            field: "sum_s2length",
+            value: head.s2length as i64,
+            max: 64,
+        });
+    }
+
+    let mut sums = Vec::with_capacity(head.count as usize);
+
+    for _ in 0..head.count {
+        // Read per-block length.
+        let mut bl_buf = [0u8; 4];
+        r.read_exact(&mut bl_buf)
+            .await
+            .map_err(ProtocolError::from)?;
+        let block_len = u32::from_le_bytes(bl_buf);
+
+        let mut sum1_buf = [0u8; 4];
+        r.read_exact(&mut sum1_buf)
+            .await
+            .map_err(ProtocolError::from)?;
+        let sum1 = u32::from_le_bytes(sum1_buf);
+
+        let mut sum2 = vec![0u8; head.s2length as usize];
+        r.read_exact(&mut sum2)
+            .await
+            .map_err(ProtocolError::from)?;
+
+        sums.push(SumEntry {
+            sum1,
+            sum2,
+            block_len: Some(block_len),
+        });
+    }
+
+    Ok(SumStruct { head, sums })
 }
 
 /// Maximum block count from the wire (16M blocks = ~16 TiB at 1 MiB/block).
@@ -203,15 +370,19 @@ pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
         let mut sum1_buf = [0u8; 4];
         r.read_exact(&mut sum1_buf)
             .await
-            .map_err(ProtocolError::Io)?;
+            .map_err(ProtocolError::from)?;
         let sum1 = u32::from_le_bytes(sum1_buf);
 
         let mut sum2 = vec![0u8; head.s2length as usize];
         r.read_exact(&mut sum2)
             .await
-            .map_err(ProtocolError::Io)?;
+            .map_err(ProtocolError::from)?;
 
-        sums.push(SumEntry { sum1, sum2 });
+        sums.push(SumEntry {
+            sum1,
+            sum2,
+            block_len: None,
+        });
     }
 
     Ok(SumStruct { head, sums })
@@ -220,6 +391,7 @@ pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::chunker::ChunkingStrategy;
     use std::io::Cursor;
 
     #[test]
@@ -316,5 +488,113 @@ mod tests {
         let decoded = read_sums(&mut cursor).await.unwrap();
         assert_eq!(decoded.head.count, 0);
         assert!(decoded.sums.is_empty());
+    }
+
+    #[test]
+    fn test_compute_signatures_cdc_fixed_matches_original() {
+        // CDC with Fixed strategy should produce the same results as
+        // compute_signatures (except block_len is None in both cases).
+        let data = vec![0u8; 5000];
+        let original = compute_signatures(&data, 42, ChecksumType::Md5);
+
+        let blength = compute_block_length(data.len() as i64);
+        let strategy = ChunkingStrategy::Fixed {
+            block_size: blength as usize,
+        };
+        let cdc = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy);
+
+        assert_eq!(cdc.head, original.head);
+        assert_eq!(cdc.sums.len(), original.sums.len());
+        for (a, b) in cdc.sums.iter().zip(original.sums.iter()) {
+            assert_eq!(a.sum1, b.sum1);
+            assert_eq!(a.sum2, b.sum2);
+            assert_eq!(a.block_len, None);
+        }
+    }
+
+    #[test]
+    fn test_compute_signatures_cdc_variable_blocks() {
+        let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let strategy = ChunkingStrategy::default_cdc();
+        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy);
+
+        assert!(sums.head.count > 0);
+        assert_eq!(sums.sums.len(), sums.head.count as usize);
+
+        // All entries should have block_len set.
+        for entry in &sums.sums {
+            assert!(entry.block_len.is_some());
+            assert_eq!(entry.sum2.len(), sums.head.s2length as usize);
+        }
+
+        // Total of all block lengths should equal data length.
+        let total: u64 = sums
+            .sums
+            .iter()
+            .map(|e| e.block_len.unwrap() as u64)
+            .sum();
+        assert_eq!(total, data.len() as u64);
+    }
+
+    #[test]
+    fn test_compute_signatures_cdc_empty() {
+        let strategy = ChunkingStrategy::default_cdc();
+        let sums = compute_signatures_cdc(b"", 0, ChecksumType::Md5, &strategy);
+        assert_eq!(sums.head.count, 0);
+        assert!(sums.sums.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_cdc_sums_roundtrip() {
+        let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        let strategy = ChunkingStrategy::default_cdc();
+        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy);
+
+        let mut buf = Vec::new();
+        write_sums_cdc(&mut buf, &sums).await.unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let decoded = read_sums_cdc(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.head, sums.head);
+        assert_eq!(decoded.sums.len(), sums.sums.len());
+        for (a, b) in decoded.sums.iter().zip(sums.sums.iter()) {
+            assert_eq!(a.sum1, b.sum1);
+            assert_eq!(a.sum2, b.sum2);
+            assert_eq!(a.block_len, b.block_len);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fixed_sums_roundtrip_no_block_len() {
+        // Fixed-block sums should round-trip without per-block lengths.
+        let data = vec![42u8; 5000];
+        let sums = compute_signatures(&data, 99, ChecksumType::Md5);
+
+        let mut buf = Vec::new();
+        write_sums(&mut buf, &sums).await.unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let decoded = read_sums(&mut cursor).await.unwrap();
+
+        assert_eq!(decoded.head, sums.head);
+        for entry in &decoded.sums {
+            assert_eq!(entry.block_len, None);
+        }
+    }
+
+    #[test]
+    fn test_fallback_to_fixed_for_rsync_compat() {
+        // When using Fixed strategy (rsync compat), block_len should be None.
+        let data = vec![0u8; 10_000];
+        let strategy = ChunkingStrategy::Fixed { block_size: 700 };
+        let sums = compute_signatures_cdc(&data, 0, ChecksumType::Md5, &strategy);
+
+        for entry in &sums.sums {
+            assert_eq!(
+                entry.block_len, None,
+                "Fixed strategy should not set per-block lengths"
+            );
+        }
     }
 }

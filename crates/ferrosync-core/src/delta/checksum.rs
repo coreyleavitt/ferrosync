@@ -38,21 +38,61 @@ pub fn checksum1(data: &[u8], char_offset: u32) -> u32 {
 ///
 /// Seeded with the transfer's checksum seed to prevent precomputed collision
 /// attacks. Returns the full digest (16 bytes for both MD4 and MD5).
-pub fn checksum2(data: &[u8], seed: i32, checksum_type: ChecksumType) -> Vec<u8> {
+///
+/// When `proper_seed_order` is true (modern rsync, CF_CHKSUM_SEED_FIX),
+/// the seed is hashed before the data. When false (older rsync), the seed
+/// is hashed after the data.
+pub fn checksum2(
+    data: &[u8],
+    seed: i32,
+    checksum_type: ChecksumType,
+    proper_seed_order: bool,
+) -> Vec<u8> {
+    let seed_bytes = seed.to_le_bytes();
     match checksum_type {
         ChecksumType::Md4 => {
             use md4::{Digest, Md4};
             let mut h = Md4::new();
-            h.update(seed.to_le_bytes());
-            h.update(data);
+            if proper_seed_order {
+                h.update(seed_bytes);
+                h.update(data);
+            } else {
+                h.update(data);
+                h.update(seed_bytes);
+            }
             h.finalize().to_vec()
         }
         ChecksumType::Md5 => {
             use md5::{Digest, Md5};
             let mut h = Md5::new();
-            h.update(seed.to_le_bytes());
-            h.update(data);
+            if proper_seed_order {
+                h.update(seed_bytes);
+                h.update(data);
+            } else {
+                h.update(data);
+                h.update(seed_bytes);
+            }
             h.finalize().to_vec()
+        }
+        ChecksumType::Blake3 => {
+            let mut h = blake3::Hasher::new();
+            if proper_seed_order {
+                h.update(&seed_bytes);
+                h.update(data);
+            } else {
+                h.update(data);
+                h.update(&seed_bytes);
+            }
+            h.finalize().as_bytes().to_vec()
+        }
+        ChecksumType::Xxh3 => {
+            // XOR seed into the xxh3 seed parameter.
+            let hash = xxhash_rust::xxh3::xxh3_64_with_seed(data, seed as u64);
+            hash.to_le_bytes().to_vec()
+        }
+        ChecksumType::Xxh128 => {
+            let hash = xxhash_rust::xxh3::xxh3_128_with_seed(data, seed as u64);
+            hash.to_le_bytes().to_vec()
         }
         ChecksumType::None => vec![0; checksum_type.digest_len()],
     }
@@ -77,6 +117,19 @@ pub fn file_checksum(data: &[u8], _seed: i32, checksum_type: ChecksumType) -> Ve
             let mut h = Md5::new();
             h.update(data);
             h.finalize().to_vec()
+        }
+        ChecksumType::Blake3 => {
+            let mut h = blake3::Hasher::new();
+            h.update(data);
+            h.finalize().as_bytes().to_vec()
+        }
+        ChecksumType::Xxh3 => {
+            let hash = xxhash_rust::xxh3::xxh3_64(data);
+            hash.to_le_bytes().to_vec()
+        }
+        ChecksumType::Xxh128 => {
+            let hash = xxhash_rust::xxh3::xxh3_128(data);
+            hash.to_le_bytes().to_vec()
         }
         ChecksumType::None => vec![0; checksum_type.digest_len()],
     }
@@ -187,23 +240,32 @@ mod tests {
 
     #[test]
     fn test_checksum2_md5() {
-        let c = checksum2(b"test data", 12345, ChecksumType::Md5);
+        let c = checksum2(b"test data", 12345, ChecksumType::Md5, true);
         assert_eq!(c.len(), ChecksumType::Md5.digest_len());
         // Verify determinism.
-        assert_eq!(c, checksum2(b"test data", 12345, ChecksumType::Md5));
+        assert_eq!(c, checksum2(b"test data", 12345, ChecksumType::Md5, true));
     }
 
     #[test]
     fn test_checksum2_md4() {
-        let c = checksum2(b"test data", 12345, ChecksumType::Md4);
+        let c = checksum2(b"test data", 12345, ChecksumType::Md4, true);
         assert_eq!(c.len(), ChecksumType::Md4.digest_len());
     }
 
     #[test]
     fn test_checksum2_different_seeds() {
-        let c1 = checksum2(b"same data", 1, ChecksumType::Md5);
-        let c2 = checksum2(b"same data", 2, ChecksumType::Md5);
+        let c1 = checksum2(b"same data", 1, ChecksumType::Md5, true);
+        let c2 = checksum2(b"same data", 2, ChecksumType::Md5, true);
         assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_checksum2_seed_order() {
+        // When proper_seed_order is true, seed goes before data.
+        // When false, seed goes after data. Results should differ.
+        let c_proper = checksum2(b"test", 42, ChecksumType::Md5, true);
+        let c_old = checksum2(b"test", 42, ChecksumType::Md5, false);
+        assert_ne!(c_proper, c_old);
     }
 
     #[test]
@@ -214,11 +276,144 @@ mod tests {
         // With seed, checksum2 differs from seedless file_checksum.
         assert_ne!(
             file_checksum(data, seed, ChecksumType::Md5),
-            checksum2(data, seed, ChecksumType::Md5),
+            checksum2(data, seed, ChecksumType::Md5, true),
         );
         // file_checksum is plain MD5 of data.
         use md5::{Digest, Md5};
         let expected = Md5::digest(data).to_vec();
         assert_eq!(file_checksum(data, seed, ChecksumType::Md5), expected);
+    }
+
+    // -----------------------------------------------------------------------
+    // BLAKE3 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_blake3_file_checksum_empty() {
+        let c = file_checksum(b"", 0, ChecksumType::Blake3);
+        assert_eq!(c.len(), 32);
+        // Known BLAKE3 hash of empty input.
+        let expected = blake3::hash(b"");
+        assert_eq!(c, expected.as_bytes().as_slice());
+    }
+
+    #[test]
+    fn test_blake3_file_checksum_hello_world() {
+        let c = file_checksum(b"hello world", 0, ChecksumType::Blake3);
+        assert_eq!(c.len(), 32);
+        let expected = blake3::hash(b"hello world");
+        assert_eq!(c, expected.as_bytes().as_slice());
+    }
+
+    #[test]
+    fn test_blake3_checksum2_deterministic() {
+        let c1 = checksum2(b"test data", 42, ChecksumType::Blake3, true);
+        let c2 = checksum2(b"test data", 42, ChecksumType::Blake3, true);
+        assert_eq!(c1.len(), 32);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_blake3_checksum2_seed_order() {
+        let c_proper = checksum2(b"test", 42, ChecksumType::Blake3, true);
+        let c_old = checksum2(b"test", 42, ChecksumType::Blake3, false);
+        assert_ne!(c_proper, c_old);
+    }
+
+    #[test]
+    fn test_blake3_checksum2_different_seeds() {
+        let c1 = checksum2(b"same", 1, ChecksumType::Blake3, true);
+        let c2 = checksum2(b"same", 2, ChecksumType::Blake3, true);
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_blake3_file_checksum_ignores_seed() {
+        let c1 = file_checksum(b"data", 1, ChecksumType::Blake3);
+        let c2 = file_checksum(b"data", 999, ChecksumType::Blake3);
+        assert_eq!(c1, c2);
+    }
+
+    // -----------------------------------------------------------------------
+    // XXH3 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_xxh3_checksum2_deterministic() {
+        let c1 = checksum2(b"test data", 42, ChecksumType::Xxh3, true);
+        let c2 = checksum2(b"test data", 42, ChecksumType::Xxh3, true);
+        assert_eq!(c1.len(), 8);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_xxh3_checksum2_known_vector() {
+        // Verify against the xxhash-rust crate directly.
+        let hash = xxhash_rust::xxh3::xxh3_64_with_seed(b"hello", 0);
+        let c = checksum2(b"hello", 0, ChecksumType::Xxh3, true);
+        assert_eq!(c, hash.to_le_bytes());
+    }
+
+    #[test]
+    fn test_xxh3_checksum2_different_seeds() {
+        let c1 = checksum2(b"same", 1, ChecksumType::Xxh3, true);
+        let c2 = checksum2(b"same", 2, ChecksumType::Xxh3, true);
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_xxh3_file_checksum() {
+        let c = file_checksum(b"hello world", 0, ChecksumType::Xxh3);
+        assert_eq!(c.len(), 8);
+        let expected = xxhash_rust::xxh3::xxh3_64(b"hello world");
+        assert_eq!(c, expected.to_le_bytes());
+    }
+
+    #[test]
+    fn test_xxh3_file_checksum_ignores_seed() {
+        let c1 = file_checksum(b"data", 1, ChecksumType::Xxh3);
+        let c2 = file_checksum(b"data", 999, ChecksumType::Xxh3);
+        assert_eq!(c1, c2);
+    }
+
+    // -----------------------------------------------------------------------
+    // XXH128 tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_xxh128_checksum2_deterministic() {
+        let c1 = checksum2(b"test data", 42, ChecksumType::Xxh128, true);
+        let c2 = checksum2(b"test data", 42, ChecksumType::Xxh128, true);
+        assert_eq!(c1.len(), 16);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn test_xxh128_checksum2_known_vector() {
+        let hash = xxhash_rust::xxh3::xxh3_128_with_seed(b"hello", 0);
+        let c = checksum2(b"hello", 0, ChecksumType::Xxh128, true);
+        assert_eq!(c, hash.to_le_bytes());
+    }
+
+    #[test]
+    fn test_xxh128_checksum2_different_seeds() {
+        let c1 = checksum2(b"same", 1, ChecksumType::Xxh128, true);
+        let c2 = checksum2(b"same", 2, ChecksumType::Xxh128, true);
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn test_xxh128_file_checksum() {
+        let c = file_checksum(b"hello world", 0, ChecksumType::Xxh128);
+        assert_eq!(c.len(), 16);
+        let expected = xxhash_rust::xxh3::xxh3_128(b"hello world");
+        assert_eq!(c, expected.to_le_bytes());
+    }
+
+    #[test]
+    fn test_xxh128_file_checksum_ignores_seed() {
+        let c1 = file_checksum(b"data", 1, ChecksumType::Xxh128);
+        let c2 = file_checksum(b"data", 999, ChecksumType::Xxh128);
+        assert_eq!(c1, c2);
     }
 }

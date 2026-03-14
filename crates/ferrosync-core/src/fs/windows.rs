@@ -48,7 +48,7 @@ impl WindowsFileSystem {
             },
             _ => FsError::Io {
                 path: path.to_path_buf(),
-                source: e,
+                source: std::sync::Arc::new(e),
             },
         }
     }
@@ -214,10 +214,7 @@ impl FileSystem for WindowsFileSystem {
         Ok(())
     }
 
-    fn set_owner(&self, _path: &Path, _uid: u32, _gid: u32) -> Result<()> {
-        // Windows has no uid/gid concept. Silently succeed.
-        Ok(())
-    }
+    // set_owner is gated behind #[cfg(unix)] in the trait -- not available on Windows.
 
     fn remove_file(&self, path: &Path) -> Result<()> {
         fs::remove_file(path).map_err(|e| Self::map_io_err(path, e))
@@ -249,11 +246,7 @@ impl FileSystem for WindowsFileSystem {
         fs::symlink_metadata(path).is_ok()
     }
 
-    fn device_id(&self, _path: &Path) -> Result<u64> {
-        // Standard Rust API doesn't expose volume serial number.
-        // Return 0; --one-file-system won't function correctly on Windows.
-        Ok(0)
-    }
+    // device_id is gated behind #[cfg(unix)] in the trait -- not available on Windows.
 
     fn write_file_inplace(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
         let mut file = OpenOptions::new()
@@ -352,6 +345,76 @@ impl FileSystem for WindowsFileSystem {
         fs::copy(src, dst)
             .map_err(|e| Self::map_io_err(src, e))
             .map(|_| ())
+    }
+
+    fn read_file_stream(&self, path: &Path) -> Result<Box<dyn std::io::Read + Send>> {
+        let file = fs::File::open(path).map_err(|e| Self::map_io_err(path, e))?;
+        Ok(Box::new(std::io::BufReader::new(file)))
+    }
+
+    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn std::io::Write + Send>> {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let tmp_name = format!(".ferrosync.{}.stream.tmp", std::process::id());
+        let tmp_path = parent.join(&tmp_name);
+        let dest_path = path.to_path_buf();
+
+        let file = fs::File::create(&tmp_path)
+            .map_err(|e| Self::map_io_err(&tmp_path, e))?;
+
+        Ok(Box::new(WindowsAtomicFileWriter {
+            inner: std::io::BufWriter::new(file),
+            tmp_path,
+            dest_path,
+            mode,
+            finished: false,
+        }))
+    }
+}
+
+/// Writer that writes to a temp file and atomically renames on close.
+struct WindowsAtomicFileWriter {
+    inner: std::io::BufWriter<fs::File>,
+    tmp_path: std::path::PathBuf,
+    dest_path: std::path::PathBuf,
+    mode: Option<u32>,
+    finished: bool,
+}
+
+impl std::io::Write for WindowsAtomicFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl WindowsAtomicFileWriter {
+    fn finish_inner(&mut self) -> std::io::Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        self.inner.flush()?;
+
+        if let Some(m) = self.mode {
+            let readonly = m & 0o222 == 0;
+            let mut perms = fs::metadata(&self.tmp_path)?.permissions();
+            perms.set_readonly(readonly);
+            fs::set_permissions(&self.tmp_path, perms)?;
+        }
+
+        fs::rename(&self.tmp_path, &self.dest_path)?;
+        Ok(())
+    }
+}
+
+impl Drop for WindowsAtomicFileWriter {
+    fn drop(&mut self) {
+        if let Err(_) = self.finish_inner() {
+            let _ = fs::remove_file(&self.tmp_path);
+        }
     }
 }
 

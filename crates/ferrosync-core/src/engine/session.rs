@@ -18,16 +18,16 @@ use crate::delta::checksum;
 use crate::delta::sum;
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::receiver;
-use crate::error::FsError;
+use crate::error::{FsError, ProtocolError};
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem};
+use crate::fs::{DirEntry, FileSystem, STREAMING_THRESHOLD};
 use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
 use crate::protocol::multiplex::{MplexMessage, MplexReader, MplexWriter};
 use crate::stats::TransferStats;
-use crate::transport::{Transport, TransportStreams};
+use crate::transport::Transport;
 
 use super::transfer::TransferResult;
 
@@ -60,49 +60,49 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
     // Single-char flags MUST come before the capability string, because
     // rsync's option parser treats `e` as consuming the rest of the arg
     // as its value.
-    if opts.preserve_links {
+    if opts.preserve_links() {
         s.push('l');
     }
-    if opts.preserve_owner {
+    if opts.preserve_owner() {
         s.push('o');
     }
-    if opts.preserve_group {
+    if opts.preserve_group() {
         s.push('g');
     }
-    if opts.preserve_devices || opts.preserve_specials {
+    if opts.preserve_devices() || opts.preserve_specials() {
         s.push('D');
     }
-    if opts.preserve_times {
+    if opts.preserve_times() {
         s.push('t');
     }
-    if opts.preserve_perms {
+    if opts.preserve_perms() {
         s.push('p');
     }
-    if opts.recursive {
+    if opts.recursive() {
         s.push('r');
     }
-    if opts.compress {
+    if opts.compress() {
         s.push('z');
     }
-    if opts.checksum_mode {
+    if opts.checksum_mode() {
         s.push('c');
     }
-    if opts.update {
+    if opts.update() {
         s.push('u');
     }
-    if opts.dry_run {
+    if opts.dry_run() {
         s.push('n');
     }
-    if opts.whole_file {
+    if opts.whole_file() {
         s.push('W');
     }
-    if opts.one_file_system {
+    if opts.one_file_system() {
         s.push('x');
     }
-    if opts.sparse {
+    if opts.sparse() {
         s.push('S');
     }
-    match opts.verbosity {
+    match opts.verbosity() {
         crate::options::Verbosity::Quiet => s.push('q'),
         crate::options::Verbosity::Verbose => s.push('v'),
         crate::options::Verbosity::VeryVerbose => {
@@ -123,24 +123,24 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
     // For push (am_sender=true), don't advertise incremental recursion ('i')
     // because our sender doesn't implement per-directory sub-list generation.
     // For pull, 'i' is fine since rsync's sender handles incremental sub-lists.
-    let use_inc_recurse = opts.recursive && !_am_sender;
+    let use_inc_recurse = opts.recursive() && !_am_sender;
     let caps = build_capability_string(use_inc_recurse, true, false);
     s.push('e');
     s.push_str(&caps);
 
     // Long-form options are separate arguments appended after the
     // condensed string.
-    if opts.inplace {
+    if opts.inplace() {
         s.push_str(" --inplace");
     }
-    if opts.numeric_ids {
+    if opts.numeric_ids() {
         s.push_str(" --numeric-ids");
     }
-    if opts.append {
+    if opts.append() {
         s.push_str(" --append");
     }
 
-    match opts.delete {
+    match opts.delete() {
         DeleteMode::Before => s.push_str(" --delete-before"),
         DeleteMode::During => s.push_str(" --delete-during"),
         DeleteMode::After => s.push_str(" --delete-after"),
@@ -213,19 +213,16 @@ impl<T: Transport> SyncSession<T> {
         } = self;
 
         // 1. Connect transport.
-        let TransportStreams {
-            mut reader,
-            mut writer,
-        } = Box::new(transport).connect().await?;
+        let mut streams = Box::new(transport).connect().await?;
 
         let am_sender = direction == SyncDirection::Push;
 
         // 2. Protocol handshake (non-multiplexed phase).
         let protocol = handshake::client_handshake(
-            &mut reader,
-            &mut writer,
+            &mut streams.reader,
+            &mut streams.writer,
             am_sender,
-            options.compress,
+            options.compress(),
         )
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
@@ -240,6 +237,18 @@ impl<T: Transport> SyncSession<T> {
         );
 
         // 3. Exchange file lists and transfer.
+        // Take ownership of reader/writer, keeping background_task alive.
+        let reader = std::mem::replace(
+            &mut streams.reader,
+            Box::new(tokio::io::empty()),
+        );
+        let writer = std::mem::replace(
+            &mut streams.writer,
+            Box::new(tokio::io::sink()),
+        );
+        // Keep streams alive so background_task is not aborted.
+        let _streams_guard = streams;
+
         if am_sender {
             run_push(reader, writer, &protocol, &options, &*fs, &mut progress).await
         } else {
@@ -293,8 +302,14 @@ async fn run_push(
     //
     // TODO: For SSH/daemon transports, send filter list here.
 
+    // eprintln!("[client-push] about to build and send file list");
+
     // 2. Build and send file list.
-    let entries = build_source_entries(fs, options)?;
+    // DEBUG: print entries before send
+    let mut entries = build_source_entries(fs, options)?;
+    // Sort entries in rsync canonical order so NDX mapping matches what the
+    // receiver sees after decoding and sorting the file list.
+    crate::filelist::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
     let total_bytes: i64 = entries.iter().map(|e| e.len).sum();
     progress.set_totals(stats.total_files, total_bytes as u64);
@@ -316,7 +331,7 @@ async fn run_push(
     // Compute NDX -> entry index mapping.
     // With inc_recurse (proto >= 30 AND recursive), ndx_start = 1; otherwise 0.
     let ndx_start: i32 =
-        if protocol.incremental_flist && proto_ver >= 30 && options.recursive {
+        if protocol.incremental_flist && proto_ver >= 30 && options.recursive() {
             1
         } else {
             0
@@ -327,6 +342,8 @@ async fn run_push(
         .map(|(i, _)| (ndx_start + i as i32, i))
         .collect();
 
+    // eprintln!("[client-push] file list sent, entering sender loop");
+
     // 3. Sender loop: read NDX from generator, send delta data.
     let mut gen_ndx_state = crate::protocol::varint::NdxState::default();
     let mut send_ndx_state = crate::protocol::varint::NdxState::default();
@@ -335,6 +352,7 @@ async fn run_push(
     let mut phase: u32 = 0;
 
     loop {
+        // eprintln!("[client-push] waiting for NDX from generator...");
         let ndx = crate::protocol::varint::read_ndx(
             &mut demux_read,
             &mut gen_ndx_state,
@@ -343,6 +361,7 @@ async fn run_push(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
+        // eprintln!("[client-push] got NDX={ndx}");
         if ndx == crate::protocol::varint::NDX_DONE {
             phase += 1;
             if phase > max_phase {
@@ -380,13 +399,15 @@ async fn run_push(
         if proto_ver >= 29 {
             use tokio::io::AsyncReadExt;
             let mut iflags_buf = [0u8; 2];
-            demux_read.read_exact(&mut iflags_buf).await?;
+            demux_read.read_exact(&mut iflags_buf).await
+                .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             iflags = u16::from_le_bytes(iflags_buf);
 
             // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
             if iflags & 0x0800 != 0 {
                 let mut bt = [0u8; 1];
-                demux_read.read_exact(&mut bt).await?;
+                demux_read.read_exact(&mut bt).await
+                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
             // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
             if iflags & 0x1000 != 0 {
@@ -404,7 +425,8 @@ async fn run_push(
                 }
                 let mut name_buf = vec![0u8; name_len as usize];
                 use tokio::io::AsyncReadExt;
-                demux_read.read_exact(&mut name_buf).await?;
+                demux_read.read_exact(&mut name_buf).await
+                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
         }
 
@@ -431,7 +453,7 @@ async fn run_push(
 
         progress.emit(ProgressEvent::FileStart {
             index: ndx,
-            name: entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&entry.name),
             size: entry.len,
         });
 
@@ -532,7 +554,7 @@ async fn run_push(
 
         progress.emit(ProgressEvent::FileComplete {
             index: ndx,
-            name: entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&entry.name),
             literal_bytes,
             matched_bytes,
         });
@@ -675,8 +697,8 @@ async fn run_pull(
     tracing::debug!(count = entries.len(), "received file list");
 
     let dest = options
-        .dest
-        .clone()
+        .dest()
+        .cloned()
         .ok_or_else(|| FsError::NotFound {
             path: PathBuf::from("<no destination>"),
         })?;
@@ -694,8 +716,8 @@ async fn run_pull(
         }
         let name_str = String::from_utf8_lossy(&entry.name);
         let dest_path = sanitize_path(&dest, &name_str)?;
-        if !options.dry_run {
-            let mode = if options.preserve_perms {
+        if !options.dry_run() {
+            let mode = if options.preserve_perms() {
                 entry.mode & 0o7777
             } else {
                 0o755
@@ -716,7 +738,7 @@ async fn run_pull(
 
         progress.emit(ProgressEvent::FileStart {
             index: idx as i32,
-            name: entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&entry.name),
             size: entry.len,
         });
 
@@ -727,12 +749,12 @@ async fn run_pull(
             }
         }
 
-        if options.dry_run {
+        if options.dry_run() {
             stats.files_transferred += 1;
             stats.total_size += entry.len as u64;
             progress.emit(ProgressEvent::FileComplete {
                 index: idx as i32,
-                name: entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&entry.name),
                 literal_bytes: entry.len as u64,
                 matched_bytes: 0,
             });
@@ -745,7 +767,7 @@ async fn run_pull(
         // and not in checksum mode (which always verifies).
         // Quick check: skip files that are already up-to-date.
         // Matches rsync's cmp_time which compares seconds only.
-        if options.preserve_times && !options.checksum_mode {
+        if options.preserve_times() && !options.checksum_mode() {
             if let Ok(dest_meta) = fs.lstat(&dest_path) {
                 if dest_meta.len == entry.len && dest_meta.mtime == entry.mtime {
                     // Same size + same mtime (seconds) = already synced, skip.
@@ -795,13 +817,15 @@ async fn run_pull(
         if proto_ver >= 29 {
             use tokio::io::AsyncReadExt;
             let mut iflags_buf = [0u8; 2];
-            demux_read.read_exact(&mut iflags_buf).await?;
+            demux_read.read_exact(&mut iflags_buf).await
+                .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             let iflags = u16::from_le_bytes(iflags_buf);
 
             // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
             if iflags & 0x0800 != 0 {
                 let mut bt = [0u8; 1];
-                demux_read.read_exact(&mut bt).await?;
+                demux_read.read_exact(&mut bt).await
+                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
             // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
             if iflags & 0x1000 != 0 {
@@ -818,7 +842,8 @@ async fn run_pull(
                     ));
                 }
                 let mut name_buf = vec![0u8; name_len as usize];
-                demux_read.read_exact(&mut name_buf).await?;
+                demux_read.read_exact(&mut name_buf).await
+                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
         }
 
@@ -846,20 +871,39 @@ async fn run_pull(
         let literal_bytes = result_data.len() as u64;
 
         // Write reconstructed file.
-        let mode = if options.preserve_perms {
+        let mode = if options.preserve_perms() {
             Some(entry.mode & 0o7777)
         } else {
             None
         };
-        fs.write_file(&dest_path, &result_data, mode)?;
+        if result_data.len() as i64 >= STREAMING_THRESHOLD {
+            use std::io::Write;
+            let mut writer = fs.write_file_stream(&dest_path, mode)?;
+            writer.write_all(&result_data).map_err(|e| {
+                crate::FerrosyncError::Fs(FsError::Io {
+                    path: dest_path.clone(),
+                    source: std::sync::Arc::new(e),
+                })
+            })?;
+            writer.flush().map_err(|e| {
+                crate::FerrosyncError::Fs(FsError::Io {
+                    path: dest_path.clone(),
+                    source: std::sync::Arc::new(e),
+                })
+            })?;
+            drop(writer);
+        } else {
+            fs.write_file(&dest_path, &result_data, mode)?;
+        }
 
         // Set metadata.
-        if options.preserve_times {
+        if options.preserve_times() {
             if let Err(e) = fs.set_mtime(&dest_path, entry.mtime, entry.mtime_nsec) {
                 tracing::warn!(path = %dest_path.display(), error = %e, "failed to set mtime");
             }
         }
-        if options.preserve_owner {
+        #[cfg(unix)]
+        if options.preserve_owner() {
             if let Err(e) = fs.set_owner(&dest_path, entry.uid, entry.gid) {
                 tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
             }
@@ -872,7 +916,7 @@ async fn run_pull(
 
         progress.emit(ProgressEvent::FileComplete {
             index: idx as i32,
-            name: entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&entry.name),
             literal_bytes,
             matched_bytes: 0,
         });
@@ -880,10 +924,10 @@ async fn run_pull(
 
     // Handle symlinks.
     for entry in &entries {
-        if entry.is_symlink() && options.preserve_links {
+        if entry.is_symlink() && options.preserve_links() {
             let name_str = String::from_utf8_lossy(&entry.name);
             let dest_path = sanitize_path(&dest, &name_str)?;
-            if !options.dry_run && !entry.link_target.is_empty() {
+            if !options.dry_run() && !entry.link_target.is_empty() {
                 let _ = fs.create_symlink(&entry.link_target, &dest_path);
             }
             stats.symlinks += 1;
@@ -939,8 +983,6 @@ async fn run_pull(
     }
 
     // Read transfer stats from the sender.
-    // sender writes: total_read, total_written, total_size as varlong30(min_bytes=3)
-    // plus flist_buildtime, flist_xfertime for proto >= 29.
     let _total_read = crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
@@ -1034,17 +1076,17 @@ fn sanitize_path(dest: &std::path::Path, name: &str) -> Result<PathBuf> {
 fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
 
-    for pattern in &options.exclude {
+    for pattern in options.exclude() {
         let rule = format!("- {pattern}");
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }
-    for pattern in &options.include {
+    for pattern in options.include() {
         let rule = format!("+ {pattern}");
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }
-    for rule in &options.filter {
+    for rule in options.filter() {
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }
@@ -1063,8 +1105,8 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
 
 /// Build FileEntry list from source paths in options.
 fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Result<Vec<FileEntry>> {
-    let source_paths = &options.source;
-    let filters = FilterRuleList::from_options(&options.exclude, &options.include, &options.filter)?;
+    let source_paths = options.source();
+    let filters = FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
 
     let mut entries = Vec::new();
 
@@ -1089,7 +1131,7 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
             continue;
         }
 
-        if meta.mode & S_IFMT == S_IFDIR && options.recursive {
+        if meta.mode & S_IFMT == S_IFDIR && options.recursive() {
             collect_directory_entries(fs, source, &[], &mut entries, &filters)?;
         } else {
             let mut entry = meta.to_file_entry(name);
@@ -1160,8 +1202,8 @@ fn read_source_file(
     options: &TransferOptions,
 ) -> Result<Vec<u8>> {
     let name_str = String::from_utf8_lossy(&entry.name);
-    for source in &options.source {
-        let path = if options.source.len() == 1
+    for source in options.source() {
+        let path = if options.source().len() == 1
             && fs
                 .lstat(source)
                 .is_ok_and(|m| m.mode & S_IFMT == S_IFDIR)
@@ -1280,10 +1322,9 @@ mod tests {
 
     #[test]
     fn test_build_server_options_verbose() {
-        let opts = TransferOptions {
-            verbosity: Verbosity::VeryVerbose,
-            ..Default::default()
-        };
+        let opts = TransferOptions::builder()
+            .verbosity(Verbosity::VeryVerbose)
+            .build();
         let s = build_server_options(&opts, true);
         assert!(s.contains("vv"), "missing -vv");
     }

@@ -29,7 +29,7 @@ impl UnixFileSystem {
             },
             _ => FsError::Io {
                 path: path.to_path_buf(),
-                source: e,
+                source: std::sync::Arc::new(e),
             },
         }
     }
@@ -138,10 +138,10 @@ impl FileSystem for UnixFileSystem {
         let c_path =
             CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
                 path: path.to_path_buf(),
-                source: std::io::Error::new(
+                source: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "path contains null byte",
-                ),
+                )),
             })?;
 
         let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
@@ -157,10 +157,10 @@ impl FileSystem for UnixFileSystem {
         let c_path =
             CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
                 path: path.to_path_buf(),
-                source: std::io::Error::new(
+                source: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "path contains null byte",
-                ),
+                )),
             })?;
 
         let ret = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
@@ -295,6 +295,78 @@ impl FileSystem for UnixFileSystem {
             .map_err(|e| Self::map_io_err(src, e))
             .map(|_| ())
     }
+
+    fn read_file_stream(&self, path: &Path) -> Result<Box<dyn std::io::Read + Send>> {
+        let file = std::fs::File::open(path).map_err(|e| Self::map_io_err(path, e))?;
+        Ok(Box::new(std::io::BufReader::new(file)))
+    }
+
+    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn std::io::Write + Send>> {
+        let parent = path.parent().unwrap_or(Path::new("."));
+        let tmp_name = format!(".ferrosync.{}.stream.tmp", std::process::id());
+        let tmp_path = parent.join(&tmp_name);
+        let dest_path = path.to_path_buf();
+
+        let file = std::fs::File::create(&tmp_path)
+            .map_err(|e| Self::map_io_err(&tmp_path, e))?;
+
+        Ok(Box::new(AtomicFileWriter {
+            inner: std::io::BufWriter::new(file),
+            tmp_path,
+            dest_path,
+            mode,
+            finished: false,
+        }))
+    }
+}
+
+/// Writer that writes to a temp file and atomically renames on close.
+struct AtomicFileWriter {
+    inner: std::io::BufWriter<std::fs::File>,
+    tmp_path: std::path::PathBuf,
+    dest_path: std::path::PathBuf,
+    mode: Option<u32>,
+    finished: bool,
+}
+
+impl std::io::Write for AtomicFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl AtomicFileWriter {
+    fn finish_inner(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+        self.inner.flush()?;
+
+        if let Some(m) = self.mode {
+            std::fs::set_permissions(
+                &self.tmp_path,
+                std::fs::Permissions::from_mode(m),
+            )?;
+        }
+
+        std::fs::rename(&self.tmp_path, &self.dest_path)?;
+        Ok(())
+    }
+}
+
+impl Drop for AtomicFileWriter {
+    fn drop(&mut self) {
+        if let Err(_) = self.finish_inner() {
+            // Best-effort cleanup of temp file on failure.
+            let _ = std::fs::remove_file(&self.tmp_path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +471,57 @@ mod tests {
         let (tmp, fs) = setup();
         let dev = fs.device_id(tmp.path()).unwrap();
         assert!(dev > 0);
+    }
+
+    #[test]
+    fn test_read_file_stream() {
+        use std::io::Read;
+        let (tmp, fs) = setup();
+        let path = tmp.path().join("stream_read.txt");
+        fs.write_file(&path, b"streamed content", None).unwrap();
+
+        let mut reader = fs.read_file_stream(&path).unwrap();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"streamed content");
+    }
+
+    #[test]
+    fn test_write_file_stream() {
+        use std::io::Write;
+        let (tmp, fs) = setup();
+        let path = tmp.path().join("stream_write.txt");
+
+        {
+            let mut writer = fs.write_file_stream(&path, Some(0o644)).unwrap();
+            writer.write_all(b"hello ").unwrap();
+            writer.write_all(b"world").unwrap();
+            writer.flush().unwrap();
+        }
+        // After drop, file should be atomically renamed.
+        let data = fs.read_file(&path).unwrap();
+        assert_eq!(data, b"hello world");
+
+        let meta = fs.stat(&path).unwrap();
+        assert_eq!(meta.mode & 0o777, 0o644);
+    }
+
+    #[test]
+    fn test_stream_roundtrip() {
+        use std::io::{Read, Write};
+        let (tmp, fs) = setup();
+        let path = tmp.path().join("roundtrip.bin");
+        let data: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
+
+        {
+            let mut writer = fs.write_file_stream(&path, None).unwrap();
+            writer.write_all(&data).unwrap();
+            writer.flush().unwrap();
+        }
+
+        let mut reader = fs.read_file_stream(&path).unwrap();
+        let mut result = Vec::new();
+        reader.read_to_end(&mut result).unwrap();
+        assert_eq!(result, data);
     }
 }

@@ -74,7 +74,7 @@ pub fn match_blocks(
 
         if let Some(candidates) = hash_table.get(&digest) {
             let window = &source[pos..pos + blength];
-            let strong = checksum::checksum2(window, seed, checksum_type);
+            let strong = checksum::checksum2(window, seed, checksum_type, true);
             let strong_truncated = &strong[..s2length.min(strong.len())];
 
             for &idx in candidates {

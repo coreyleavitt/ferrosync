@@ -176,89 +176,94 @@ impl SshTransport {
 }
 
 impl Transport for SshTransport {
-    async fn connect(self: Box<Self>) -> Result<TransportStreams> {
-        let addr = format!("{}:{}", self.config.host, self.config.port);
+    fn connect(
+        self: Box<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TransportStreams>> + Send>> {
+        Box::pin(async move {
+            let addr = format!("{}:{}", self.config.host, self.config.port);
 
-        let ssh_config = Arc::new(client::Config::default());
+            let ssh_config = Arc::new(client::Config::default());
 
-        let handler = SshClientHandler {
-            host: self.config.host.clone(),
-            port: self.config.port,
-            known_hosts_policy: self.config.known_hosts_policy,
-        };
+            let handler = SshClientHandler {
+                host: self.config.host.clone(),
+                port: self.config.port,
+                known_hosts_policy: self.config.known_hosts_policy,
+            };
 
-        // Connect with external timeout (russh Config has no connection_timeout).
-        tracing::debug!(addr = %addr, user = %self.config.user, "connecting via SSH");
-        let mut session = tokio::time::timeout(
-            self.config.connect_timeout,
-            client::connect(ssh_config, &addr, handler),
-        )
-        .await
-        .map_err(|_| TransportError::ConnectionFailed {
-            message: format!("SSH connection to {addr} timed out"),
-        })?
-        .map_err(|e| TransportError::ConnectionFailed {
-            message: format!("SSH connection to {addr} failed: {e}"),
-        })?;
+            // Connect with external timeout (russh Config has no connection_timeout).
+            tracing::debug!(addr = %addr, user = %self.config.user, "connecting via SSH");
+            let mut session = tokio::time::timeout(
+                self.config.connect_timeout,
+                client::connect(ssh_config, &addr, handler),
+            )
+            .await
+            .map_err(|_| TransportError::ConnectionFailed {
+                message: format!("SSH connection to {addr} timed out"),
+            })?
+            .map_err(|e| TransportError::ConnectionFailed {
+                message: format!("SSH connection to {addr} failed: {e}"),
+            })?;
 
-        // Authenticate: try each identity file in order.
-        let mut authenticated = false;
-        let identity_files = if self.config.identity_files.is_empty() {
-            let ssh_dir = home_ssh_dir();
-            default_identity_files(&ssh_dir)
-        } else {
-            self.config.identity_files.clone()
-        };
+            // Authenticate: try each identity file in order.
+            let mut authenticated = false;
+            let identity_files = if self.config.identity_files.is_empty() {
+                let ssh_dir = home_ssh_dir();
+                default_identity_files(&ssh_dir)
+            } else {
+                self.config.identity_files.clone()
+            };
 
-        for key_path in &identity_files {
-            if !key_path.is_file() {
-                continue;
-            }
-            tracing::debug!(path = %key_path.display(), "trying SSH key");
-            match Self::try_key_auth(&mut session, &self.config.user, key_path).await? {
-                true => {
-                    tracing::debug!(path = %key_path.display(), "SSH authentication succeeded");
-                    authenticated = true;
-                    break;
+            for key_path in &identity_files {
+                if !key_path.is_file() {
+                    continue;
                 }
-                false => continue,
+                tracing::debug!(path = %key_path.display(), "trying SSH key");
+                match Self::try_key_auth(&mut session, &self.config.user, key_path).await? {
+                    true => {
+                        tracing::debug!(path = %key_path.display(), "SSH authentication succeeded");
+                        authenticated = true;
+                        break;
+                    }
+                    false => continue,
+                }
             }
-        }
 
-        if !authenticated {
-            return Err(TransportError::AuthFailed {
-                message: format!(
-                    "no accepted SSH key for {}@{} (tried {} keys)",
-                    self.config.user,
-                    self.config.host,
-                    identity_files.len()
-                ),
-            });
-        }
-
-        // Open a session channel and execute the remote rsync command.
-        let channel = session.channel_open_session().await.map_err(|e| {
-            TransportError::ConnectionFailed {
-                message: format!("failed to open SSH channel: {e}"),
+            if !authenticated {
+                return Err(TransportError::AuthFailed {
+                    message: format!(
+                        "no accepted SSH key for {}@{} (tried {} keys)",
+                        self.config.user,
+                        self.config.host,
+                        identity_files.len()
+                    ),
+                });
             }
-        })?;
 
-        let remote_cmd = self.remote_command();
-        tracing::debug!(cmd = %remote_cmd, "executing remote command");
+            // Open a session channel and execute the remote rsync command.
+            let channel = session.channel_open_session().await.map_err(|e| {
+                TransportError::ConnectionFailed {
+                    message: format!("failed to open SSH channel: {e}"),
+                }
+            })?;
 
-        channel.exec(true, remote_cmd).await.map_err(|e| {
-            TransportError::ConnectionFailed {
-                message: format!("failed to exec remote command: {e}"),
-            }
-        })?;
+            let remote_cmd = self.remote_command();
+            tracing::debug!(cmd = %remote_cmd, "executing remote command");
 
-        // Convert the channel into an async read/write stream.
-        let stream = channel.into_stream();
-        let (reader, writer) = tokio::io::split(stream);
+            channel.exec(true, remote_cmd).await.map_err(|e| {
+                TransportError::ConnectionFailed {
+                    message: format!("failed to exec remote command: {e}"),
+                }
+            })?;
 
-        Ok(TransportStreams {
-            reader: Box::new(reader),
-            writer: Box::new(writer),
+            // Convert the channel into an async read/write stream.
+            let stream = channel.into_stream();
+            let (reader, writer) = tokio::io::split(stream);
+
+            Ok(TransportStreams {
+                reader: Box::new(reader),
+                writer: Box::new(writer),
+                background_task: None,
+            })
         })
     }
 }

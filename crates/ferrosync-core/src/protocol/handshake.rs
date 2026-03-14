@@ -10,6 +10,7 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::delta::chunker::ChunkingStrategy;
 use crate::error::ProtocolError;
 use crate::protocol::varint;
 
@@ -69,7 +70,9 @@ pub enum ChecksumType {
     None,
     Md4,
     Md5,
-    // Future: Xxh64, Xxh3, Xxh128, Sha1
+    Blake3,
+    Xxh3,
+    Xxh128,
 }
 
 impl ChecksumType {
@@ -87,6 +90,9 @@ impl ChecksumType {
             Self::None => "none",
             Self::Md4 => "md4",
             Self::Md5 => "md5",
+            Self::Blake3 => "blake3",
+            Self::Xxh3 => "xxh3",
+            Self::Xxh128 => "xxh128",
         }
     }
 
@@ -95,6 +101,9 @@ impl ChecksumType {
             "none" => Some(Self::None),
             "md4" => Some(Self::Md4),
             "md5" => Some(Self::Md5),
+            "blake3" => Some(Self::Blake3),
+            "xxh3" => Some(Self::Xxh3),
+            "xxh128" => Some(Self::Xxh128),
             _ => None,
         }
     }
@@ -108,6 +117,9 @@ impl ChecksumType {
             Self::None => 0,
             Self::Md4 => 16,
             Self::Md5 => 16,
+            Self::Blake3 => 32,
+            Self::Xxh3 => 8,
+            Self::Xxh128 => 16,
         }
     }
 }
@@ -118,7 +130,8 @@ pub enum CompressType {
     None,
     Zlib,
     Zlibx,
-    // Future: Lz4, Zstd
+    Zstd,
+    Lz4,
 }
 
 impl CompressType {
@@ -127,6 +140,8 @@ impl CompressType {
             Self::None => "none",
             Self::Zlib => "zlib",
             Self::Zlibx => "zlibx",
+            Self::Zstd => "zstd",
+            Self::Lz4 => "lz4",
         }
     }
 
@@ -135,6 +150,8 @@ impl CompressType {
             "none" => Some(Self::None),
             "zlib" => Some(Self::Zlib),
             "zlibx" => Some(Self::Zlibx),
+            "zstd" => Some(Self::Zstd),
+            "lz4" => Some(Self::Lz4),
             _ => None,
         }
     }
@@ -163,6 +180,12 @@ pub struct NegotiatedProtocol {
     pub proper_seed_order: bool,
     /// Checksum seed exchanged during handshake.
     pub seed: i32,
+    /// Chunking strategy for delta transfer.
+    ///
+    /// Defaults to `Fixed` for rsync compatibility. When both sides are
+    /// ferrosync, this can be upgraded to `FastCDC` via out-of-band
+    /// negotiation (wire negotiation not yet implemented).
+    pub chunking: ChunkingStrategy,
 }
 
 impl NegotiatedProtocol {
@@ -248,10 +271,10 @@ async fn write_vstring<W: AsyncWrite + Unpin>(w: &mut W, s: &str) -> Result<()> 
 // ---------------------------------------------------------------------------
 
 /// Our supported checksum algorithms in priority order.
-const CHECKSUM_LIST: &str = "md5 md4 none";
+const CHECKSUM_LIST: &str = "blake3 xxh128 xxh3 md5 md4 none";
 
 /// Our supported compression algorithms in priority order.
-const COMPRESS_LIST: &str = "zlibx zlib none";
+const COMPRESS_LIST: &str = "zstd lz4 zlibx zlib none";
 
 /// Negotiate an algorithm: pick the first entry from the sender's list that
 /// the receiver also supports.
@@ -380,6 +403,7 @@ where
         compress,
         proper_seed_order,
         seed,
+        chunking: ChunkingStrategy::default(),
     })
 }
 
@@ -477,6 +501,7 @@ where
         compress,
         proper_seed_order,
         seed,
+        chunking: ChunkingStrategy::default(),
     })
 }
 
@@ -647,7 +672,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.version, 31);
-        assert_eq!(result.checksum, ChecksumType::Md5);
+        assert_eq!(result.checksum, ChecksumType::Blake3);
         assert_eq!(result.seed, 12345);
         assert!(result.varint_flist_flags);
         assert!(result.incremental_flist);
@@ -662,13 +687,29 @@ mod tests {
         assert_eq!(ChecksumType::Md5.name(), "md5");
         assert_eq!(ChecksumType::from_name("md5"), Some(ChecksumType::Md5));
         assert_eq!(ChecksumType::from_name("unknown"), None);
+        assert_eq!(ChecksumType::Blake3.name(), "blake3");
+        assert_eq!(ChecksumType::from_name("blake3"), Some(ChecksumType::Blake3));
+        assert_eq!(ChecksumType::Xxh3.name(), "xxh3");
+        assert_eq!(ChecksumType::from_name("xxh3"), Some(ChecksumType::Xxh3));
+        assert_eq!(ChecksumType::Xxh128.name(), "xxh128");
+        assert_eq!(ChecksumType::from_name("xxh128"), Some(ChecksumType::Xxh128));
+    }
+
+    #[test]
+    fn test_checksum_digest_lengths() {
+        assert_eq!(ChecksumType::None.digest_len(), 0);
+        assert_eq!(ChecksumType::Md4.digest_len(), 16);
+        assert_eq!(ChecksumType::Md5.digest_len(), 16);
+        assert_eq!(ChecksumType::Blake3.digest_len(), 32);
+        assert_eq!(ChecksumType::Xxh3.digest_len(), 8);
+        assert_eq!(ChecksumType::Xxh128.digest_len(), 16);
     }
 
     #[test]
     fn test_compress_type_names() {
         assert_eq!(CompressType::Zlib.name(), "zlib");
         assert_eq!(CompressType::from_name("zlibx"), Some(CompressType::Zlibx));
-        assert_eq!(CompressType::from_name("lz4"), None); // not yet supported
+        assert_eq!(CompressType::from_name("lz4"), Some(CompressType::Lz4));
     }
 
     #[test]
@@ -685,5 +726,59 @@ mod tests {
             ChecksumType::default_for_version(31),
             ChecksumType::Md5
         );
+    }
+
+    #[test]
+    fn test_negotiate_ferrosync_to_ferrosync_picks_blake3() {
+        // When both sides are ferrosync, the first common entry wins.
+        // Our CHECKSUM_LIST starts with blake3, so ferrosync-to-ferrosync
+        // should negotiate blake3.
+        let result = negotiate_algorithm(
+            CHECKSUM_LIST,
+            CHECKSUM_LIST,
+            ChecksumType::from_name,
+        )
+        .unwrap();
+        assert_eq!(result, ChecksumType::Blake3);
+    }
+
+    #[test]
+    fn test_negotiate_ferrosync_to_rsync_falls_back_to_md5() {
+        // Standard rsync only supports "md5 md4 none".
+        let rsync_list = "md5 md4 none";
+        let result = negotiate_algorithm(
+            CHECKSUM_LIST,
+            rsync_list,
+            ChecksumType::from_name,
+        )
+        .unwrap();
+        assert_eq!(result, ChecksumType::Md5);
+    }
+
+    #[test]
+    fn test_negotiate_rsync_sender_ferrosync_receiver() {
+        // rsync is sender, ferrosync is receiver -- rsync's list is checked
+        // in order against ferrosync's supported set.
+        let rsync_list = "md5 md4 none";
+        let result = negotiate_algorithm(
+            rsync_list,
+            CHECKSUM_LIST,
+            ChecksumType::from_name,
+        )
+        .unwrap();
+        assert_eq!(result, ChecksumType::Md5);
+    }
+
+    #[test]
+    fn test_negotiate_xxh128_when_no_blake3() {
+        // If one side does not support blake3, fall back to next common.
+        let limited = "xxh128 md5 none";
+        let result = negotiate_algorithm(
+            CHECKSUM_LIST,
+            limited,
+            ChecksumType::from_name,
+        )
+        .unwrap();
+        assert_eq!(result, ChecksumType::Xxh128);
     }
 }

@@ -12,6 +12,7 @@
 //!    block-level and file-level verification.
 
 pub mod checksum;
+pub mod chunker;
 pub mod matcher;
 pub mod sum;
 pub mod token;

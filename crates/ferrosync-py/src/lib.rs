@@ -47,7 +47,6 @@ fn to_py_err(e: ferrosync_core::FerrosyncError) -> PyErr {
         ferrosync_core::FerrosyncError::Transport(_) => TransportError::new_err(e.to_string()),
         ferrosync_core::FerrosyncError::Fs(_) => FilesystemError::new_err(e.to_string()),
         ferrosync_core::FerrosyncError::Filter(_) => FilterError::new_err(e.to_string()),
-        ferrosync_core::FerrosyncError::Io(_) => FilesystemError::new_err(e.to_string()),
     }
 }
 
@@ -137,6 +136,9 @@ pub enum ChecksumType {
     None = 0,
     Md4 = 1,
     Md5 = 2,
+    Blake3 = 3,
+    Xxh3 = 4,
+    Xxh128 = 5,
 }
 
 impl From<ChecksumType> for RustChecksumType {
@@ -145,6 +147,9 @@ impl From<ChecksumType> for RustChecksumType {
             ChecksumType::None => RustChecksumType::None,
             ChecksumType::Md4 => RustChecksumType::Md4,
             ChecksumType::Md5 => RustChecksumType::Md5,
+            ChecksumType::Blake3 => RustChecksumType::Blake3,
+            ChecksumType::Xxh3 => RustChecksumType::Xxh3,
+            ChecksumType::Xxh128 => RustChecksumType::Xxh128,
         }
     }
 }
@@ -155,6 +160,9 @@ impl From<RustChecksumType> for ChecksumType {
             RustChecksumType::None => ChecksumType::None,
             RustChecksumType::Md4 => ChecksumType::Md4,
             RustChecksumType::Md5 => ChecksumType::Md5,
+            RustChecksumType::Blake3 => ChecksumType::Blake3,
+            RustChecksumType::Xxh3 => ChecksumType::Xxh3,
+            RustChecksumType::Xxh128 => ChecksumType::Xxh128,
         }
     }
 }
@@ -274,179 +282,174 @@ impl TransferOptions {
         numeric_ids: bool,
         sparse: bool,
     ) -> Self {
-        let mut opts = RustTransferOptions::default();
+        let mut builder = RustTransferOptions::builder();
 
         if archive {
-            // -a = -rlptgoD
-            opts.recursive = true;
-            opts.preserve_links = true;
-            opts.preserve_perms = true;
-            opts.preserve_times = true;
-            opts.preserve_group = true;
-            opts.preserve_owner = true;
-            opts.preserve_devices = true;
-            opts.preserve_specials = true;
+            builder = builder.archive();
         } else {
-            opts.recursive = recursive;
-            opts.preserve_links = preserve_links;
-            opts.preserve_perms = preserve_perms;
-            opts.preserve_times = preserve_times;
-            opts.preserve_group = preserve_group;
-            opts.preserve_owner = preserve_owner;
-            opts.preserve_devices = preserve_devices;
-            opts.preserve_specials = preserve_specials;
+            builder = builder
+                .recursive(recursive)
+                .preserve_links(preserve_links)
+                .preserve_perms(preserve_perms)
+                .preserve_times(preserve_times)
+                .preserve_group(preserve_group)
+                .preserve_owner(preserve_owner)
+                .preserve_devices(preserve_devices)
+                .preserve_specials(preserve_specials);
         }
 
-        opts.checksum_mode = checksum_mode;
-        opts.whole_file = whole_file;
-        opts.update = update;
-        opts.inplace = inplace;
-        opts.delete = delete.into();
-        opts.compress = compress;
-        opts.compress_level = compress_level.clamp(1, 9);
-        opts.verbosity = verbosity.into();
-        opts.progress = progress;
-        opts.stats = stats;
-        opts.dry_run = dry_run;
-        opts.itemize_changes = itemize_changes;
-        opts.exclude = exclude;
-        opts.include = include;
-        opts.filter = filter;
-        opts.source = source.into_iter().map(PathBuf::from).collect();
-        opts.dest = dest.map(PathBuf::from);
-        opts.bwlimit = bwlimit;
-        opts.max_size = max_size;
-        opts.min_size = min_size;
-        opts.timeout = timeout;
-        opts.link_dest = link_dest.into_iter().map(PathBuf::from).collect();
-        opts.copy_dest = copy_dest.into_iter().map(PathBuf::from).collect();
-        opts.compare_dest = compare_dest.into_iter().map(PathBuf::from).collect();
-        opts.backup = backup;
-        opts.backup_dir = backup_dir.map(PathBuf::from);
-        opts.suffix = suffix;
-        opts.partial_dir = partial_dir.map(PathBuf::from);
-        opts.append = append;
-        opts.files_from = files_from.map(PathBuf::from);
-        opts.one_file_system = one_file_system;
-        opts.numeric_ids = numeric_ids;
-        opts.sparse = sparse;
+        builder = builder
+            .checksum_mode(checksum_mode)
+            .whole_file(whole_file)
+            .update(update)
+            .inplace(inplace)
+            .delete(delete.into())
+            .compress(compress)
+            .compress_level(compress_level)
+            .verbosity(verbosity.into())
+            .progress(progress)
+            .stats(stats)
+            .dry_run(dry_run)
+            .itemize_changes(itemize_changes)
+            .excludes(exclude)
+            .includes(include)
+            .filters(filter)
+            .sources(source.into_iter().map(PathBuf::from).collect())
+            .backup(backup)
+            .suffix(suffix)
+            .append(append)
+            .one_file_system(one_file_system)
+            .numeric_ids(numeric_ids)
+            .sparse(sparse)
+            .link_dests(link_dest.into_iter().map(PathBuf::from).collect())
+            .copy_dests(copy_dest.into_iter().map(PathBuf::from).collect())
+            .compare_dests(compare_dest.into_iter().map(PathBuf::from).collect());
 
-        Self { inner: opts }
+        if let Some(d) = dest { builder = builder.dest(PathBuf::from(d)); }
+        if let Some(v) = bwlimit { builder = builder.bwlimit(v); }
+        if let Some(v) = max_size { builder = builder.max_size(v); }
+        if let Some(v) = min_size { builder = builder.min_size(v); }
+        if let Some(v) = timeout { builder = builder.timeout(v); }
+        if let Some(v) = backup_dir { builder = builder.backup_dir(PathBuf::from(v)); }
+        if let Some(v) = partial_dir { builder = builder.partial_dir(PathBuf::from(v)); }
+        if let Some(v) = files_from { builder = builder.files_from(PathBuf::from(v)); }
+
+        Self { inner: builder.build() }
     }
 
     #[getter]
-    fn recursive(&self) -> bool { self.inner.recursive }
+    fn recursive(&self) -> bool { self.inner.recursive() }
     #[getter]
-    fn preserve_links(&self) -> bool { self.inner.preserve_links }
+    fn preserve_links(&self) -> bool { self.inner.preserve_links() }
     #[getter]
-    fn preserve_perms(&self) -> bool { self.inner.preserve_perms }
+    fn preserve_perms(&self) -> bool { self.inner.preserve_perms() }
     #[getter]
-    fn preserve_times(&self) -> bool { self.inner.preserve_times }
+    fn preserve_times(&self) -> bool { self.inner.preserve_times() }
     #[getter]
-    fn preserve_group(&self) -> bool { self.inner.preserve_group }
+    fn preserve_group(&self) -> bool { self.inner.preserve_group() }
     #[getter]
-    fn preserve_owner(&self) -> bool { self.inner.preserve_owner }
+    fn preserve_owner(&self) -> bool { self.inner.preserve_owner() }
     #[getter]
-    fn preserve_devices(&self) -> bool { self.inner.preserve_devices }
+    fn preserve_devices(&self) -> bool { self.inner.preserve_devices() }
     #[getter]
-    fn preserve_specials(&self) -> bool { self.inner.preserve_specials }
+    fn preserve_specials(&self) -> bool { self.inner.preserve_specials() }
     #[getter]
-    fn checksum_mode(&self) -> bool { self.inner.checksum_mode }
+    fn checksum_mode(&self) -> bool { self.inner.checksum_mode() }
     #[getter]
-    fn whole_file(&self) -> bool { self.inner.whole_file }
+    fn whole_file(&self) -> bool { self.inner.whole_file() }
     #[getter]
-    fn update(&self) -> bool { self.inner.update }
+    fn update(&self) -> bool { self.inner.update() }
     #[getter]
-    fn inplace(&self) -> bool { self.inner.inplace }
+    fn inplace(&self) -> bool { self.inner.inplace() }
     #[getter]
-    fn delete(&self) -> DeleteMode { self.inner.delete.into() }
+    fn delete(&self) -> DeleteMode { self.inner.delete().into() }
     #[getter]
-    fn compress(&self) -> bool { self.inner.compress }
+    fn compress(&self) -> bool { self.inner.compress() }
     #[getter]
-    fn compress_level(&self) -> u32 { self.inner.compress_level }
+    fn compress_level(&self) -> u32 { self.inner.compress_level() }
     #[getter]
-    fn verbosity(&self) -> Verbosity { self.inner.verbosity.into() }
+    fn verbosity(&self) -> Verbosity { self.inner.verbosity().into() }
     #[getter]
-    fn progress(&self) -> bool { self.inner.progress }
+    fn progress(&self) -> bool { self.inner.progress() }
     #[getter]
-    fn stats(&self) -> bool { self.inner.stats }
+    fn stats(&self) -> bool { self.inner.stats() }
     #[getter]
-    fn dry_run(&self) -> bool { self.inner.dry_run }
+    fn dry_run(&self) -> bool { self.inner.dry_run() }
     #[getter]
-    fn itemize_changes(&self) -> bool { self.inner.itemize_changes }
+    fn itemize_changes(&self) -> bool { self.inner.itemize_changes() }
     #[getter]
-    fn exclude(&self) -> Vec<String> { self.inner.exclude.clone() }
+    fn exclude(&self) -> Vec<String> { self.inner.exclude().to_vec() }
     #[getter]
-    fn include(&self) -> Vec<String> { self.inner.include.clone() }
+    fn include(&self) -> Vec<String> { self.inner.include().to_vec() }
     #[getter]
-    fn filter(&self) -> Vec<String> { self.inner.filter.clone() }
+    fn filter(&self) -> Vec<String> { self.inner.filter().to_vec() }
     #[getter]
     fn source(&self) -> Vec<String> {
-        self.inner.source.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner.source().iter().map(|p| p.to_string_lossy().into_owned()).collect()
     }
     #[getter]
     fn dest(&self) -> Option<String> {
-        self.inner.dest.as_ref().map(|p| p.to_string_lossy().into_owned())
+        self.inner.dest().map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn bwlimit(&self) -> Option<u64> { self.inner.bwlimit }
+    fn bwlimit(&self) -> Option<u64> { self.inner.bwlimit() }
     #[getter]
-    fn max_size(&self) -> Option<u64> { self.inner.max_size }
+    fn max_size(&self) -> Option<u64> { self.inner.max_size() }
     #[getter]
-    fn min_size(&self) -> Option<u64> { self.inner.min_size }
+    fn min_size(&self) -> Option<u64> { self.inner.min_size() }
     #[getter]
-    fn timeout(&self) -> Option<u64> { self.inner.timeout }
+    fn timeout(&self) -> Option<u64> { self.inner.timeout() }
     #[getter]
     fn link_dest(&self) -> Vec<String> {
-        self.inner.link_dest.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner.link_dest().iter().map(|p| p.to_string_lossy().into_owned()).collect()
     }
     #[getter]
     fn copy_dest(&self) -> Vec<String> {
-        self.inner.copy_dest.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner.copy_dest().iter().map(|p| p.to_string_lossy().into_owned()).collect()
     }
     #[getter]
     fn compare_dest(&self) -> Vec<String> {
-        self.inner.compare_dest.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        self.inner.compare_dest().iter().map(|p| p.to_string_lossy().into_owned()).collect()
     }
     #[getter]
-    fn backup(&self) -> bool { self.inner.backup }
+    fn backup(&self) -> bool { self.inner.backup() }
     #[getter]
     fn backup_dir(&self) -> Option<String> {
-        self.inner.backup_dir.as_ref().map(|p| p.to_string_lossy().into_owned())
+        self.inner.backup_dir().map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn suffix(&self) -> String { self.inner.suffix.clone() }
+    fn suffix(&self) -> String { self.inner.suffix().to_owned() }
     #[getter]
     fn partial_dir(&self) -> Option<String> {
-        self.inner.partial_dir.as_ref().map(|p| p.to_string_lossy().into_owned())
+        self.inner.partial_dir().map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn append(&self) -> bool { self.inner.append }
+    fn append(&self) -> bool { self.inner.append() }
     #[getter]
     fn files_from(&self) -> Option<String> {
-        self.inner.files_from.as_ref().map(|p| p.to_string_lossy().into_owned())
+        self.inner.files_from().map(|p| p.to_string_lossy().into_owned())
     }
     #[getter]
-    fn one_file_system(&self) -> bool { self.inner.one_file_system }
+    fn one_file_system(&self) -> bool { self.inner.one_file_system() }
     #[getter]
-    fn numeric_ids(&self) -> bool { self.inner.numeric_ids }
+    fn numeric_ids(&self) -> bool { self.inner.numeric_ids() }
     #[getter]
-    fn sparse(&self) -> bool { self.inner.sparse }
+    fn sparse(&self) -> bool { self.inner.sparse() }
 
     fn is_archive(&self) -> bool { self.inner.is_archive() }
 
     fn __repr__(&self) -> String {
-        let sources: Vec<_> = self.inner.source.iter()
+        let sources: Vec<_> = self.inner.source().iter()
             .map(|p| format!("'{}'", p.display()))
             .collect();
         format!(
             "TransferOptions(source=[{}], dest={}, recursive={}, dry_run={})",
             sources.join(", "),
-            self.inner.dest.as_ref()
+            self.inner.dest()
                 .map(|p| format!("'{}'", p.display()))
                 .unwrap_or_else(|| "None".to_string()),
-            self.inner.recursive,
-            self.inner.dry_run,
+            self.inner.recursive(),
+            self.inner.dry_run(),
         )
     }
 }
@@ -583,7 +586,7 @@ fn event_to_pydict(py: Python<'_>, event: &ProgressEvent) -> Py<PyAny> {
         ProgressEvent::FileStart { index, name, size } => {
             let _ = dict.set_item("type", "file_start");
             let _ = dict.set_item("index", *index);
-            let _ = dict.set_item("name", String::from_utf8_lossy(name).as_ref());
+            let _ = dict.set_item("name", name.to_string_lossy().as_ref());
             let _ = dict.set_item("size", *size);
         }
         ProgressEvent::FileProgress { index, bytes_transferred, total_size } => {
@@ -595,23 +598,23 @@ fn event_to_pydict(py: Python<'_>, event: &ProgressEvent) -> Py<PyAny> {
         ProgressEvent::FileComplete { index, name, literal_bytes, matched_bytes } => {
             let _ = dict.set_item("type", "file_complete");
             let _ = dict.set_item("index", *index);
-            let _ = dict.set_item("name", String::from_utf8_lossy(name).as_ref());
+            let _ = dict.set_item("name", name.to_string_lossy().as_ref());
             let _ = dict.set_item("literal_bytes", *literal_bytes);
             let _ = dict.set_item("matched_bytes", *matched_bytes);
         }
         ProgressEvent::FileSkipped { index, name } => {
             let _ = dict.set_item("type", "file_skipped");
             let _ = dict.set_item("index", *index);
-            let _ = dict.set_item("name", String::from_utf8_lossy(name).as_ref());
+            let _ = dict.set_item("name", name.to_string_lossy().as_ref());
         }
         ProgressEvent::FileDeleted { name } => {
             let _ = dict.set_item("type", "file_deleted");
-            let _ = dict.set_item("name", String::from_utf8_lossy(name).as_ref());
+            let _ = dict.set_item("name", name.to_string_lossy().as_ref());
         }
         ProgressEvent::FileItemized { index, name, changes } => {
             let _ = dict.set_item("type", "file_itemized");
             let _ = dict.set_item("index", *index);
-            let _ = dict.set_item("name", String::from_utf8_lossy(name).as_ref());
+            let _ = dict.set_item("name", name.to_string_lossy().as_ref());
             let _ = dict.set_item("changes", changes.to_string());
         }
         ProgressEvent::OverallProgress { files_done, files_total, bytes_transferred, bytes_total } => {

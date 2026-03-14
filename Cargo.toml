@@ -25,23 +25,45 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Delta algorithm
 fast_rsync = "0.2"
+fastcdc = "3"
 
 # Hashing
 md-5 = "0.10"
 md4 = "0.10"
+blake3 = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Compression
 flate2 = "1"
+zstd = "0.13"
+lz4_flex = "0.11"
 
 # SSH transport (native, pure Rust)
 russh = "0.57"
 ssh2-config = "0.7"
+
+# TLS transport
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+
+# Noise protocol
+snow = "0.9"
+
+# QUIC transport
+quinn = "0.11"
+rcgen = "0.13"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # Python bindings
 pyo3 = { version = "0.28", features = ["extension-module"] }
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Testing
 tempfile = "3"
