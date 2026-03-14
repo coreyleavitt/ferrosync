@@ -122,8 +122,7 @@ impl FileSystem for UnixFileSystem {
     }
 
     fn set_owner(&self, path: &Path, uid: u32, gid: u32) -> Result<()> {
-        std::os::unix::fs::chown(path, Some(uid), Some(gid))
-            .map_err(|e| Self::map_io_err(path, e))
+        std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|e| Self::map_io_err(path, e))
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
@@ -379,7 +378,10 @@ mod tests {
         assert_eq!(read_target, b"target.txt");
 
         let meta = fs.lstat(&link_path).unwrap();
-        assert_eq!(meta.mode & crate::filelist::entry::S_IFMT, crate::filelist::entry::S_IFLNK);
+        assert_eq!(
+            meta.mode & crate::filelist::entry::S_IFMT,
+            crate::filelist::entry::S_IFLNK
+        );
     }
 
     #[test]
