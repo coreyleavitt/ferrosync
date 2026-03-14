@@ -415,7 +415,7 @@ impl WindowsAtomicFileWriter {
 
 impl Drop for WindowsAtomicFileWriter {
     fn drop(&mut self) {
-        if let Err(_) = self.finish_inner() {
+        if self.finish_inner().is_err() {
             let _ = fs::remove_file(&self.tmp_path);
         }
     }
