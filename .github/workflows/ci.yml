@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # rsync is needed for integration tests (LocalTransport spawns rsync --server)
+      - name: Install rsync (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq rsync
+
+      - name: Install rsync (macOS)
+        if: runner.os == 'macOS'
+        run: brew install rsync
+
+      - name: Install rsync (Windows)
+        if: runner.os == 'Windows'
+        run: choco install rsync -y
+
+      - name: Build
+        run: cargo build --workspace --target ${{ matrix.target }}
+
+      - name: Run unit tests
+        run: cargo test --workspace --target ${{ matrix.target }} --lib
+
+      - name: Run integration tests (Unix only)
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --target ${{ matrix.target }} --test rsync_compat
+
+      - name: Run E2E tests (Unix only)
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --target ${{ matrix.target }} --test e2e
+
+      - name: Run doc tests
+        run: cargo test --workspace --target ${{ matrix.target }} --doc
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # Cross-compile check for platforms where we can't run tests
+  cross-check:
+    name: Cross-compile check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross-compile toolchain
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+      - name: Install cross-compile toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+      - run: cargo check --workspace --target ${{ matrix.target }}
