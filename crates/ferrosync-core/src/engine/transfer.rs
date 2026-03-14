@@ -712,7 +712,7 @@ fn build_file_list(
             };
 
             let mut entry = meta.to_file_entry(name);
-            if meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == libc_s_iflnk() {
+            if meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == s_iflnk() {
                 entry.link_target = fs.read_link(source).unwrap_or_default();
             }
 
@@ -806,7 +806,7 @@ fn collect_directory(
 
             let mut entry = dir_entry.metadata.to_file_entry(child_name);
             if dir_entry.metadata.mode & S_IFMT == entry::WIRE_S_IFLNK
-                || dir_entry.metadata.mode & S_IFMT == libc_s_iflnk()
+                || dir_entry.metadata.mode & S_IFMT == s_iflnk()
             {
                 entry.link_target = fs.read_link(&child_path).unwrap_or_default();
             }
@@ -823,15 +823,12 @@ fn collect_directory(
     Ok(())
 }
 
-/// Get the platform's S_IFLNK value.
-#[cfg(unix)]
-fn libc_s_iflnk() -> u32 {
-    libc::S_IFLNK as u32
-}
-
-#[cfg(not(unix))]
-fn libc_s_iflnk() -> u32 {
-    entry::WIRE_S_IFLNK
+/// S_IFLNK value for mode comparisons.
+///
+/// Uses the wire-format constant (0o120000) which is identical to the
+/// platform value on all Unix systems. No libc dependency needed.
+fn s_iflnk() -> u32 {
+    entry::S_IFLNK
 }
 
 /// Build a file list from a `--files-from` file.

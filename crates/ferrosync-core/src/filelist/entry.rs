@@ -116,8 +116,10 @@ pub const S_IFMT: u32 = 0o170000;
 pub const S_IFREG: u32 = 0o100000;
 /// Directory.
 pub const S_IFDIR: u32 = 0o040000;
-/// Symlink -- wire representation (always 0120000 on the wire).
-pub const WIRE_S_IFLNK: u32 = 0o120000;
+/// Symlink (0o120000). Identical on all Unix platforms and on the wire.
+pub const S_IFLNK: u32 = 0o120000;
+/// Alias for backward compat.
+pub const WIRE_S_IFLNK: u32 = S_IFLNK;
 /// Block device.
 pub const S_IFBLK: u32 = 0o060000;
 /// Character device.
@@ -133,7 +135,7 @@ pub const S_IFSOCK: u32 = 0o140000;
 /// as the file-type bits, regardless of the platform's `S_IFLNK` value.
 #[cfg(unix)]
 pub fn to_wire_mode(mode: u32) -> u32 {
-    if (mode & S_IFMT) == libc::S_IFLNK as u32 {
+    if (mode & S_IFMT) == S_IFLNK {
         (mode & !S_IFMT) | WIRE_S_IFLNK
     } else {
         mode
@@ -150,7 +152,7 @@ pub fn to_wire_mode(mode: u32) -> u32 {
 #[cfg(unix)]
 pub fn from_wire_mode(mode: u32) -> u32 {
     if (mode & S_IFMT) == WIRE_S_IFLNK {
-        (mode & !S_IFMT) | libc::S_IFLNK as u32
+        (mode & !S_IFMT) | S_IFLNK
     } else {
         mode
     }
