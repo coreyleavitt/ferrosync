@@ -3,6 +3,10 @@
 //! These tests verify wire-level compatibility by running ferrosync's
 //! `SyncSession` against `rsync --server` via `LocalTransport`.
 //!
+//! These tests require a Unix environment (rsync binary, Unix filesystem
+//! semantics, PermissionsExt, MetadataExt).
+#![cfg(unix)]
+
 //! Gated behind rsync being available on PATH. Tests will be skipped
 //! (not failed) if rsync is not found.
 

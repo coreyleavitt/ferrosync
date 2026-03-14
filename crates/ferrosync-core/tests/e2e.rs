@@ -2,6 +2,9 @@
 //!
 //! These tests spin up a ferrosync daemon server on a random port, then
 //! connect a ferrosync client to it and verify full transfer correctness.
+//!
+//! Requires Unix (server uses UnixFileSystem).
+#![cfg(unix)]
 
 use std::net::SocketAddr;
 use std::path::Path;

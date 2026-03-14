@@ -45,6 +45,10 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion)" >> "$GITHUB_ENV"
+
       - name: Build
         run: cargo build --workspace
 
@@ -77,6 +81,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion)" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy-${{ matrix.os }}
