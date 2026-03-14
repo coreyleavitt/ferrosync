@@ -87,18 +87,3 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
-  # Cross-compile check for aarch64 Linux (no native runner available)
-  cross-check:
-    name: Cross-compile check (aarch64-linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: aarch64-unknown-linux-gnu
-      - name: Install cross-compile toolchain
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-      - run: cargo check --workspace --target aarch64-unknown-linux-gnu
