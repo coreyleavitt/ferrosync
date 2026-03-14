@@ -1216,6 +1216,7 @@ async fn test_pull_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[cfg_attr(not(target_os = "linux"), ignore = "strace only available on Linux")]
 async fn test_debug_push_protocol() {
     skip_if_no_rsync!();
 
