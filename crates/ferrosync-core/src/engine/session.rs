@@ -238,14 +238,8 @@ impl<T: Transport> SyncSession<T> {
 
         // 3. Exchange file lists and transfer.
         // Take ownership of reader/writer, keeping background_task alive.
-        let reader = std::mem::replace(
-            &mut streams.reader,
-            Box::new(tokio::io::empty()),
-        );
-        let writer = std::mem::replace(
-            &mut streams.writer,
-            Box::new(tokio::io::sink()),
-        );
+        let reader = std::mem::replace(&mut streams.reader, Box::new(tokio::io::empty()));
+        let writer = std::mem::replace(&mut streams.writer, Box::new(tokio::io::sink()));
         // Keep streams alive so background_task is not aborted.
         let _streams_guard = streams;
 
@@ -330,12 +324,11 @@ async fn run_push(
 
     // Compute NDX -> entry index mapping.
     // With inc_recurse (proto >= 30 AND recursive), ndx_start = 1; otherwise 0.
-    let ndx_start: i32 =
-        if protocol.incremental_flist && proto_ver >= 30 && options.recursive() {
-            1
-        } else {
-            0
-        };
+    let ndx_start: i32 = if protocol.incremental_flist && proto_ver >= 30 && options.recursive() {
+        1
+    } else {
+        0
+    };
     let ndx_to_entry: std::collections::HashMap<i32, usize> = entries
         .iter()
         .enumerate()
@@ -353,13 +346,9 @@ async fn run_push(
 
     loop {
         // eprintln!("[client-push] waiting for NDX from generator...");
-        let ndx = crate::protocol::varint::read_ndx(
-            &mut demux_read,
-            &mut gen_ndx_state,
-            proto_ver,
-        )
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        let ndx = crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver)
+            .await
+            .map_err(crate::FerrosyncError::Protocol)?;
 
         // eprintln!("[client-push] got NDX={ndx}");
         if ndx == crate::protocol::varint::NDX_DONE {
@@ -399,14 +388,18 @@ async fn run_push(
         if proto_ver >= 29 {
             use tokio::io::AsyncReadExt;
             let mut iflags_buf = [0u8; 2];
-            demux_read.read_exact(&mut iflags_buf).await
+            demux_read
+                .read_exact(&mut iflags_buf)
+                .await
                 .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             iflags = u16::from_le_bytes(iflags_buf);
 
             // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
             if iflags & 0x0800 != 0 {
                 let mut bt = [0u8; 1];
-                demux_read.read_exact(&mut bt).await
+                demux_read
+                    .read_exact(&mut bt)
+                    .await
                     .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
             // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
@@ -425,7 +418,9 @@ async fn run_push(
                 }
                 let mut name_buf = vec![0u8; name_len as usize];
                 use tokio::io::AsyncReadExt;
-                demux_read.read_exact(&mut name_buf).await
+                demux_read
+                    .read_exact(&mut name_buf)
+                    .await
                     .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
         }
@@ -461,25 +456,15 @@ async fn run_push(
         let source_data = read_source_file(fs, entry, options)?;
 
         // Match blocks and compute delta.
-        let ops = crate::delta::matcher::match_blocks(
-            &source_data,
-            &sums,
-            seed,
-            checksum_type,
-        );
+        let ops = crate::delta::matcher::match_blocks(&source_data, &sums, seed, checksum_type);
 
         // Build sender response: NDX + iflags + sum_head + tokens + checksum.
         let mut resp_buf = Vec::new();
 
         // NDX + iflags.
-        crate::protocol::varint::write_ndx(
-            &mut resp_buf,
-            ndx,
-            &mut send_ndx_state,
-            proto_ver,
-        )
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        crate::protocol::varint::write_ndx(&mut resp_buf, ndx, &mut send_ndx_state, proto_ver)
+            .await
+            .map_err(crate::FerrosyncError::Protocol)?;
         if proto_ver >= 29 {
             crate::protocol::varint::write_shortint(&mut resp_buf, iflags)
                 .await
@@ -586,22 +571,12 @@ async fn run_push(
     crate::protocol::varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
-    crate::protocol::varint::write_varlong30(
-        &mut stats_buf,
-        stats.bytes_sent as i64,
-        3,
-        proto_ver,
-    )
-    .await
-    .map_err(crate::FerrosyncError::Protocol)?;
-    crate::protocol::varint::write_varlong30(
-        &mut stats_buf,
-        stats.total_size as i64,
-        3,
-        proto_ver,
-    )
-    .await
-    .map_err(crate::FerrosyncError::Protocol)?;
+    crate::protocol::varint::write_varlong30(&mut stats_buf, stats.bytes_sent as i64, 3, proto_ver)
+        .await
+        .map_err(crate::FerrosyncError::Protocol)?;
+    crate::protocol::varint::write_varlong30(&mut stats_buf, stats.total_size as i64, 3, proto_ver)
+        .await
+        .map_err(crate::FerrosyncError::Protocol)?;
     if proto_ver >= 29 {
         crate::protocol::varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver)
             .await
@@ -621,22 +596,15 @@ async fn run_push(
 
     // 6. Read final NDX_DONE from generator (matches rsync's read_final_goodbye).
     if proto_ver >= 24 {
-        let _ = crate::protocol::varint::read_ndx(
-            &mut demux_read,
-            &mut gen_ndx_state,
-            proto_ver,
-        )
-        .await;
+        let _ =
+            crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await;
 
         // Proto >= 31: sender reads an additional NDX_DONE from the generator
         // after the goodbye exchange (rsync's read_final_goodbye extra round).
         if proto_ver >= 31 {
-            let _ = crate::protocol::varint::read_ndx(
-                &mut demux_read,
-                &mut gen_ndx_state,
-                proto_ver,
-            )
-            .await;
+            let _ =
+                crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver)
+                    .await;
         }
     }
 
@@ -678,9 +646,13 @@ async fn run_pull(
     // as NDX_DONE markers during the phase exchange). This is how real rsync
     // behaves for local transfers.
     let filter_data = collect_filter_list(options)?;
-    mplex_out.write_data(&filter_data).await
+    mplex_out
+        .write_data(&filter_data)
+        .await
         .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out.flush().await
+    mplex_out
+        .flush()
+        .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
     // Receive file list from remote (through demuxed pipe).
@@ -696,12 +668,9 @@ async fn run_pull(
 
     tracing::debug!(count = entries.len(), "received file list");
 
-    let dest = options
-        .dest()
-        .cloned()
-        .ok_or_else(|| FsError::NotFound {
-            path: PathBuf::from("<no destination>"),
-        })?;
+    let dest = options.dest().cloned().ok_or_else(|| FsError::NotFound {
+        path: PathBuf::from("<no destination>"),
+    })?;
 
     let seed = protocol.seed;
     let checksum_type = protocol.checksum;
@@ -800,31 +769,40 @@ async fn run_pull(
         sum::write_sums(&mut sig_buf, &sigs)
             .await
             .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out.write_data(&sig_buf).await
+        mplex_out
+            .write_data(&sig_buf)
+            .await
             .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out.flush().await
+        mplex_out
+            .flush()
+            .await
             .map_err(crate::FerrosyncError::Protocol)?;
 
         // Read sender's response for this file.
         // Wire format: NDX(file_ndx) + iflags(2 bytes) + sum_head(16 bytes) + tokens + checksum
 
         // 1. Read file NDX from sender.
-        let _file_ndx = crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
+        let _file_ndx =
+            crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
 
         // 2. Read iflags (protocol >= 29).
         if proto_ver >= 29 {
             use tokio::io::AsyncReadExt;
             let mut iflags_buf = [0u8; 2];
-            demux_read.read_exact(&mut iflags_buf).await
+            demux_read
+                .read_exact(&mut iflags_buf)
+                .await
                 .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             let iflags = u16::from_le_bytes(iflags_buf);
 
             // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
             if iflags & 0x0800 != 0 {
                 let mut bt = [0u8; 1];
-                demux_read.read_exact(&mut bt).await
+                demux_read
+                    .read_exact(&mut bt)
+                    .await
                     .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
             // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
@@ -842,7 +820,9 @@ async fn run_pull(
                     ));
                 }
                 let mut name_buf = vec![0u8; name_len as usize];
-                demux_read.read_exact(&mut name_buf).await
+                demux_read
+                    .read_exact(&mut name_buf)
+                    .await
                     .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
             }
         }
@@ -858,15 +838,10 @@ async fn run_pull(
         };
 
         // 4. Read tokens + file checksum via receiver module.
-        let result_data = receiver::recv_file_delta(
-            &mut demux_read,
-            &basis_data,
-            blength,
-            seed,
-            checksum_type,
-        )
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        let result_data =
+            receiver::recv_file_delta(&mut demux_read, &basis_data, blength, seed, checksum_type)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
 
         let literal_bytes = result_data.len() as u64;
 
@@ -942,12 +917,11 @@ async fn run_pull(
     // Total rounds = flist_cleanup + (max_phase + 1).
     // rsync's sender.c: max_phase = protocol_version >= 29 ? 2 : 1
     let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
-    let flist_cleanup_rounds: u32 =
-        if protocol.incremental_flist && protocol.version >= 30 {
-            (received_flist.num_flists as u32).saturating_sub(1)
-        } else {
-            0
-        };
+    let flist_cleanup_rounds: u32 = if protocol.incremental_flist && protocol.version >= 30 {
+        (received_flist.num_flists as u32).saturating_sub(1)
+    } else {
+        0
+    };
     let total_ndx_rounds = flist_cleanup_rounds + max_phase + 1;
 
     for _round in 0..total_ndx_rounds {
@@ -970,15 +944,15 @@ async fn run_pull(
             .map_err(crate::FerrosyncError::Protocol)?;
 
         // Read sender's NDX_DONE response.
-        let resp = crate::protocol::varint::read_ndx(
-            &mut demux_read,
-            &mut recv_ndx_state,
-            proto_ver,
-        )
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        let resp =
+            crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
         if resp != crate::protocol::varint::NDX_DONE {
-            tracing::warn!(ndx = resp, "expected NDX_DONE from sender during phase exchange");
+            tracing::warn!(
+                ndx = resp,
+                "expected NDX_DONE from sender during phase exchange"
+            );
         }
     }
 
@@ -993,12 +967,14 @@ async fn run_pull(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
     if proto_ver >= 29 {
-        let _flist_buildtime = crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        let _flist_xfertime = crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
+        let _flist_buildtime =
+            crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
+        let _flist_xfertime =
+            crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
     }
 
     // Final goodbye exchange (proto >= 24).
@@ -1013,16 +989,19 @@ async fn run_pull(
         ) {
             let mut buf = Vec::new();
             let _ = crate::protocol::varint::write_ndx(
-                &mut buf, crate::protocol::varint::NDX_DONE, st, pv,
-            ).await;
+                &mut buf,
+                crate::protocol::varint::NDX_DONE,
+                st,
+                pv,
+            )
+            .await;
             let _ = out.write_data(&buf).await;
             let _ = out.flush().await;
         }
 
         send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
-        let _ = crate::protocol::varint::read_ndx(
-            &mut demux_read, &mut recv_ndx_state, proto_ver,
-        ).await;
+        let _ = crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
+            .await;
         send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
 
         if proto_ver >= 31 {
@@ -1096,9 +1075,6 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-
-/// Read and discard the exclusion/filter list from the remote receiver.
-///
 // ---------------------------------------------------------------------------
 // File list building helpers
 // ---------------------------------------------------------------------------
@@ -1106,7 +1082,8 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
 /// Build FileEntry list from source paths in options.
 fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Result<Vec<FileEntry>> {
     let source_paths = options.source();
-    let filters = FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    let filters =
+        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
 
     let mut entries = Vec::new();
 
@@ -1204,9 +1181,7 @@ fn read_source_file(
     let name_str = String::from_utf8_lossy(&entry.name);
     for source in options.source() {
         let path = if options.source().len() == 1
-            && fs
-                .lstat(source)
-                .is_ok_and(|m| m.mode & S_IFMT == S_IFDIR)
+            && fs.lstat(source).is_ok_and(|m| m.mode & S_IFMT == S_IFDIR)
         {
             source.join(name_str.as_ref())
         } else {
@@ -1228,10 +1203,7 @@ fn read_source_file(
 ///
 /// This allows the existing generator/sender/receiver protocol code to read
 /// from the pipe as a plain `AsyncRead` stream, transparently demultiplexing.
-async fn demux_task(
-    reader: Box<dyn AsyncRead + Unpin + Send>,
-    mut pipe: tokio::io::DuplexStream,
-) {
+async fn demux_task(reader: Box<dyn AsyncRead + Unpin + Send>, mut pipe: tokio::io::DuplexStream) {
     let mut mplex = MplexReader::new(reader);
 
     loop {

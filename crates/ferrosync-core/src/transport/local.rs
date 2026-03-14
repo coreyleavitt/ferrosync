@@ -32,12 +32,7 @@ impl LocalTransport {
     /// - `options`: the server-mode option string (e.g., "-logDtprze.iLsfxCIvu").
     /// - `path`: the source or destination path. For server mode, rsync requires
     ///   relative paths; the CWD is set to the parent directory.
-    pub fn new(
-        rsync_path: Option<&str>,
-        am_sender: bool,
-        options: &str,
-        path: &Path,
-    ) -> Self {
+    pub fn new(rsync_path: Option<&str>, am_sender: bool, options: &str, path: &Path) -> Self {
         let mut args = vec!["--server".to_string()];
         if !am_sender {
             // We are receiving: the remote should be the sender.
@@ -87,33 +82,31 @@ impl Transport for LocalTransport {
                 cmd.current_dir(cwd);
             }
 
-            let mut child = cmd.spawn()
-                .map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        TransportError::CommandNotFound {
-                            command: self.rsync_path.clone(),
-                        }
-                    } else {
-                        TransportError::ConnectionFailed {
-                            message: format!(
-                                "failed to spawn {}: {e}",
-                                self.rsync_path
-                            ),
-                        }
+            let mut child = cmd.spawn().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    TransportError::CommandNotFound {
+                        command: self.rsync_path.clone(),
                     }
+                } else {
+                    TransportError::ConnectionFailed {
+                        message: format!("failed to spawn {}: {e}", self.rsync_path),
+                    }
+                }
+            })?;
+
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| TransportError::ConnectionFailed {
+                    message: "failed to open stdin pipe".to_string(),
                 })?;
 
-            let stdin = child.stdin.take().ok_or_else(|| {
-                TransportError::ConnectionFailed {
-                    message: "failed to open stdin pipe".to_string(),
-                }
-            })?;
-
-            let stdout = child.stdout.take().ok_or_else(|| {
-                TransportError::ConnectionFailed {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| TransportError::ConnectionFailed {
                     message: "failed to open stdout pipe".to_string(),
-                }
-            })?;
+                })?;
 
             // Spawn a background task to reap the child process and capture stderr.
             let monitor_handle = tokio::spawn(monitor_child(child));
@@ -144,7 +137,11 @@ async fn monitor_child(mut child: Child) {
             } else {
                 String::new()
             };
-            eprintln!("[rsync] exit code={:?}, stderr: {}", s.code(), stderr.trim());
+            eprintln!(
+                "[rsync] exit code={:?}, stderr: {}",
+                s.code(),
+                stderr.trim()
+            );
             tracing::warn!(
                 code = s.code(),
                 stderr = %stderr.trim(),
@@ -193,12 +190,7 @@ mod tests {
 
     #[test]
     fn test_local_transport_relative_path() {
-        let t = LocalTransport::new(
-            None,
-            true,
-            "-r",
-            Path::new("relative/path"),
-        );
+        let t = LocalTransport::new(None, true, "-r", Path::new("relative/path"));
         assert!(t.args.contains(&"relative/path".to_string()));
         assert!(t.cwd.is_none());
     }
@@ -266,7 +258,11 @@ mod tests {
         // Now read the server's version.
         let mut version_buf = [0u8; 4];
         let read_result = streams.reader.read_exact(&mut version_buf).await;
-        assert!(read_result.is_ok(), "failed to read version: {:?}", read_result.unwrap_err());
+        assert!(
+            read_result.is_ok(),
+            "failed to read version: {:?}",
+            read_result.unwrap_err()
+        );
 
         let remote_version = i32::from_le_bytes(version_buf);
         assert!(

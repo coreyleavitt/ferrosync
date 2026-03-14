@@ -26,11 +26,11 @@ pub fn f_name_cmp(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
     // A file's virtual path is: dirname + "/" + basename + (if dir: "/")
     #[derive(Clone, Copy, PartialEq)]
     enum Segment {
-        Dir,     // Walking through dirname
-        Slash,   // Implicit "/" between dirname and basename
-        Base,    // Walking through basename
-        Trail,   // Implicit trailing "/" for directories
-        Done,    // Past the end
+        Dir,   // Walking through dirname
+        Slash, // Implicit "/" between dirname and basename
+        Base,  // Walking through basename
+        Trail, // Implicit trailing "/" for directories
+        Done,  // Past the end
     }
 
     struct PathWalker<'a> {
@@ -192,12 +192,16 @@ pub fn f_name_cmp(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filelist::entry::{S_IFREG, S_IFDIR};
+    use crate::filelist::entry::{S_IFDIR, S_IFREG};
 
     fn file_entry(name: &[u8], is_dir: bool) -> FileEntry {
         FileEntry {
             name: name.to_vec(),
-            mode: if is_dir { S_IFDIR | 0o755 } else { S_IFREG | 0o644 },
+            mode: if is_dir {
+                S_IFDIR | 0o755
+            } else {
+                S_IFREG | 0o644
+            },
             ..Default::default()
         }
     }
@@ -282,9 +286,13 @@ mod tests {
         let names: Vec<&[u8]> = entries.iter().map(|e| e.name.as_slice()).collect();
         // "a" (dir) sorts as "a/" -- between regular files alphabetically.
         // Files in "a/" should come after "a" directory.
-        assert!(names.iter().position(|n| *n == b"a").unwrap()
-            < names.iter().position(|n| *n == b"a/a").unwrap());
-        assert!(names.iter().position(|n| *n == b"a").unwrap()
-            < names.iter().position(|n| *n == b"a/b").unwrap());
+        assert!(
+            names.iter().position(|n| *n == b"a").unwrap()
+                < names.iter().position(|n| *n == b"a/a").unwrap()
+        );
+        assert!(
+            names.iter().position(|n| *n == b"a").unwrap()
+                < names.iter().position(|n| *n == b"a/b").unwrap()
+        );
     }
 }

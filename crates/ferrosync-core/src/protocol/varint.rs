@@ -27,8 +27,8 @@ const INT_BYTE_EXTRA: [u8; 64] = [
     2, 2, 2, 2, 2, 2, 2, 2, // 0xC0-0xDF
     3, 3, 3, 3, // 0xE0-0xEF
     4, 4, // 0xF0-0xF7
-    5,    // 0xF8-0xFB
-    6,    // 0xFC-0xFF
+    5, // 0xF8-0xFB
+    6, // 0xFC-0xFF
 ];
 
 // ---------------------------------------------------------------------------
@@ -106,6 +106,7 @@ pub(crate) async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) ->
 /// rsync's varint uses up to 5 wire bytes: 1 prefix byte + 4 extra bytes.
 /// For values > 0x0FFFFFFF, the prefix byte is 0xF0 (no data bits) and all
 /// 32 bits come from the 4 extra bytes. This covers the full u32 range.
+#[allow(dead_code)]
 pub(crate) const VARINT_MAX: u32 = u32::MAX;
 
 /// Read a compact variable-length 32-bit integer (protocol >= 30).
@@ -149,7 +150,6 @@ pub(crate) async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> 
 ///
 /// Encodes any u32 value in 1-5 bytes using prefix-coded variable length.
 pub(crate) async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()> {
-
     let mut b = [0u8; 5]; // b[0] = prefix byte, b[1..4] = LE value bytes
     let le = x.to_le_bytes();
     b[1] = le[0];
@@ -194,10 +194,7 @@ pub(crate) async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Re
 ///
 /// `min_bytes` specifies the minimum number of bytes on the wire (typically 3
 /// for file sizes).
-pub(crate) async fn read_varlong<R: AsyncRead + Unpin>(
-    r: &mut R,
-    min_bytes: usize,
-) -> Result<i64> {
+pub(crate) async fn read_varlong<R: AsyncRead + Unpin>(r: &mut R, min_bytes: usize) -> Result<i64> {
     debug_assert!((1..=8).contains(&min_bytes));
 
     let mut b = [0u8; 8];
@@ -433,11 +430,7 @@ pub async fn write_ndx<W: AsyncWrite + Unpin>(
         return Ok(());
     }
 
-    let (is_negative, abs_ndx) = if ndx < 0 {
-        (true, -ndx)
-    } else {
-        (false, ndx)
-    };
+    let (is_negative, abs_ndx) = if ndx < 0 { (true, -ndx) } else { (false, ndx) };
 
     if is_negative {
         w.write_all(&[0xFF]).await?;
@@ -590,8 +583,20 @@ mod tests {
     async fn test_varint_roundtrip() {
         // Varint supports values up to 0x0FFFFFFF (28 bits).
         let test_values = [
-            0u32, 1, 127, 128, 255, 256, 1000, 16383, 16384, 0xFFFF, 0x1_0000, 0xFF_FFFF,
-            0xFFF_FFFF, 0x0FFF_FFFF,
+            0u32,
+            1,
+            127,
+            128,
+            255,
+            256,
+            1000,
+            16383,
+            16384,
+            0xFFFF,
+            0x1_0000,
+            0xFF_FFFF,
+            0xFFF_FFFF,
+            0x0FFF_FFFF,
         ];
         for val in test_values {
             let mut buf = Vec::new();
@@ -618,13 +623,7 @@ mod tests {
     #[tokio::test]
     async fn test_varint_encoding_size() {
         // Verify expected sizes for different ranges.
-        let cases: &[(u32, usize)] = &[
-            (0, 1),
-            (127, 1),
-            (128, 2),
-            (16383, 2),
-            (0x0FFF_FFFF, 4),
-        ];
+        let cases: &[(u32, usize)] = &[(0, 1), (127, 1), (128, 2), (16383, 2), (0x0FFF_FFFF, 4)];
         for &(val, expected_size) in cases {
             let mut buf = Vec::new();
             write_varint(&mut buf, val).await.unwrap();
@@ -665,7 +664,9 @@ mod tests {
         let mut state_r = NdxState::default();
 
         let mut buf = Vec::new();
-        write_ndx(&mut buf, NDX_DONE, &mut state_w, 31).await.unwrap();
+        write_ndx(&mut buf, NDX_DONE, &mut state_w, 31)
+            .await
+            .unwrap();
         assert_eq!(buf, &[0x00]);
 
         let mut cursor = Cursor::new(&buf);
@@ -704,10 +705,7 @@ mod tests {
         assert_eq!(buf[0], 0xFF); // negative prefix
 
         let mut cursor = Cursor::new(&buf);
-        assert_eq!(
-            read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(),
-            -5
-        );
+        assert_eq!(read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(), -5);
     }
 
     #[tokio::test]
@@ -718,7 +716,9 @@ mod tests {
         // First write index 0, then jump to a large value.
         let mut buf = Vec::new();
         write_ndx(&mut buf, 0, &mut state_w, 31).await.unwrap();
-        write_ndx(&mut buf, 100_000, &mut state_w, 31).await.unwrap();
+        write_ndx(&mut buf, 100_000, &mut state_w, 31)
+            .await
+            .unwrap();
 
         let mut cursor = Cursor::new(&buf);
         assert_eq!(read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(), 0);
@@ -796,7 +796,10 @@ mod tests {
         // Sentinel bytes (0xFFFFFFFF) with no 8-byte payload following.
         let mut cursor = Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF]);
         let result = read_longint(&mut cursor).await;
-        assert!(result.is_err(), "sentinel with no payload should return error");
+        assert!(
+            result.is_err(),
+            "sentinel with no payload should return error"
+        );
     }
 
     #[tokio::test]
@@ -804,7 +807,10 @@ mod tests {
         // Sentinel followed by only 4 bytes instead of 8.
         let mut cursor = Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02, 0x03, 0x04]);
         let result = read_longint(&mut cursor).await;
-        assert!(result.is_err(), "sentinel with partial payload should return error");
+        assert!(
+            result.is_err(),
+            "sentinel with partial payload should return error"
+        );
     }
 
     #[tokio::test]
@@ -837,7 +843,10 @@ mod tests {
         // extra=6 > 4, should return InvalidVarint.
         let mut cursor = Cursor::new(&[0xFC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
         let result = read_varint(&mut cursor).await;
-        assert!(result.is_err(), "varint with 0xFC prefix should return error");
+        assert!(
+            result.is_err(),
+            "varint with 0xFC prefix should return error"
+        );
     }
 
     #[tokio::test]
@@ -860,7 +869,10 @@ mod tests {
         // min_bytes=3, first byte 0x80 => extra=1, but no extra byte provided.
         let mut cursor = Cursor::new(&[0x80, 0x00, 0x00]);
         let result = read_varlong(&mut cursor, 3).await;
-        assert!(result.is_err(), "varlong with missing extra bytes should return error");
+        assert!(
+            result.is_err(),
+            "varlong with missing extra bytes should return error"
+        );
     }
 
     #[tokio::test]
@@ -884,7 +896,10 @@ mod tests {
         let mut cursor = Cursor::new(&[0xFF]);
         let mut state = NdxState::default();
         let result = read_ndx(&mut cursor, &mut state, 31).await;
-        assert!(result.is_err(), "negative prefix with no value should return error");
+        assert!(
+            result.is_err(),
+            "negative prefix with no value should return error"
+        );
     }
 
     #[tokio::test]
@@ -893,7 +908,10 @@ mod tests {
         let mut cursor = Cursor::new(&[0xFE]);
         let mut state = NdxState::default();
         let result = read_ndx(&mut cursor, &mut state, 31).await;
-        assert!(result.is_err(), "0xFE prefix with no payload should return error");
+        assert!(
+            result.is_err(),
+            "0xFE prefix with no payload should return error"
+        );
     }
 
     #[tokio::test]
@@ -902,6 +920,9 @@ mod tests {
         let mut cursor = Cursor::new(&[0xFE, 0x80, 0x00]);
         let mut state = NdxState::default();
         let result = read_ndx(&mut cursor, &mut state, 31).await;
-        assert!(result.is_err(), "4-byte ndx with missing bytes should return error");
+        assert!(
+            result.is_err(),
+            "4-byte ndx with missing bytes should return error"
+        );
     }
 }

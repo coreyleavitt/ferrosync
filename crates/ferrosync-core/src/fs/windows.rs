@@ -145,8 +145,7 @@ impl FileSystem for WindowsFileSystem {
                 .map_err(|e| Self::map_io_err(&tmp_path, e))?
                 .permissions();
             perms.set_readonly(readonly);
-            fs::set_permissions(&tmp_path, perms)
-                .map_err(|e| Self::map_io_err(&tmp_path, e))?;
+            fs::set_permissions(&tmp_path, perms).map_err(|e| Self::map_io_err(&tmp_path, e))?;
         }
 
         fs::rename(&tmp_path, path).map_err(|e| Self::map_io_err(path, e))?;
@@ -177,10 +176,7 @@ impl FileSystem for WindowsFileSystem {
 
         // Choose file or directory symlink based on target type.
         // If the target doesn't exist or we can't stat it, default to file symlink.
-        let is_dir = target_path
-            .metadata()
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
+        let is_dir = target_path.metadata().map(|m| m.is_dir()).unwrap_or(false);
 
         if is_dir {
             std::os::windows::fs::symlink_dir(target_path, link_path)
@@ -210,7 +206,8 @@ impl FileSystem for WindowsFileSystem {
             .write(true)
             .open(path)
             .map_err(|e| Self::map_io_err(path, e))?;
-        file.set_times(times).map_err(|e| Self::map_io_err(path, e))?;
+        file.set_times(times)
+            .map_err(|e| Self::map_io_err(path, e))?;
         Ok(())
     }
 
@@ -256,7 +253,8 @@ impl FileSystem for WindowsFileSystem {
             .open(path)
             .map_err(|e| Self::map_io_err(path, e))?;
 
-        file.write_all(data).map_err(|e| Self::map_io_err(path, e))?;
+        file.write_all(data)
+            .map_err(|e| Self::map_io_err(path, e))?;
 
         if let Some(m) = mode {
             let readonly = m & 0o222 == 0;
@@ -320,7 +318,8 @@ impl FileSystem for WindowsFileSystem {
             .open(path)
             .map_err(|e| Self::map_io_err(path, e))?;
 
-        file.write_all(data).map_err(|e| Self::map_io_err(path, e))?;
+        file.write_all(data)
+            .map_err(|e| Self::map_io_err(path, e))?;
 
         if let Some(m) = mode {
             let readonly = m & 0o222 == 0;
@@ -352,14 +351,17 @@ impl FileSystem for WindowsFileSystem {
         Ok(Box::new(std::io::BufReader::new(file)))
     }
 
-    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn std::io::Write + Send>> {
+    fn write_file_stream(
+        &self,
+        path: &Path,
+        mode: Option<u32>,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
         let parent = path.parent().unwrap_or(Path::new("."));
         let tmp_name = format!(".ferrosync.{}.stream.tmp", std::process::id());
         let tmp_path = parent.join(&tmp_name);
         let dest_path = path.to_path_buf();
 
-        let file = fs::File::create(&tmp_path)
-            .map_err(|e| Self::map_io_err(&tmp_path, e))?;
+        let file = fs::File::create(&tmp_path).map_err(|e| Self::map_io_err(&tmp_path, e))?;
 
         Ok(Box::new(WindowsAtomicFileWriter {
             inner: std::io::BufWriter::new(file),
@@ -472,8 +474,10 @@ mod tests {
 
     #[test]
     fn test_mode_from_attrs_readonly_directory() {
-        let mode =
-            WindowsFileSystem::mode_from_attrs(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY, true);
+        let mode = WindowsFileSystem::mode_from_attrs(
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY,
+            true,
+        );
         assert_eq!(mode, S_IFDIR | 0o555);
     }
 

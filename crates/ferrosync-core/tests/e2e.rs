@@ -359,8 +359,6 @@ async fn test_e2e_empty_module() {
     let _ = shutdown.send(true);
 
     // Client directory should exist but have no files (only the "." dir entry).
-    let entries: Vec<_> = std::fs::read_dir(client_dir.path())
-        .unwrap()
-        .collect();
+    let entries: Vec<_> = std::fs::read_dir(client_dir.path()).unwrap().collect();
     assert_eq!(entries.len(), 0, "empty module should transfer no files");
 }

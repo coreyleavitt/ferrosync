@@ -186,89 +186,173 @@ impl TransferOptions {
     // --- Getter methods ---
 
     /// Recurse into directories (`-r`).
-    pub fn recursive(&self) -> bool { self.recursive }
+    pub fn recursive(&self) -> bool {
+        self.recursive
+    }
     /// Preserve symlinks as symlinks (`-l`).
-    pub fn preserve_links(&self) -> bool { self.preserve_links }
+    pub fn preserve_links(&self) -> bool {
+        self.preserve_links
+    }
     /// Preserve permissions (`-p`).
-    pub fn preserve_perms(&self) -> bool { self.preserve_perms }
+    pub fn preserve_perms(&self) -> bool {
+        self.preserve_perms
+    }
     /// Preserve modification times (`-t`).
-    pub fn preserve_times(&self) -> bool { self.preserve_times }
+    pub fn preserve_times(&self) -> bool {
+        self.preserve_times
+    }
     /// Preserve group (`-g`).
-    pub fn preserve_group(&self) -> bool { self.preserve_group }
+    pub fn preserve_group(&self) -> bool {
+        self.preserve_group
+    }
     /// Preserve owner (`-o`, requires root).
-    pub fn preserve_owner(&self) -> bool { self.preserve_owner }
+    pub fn preserve_owner(&self) -> bool {
+        self.preserve_owner
+    }
     /// Preserve device files (`-D` component).
-    pub fn preserve_devices(&self) -> bool { self.preserve_devices }
+    pub fn preserve_devices(&self) -> bool {
+        self.preserve_devices
+    }
     /// Preserve special files (`-D` component).
-    pub fn preserve_specials(&self) -> bool { self.preserve_specials }
+    pub fn preserve_specials(&self) -> bool {
+        self.preserve_specials
+    }
     /// Use checksums for change detection (`-c`).
-    pub fn checksum_mode(&self) -> bool { self.checksum_mode }
+    pub fn checksum_mode(&self) -> bool {
+        self.checksum_mode
+    }
     /// Whole-file transfer (`--whole-file`).
-    pub fn whole_file(&self) -> bool { self.whole_file }
+    pub fn whole_file(&self) -> bool {
+        self.whole_file
+    }
     /// Update only: skip files newer on receiver (`-u`).
-    pub fn update(&self) -> bool { self.update }
+    pub fn update(&self) -> bool {
+        self.update
+    }
     /// In-place file updates (`--inplace`).
-    pub fn inplace(&self) -> bool { self.inplace }
+    pub fn inplace(&self) -> bool {
+        self.inplace
+    }
     /// How to handle extraneous files on the receiver.
-    pub fn delete(&self) -> DeleteMode { self.delete }
+    pub fn delete(&self) -> DeleteMode {
+        self.delete
+    }
     /// Whether compression is enabled (`-z`).
-    pub fn compress(&self) -> bool { self.compress }
+    pub fn compress(&self) -> bool {
+        self.compress
+    }
     /// Compression level (1-9).
-    pub fn compress_level(&self) -> u32 { self.compress_level }
+    pub fn compress_level(&self) -> u32 {
+        self.compress_level
+    }
     /// Current verbosity level.
-    pub fn verbosity(&self) -> Verbosity { self.verbosity }
+    pub fn verbosity(&self) -> Verbosity {
+        self.verbosity
+    }
     /// Whether per-file transfer progress is enabled (`--progress`).
-    pub fn progress(&self) -> bool { self.progress }
+    pub fn progress(&self) -> bool {
+        self.progress
+    }
     /// Whether transfer statistics are printed at end (`--stats`).
-    pub fn stats(&self) -> bool { self.stats }
+    pub fn stats(&self) -> bool {
+        self.stats
+    }
     /// Dry run mode (`-n`).
-    pub fn dry_run(&self) -> bool { self.dry_run }
+    pub fn dry_run(&self) -> bool {
+        self.dry_run
+    }
     /// Whether itemized changes are enabled (`-i`).
-    pub fn itemize_changes(&self) -> bool { self.itemize_changes }
+    pub fn itemize_changes(&self) -> bool {
+        self.itemize_changes
+    }
     /// Exclude patterns (`--exclude`).
-    pub fn exclude(&self) -> &[String] { &self.exclude }
+    pub fn exclude(&self) -> &[String] {
+        &self.exclude
+    }
     /// Include patterns (`--include`).
-    pub fn include(&self) -> &[String] { &self.include }
+    pub fn include(&self) -> &[String] {
+        &self.include
+    }
     /// Filter rules (`--filter`).
-    pub fn filter(&self) -> &[String] { &self.filter }
+    pub fn filter(&self) -> &[String] {
+        &self.filter
+    }
     /// Source path(s).
-    pub fn source(&self) -> &[PathBuf] { &self.source }
+    pub fn source(&self) -> &[PathBuf] {
+        &self.source
+    }
     /// Destination path.
-    pub fn dest(&self) -> Option<&PathBuf> { self.dest.as_ref() }
+    pub fn dest(&self) -> Option<&PathBuf> {
+        self.dest.as_ref()
+    }
     /// Bandwidth limit in bytes/sec.
-    pub fn bwlimit(&self) -> Option<u64> { self.bwlimit }
+    pub fn bwlimit(&self) -> Option<u64> {
+        self.bwlimit
+    }
     /// Maximum file size to transfer.
-    pub fn max_size(&self) -> Option<u64> { self.max_size }
+    pub fn max_size(&self) -> Option<u64> {
+        self.max_size
+    }
     /// Minimum file size to transfer.
-    pub fn min_size(&self) -> Option<u64> { self.min_size }
+    pub fn min_size(&self) -> Option<u64> {
+        self.min_size
+    }
     /// Timeout in seconds.
-    pub fn timeout(&self) -> Option<u64> { self.timeout }
+    pub fn timeout(&self) -> Option<u64> {
+        self.timeout
+    }
     /// Hard-link basis directories (`--link-dest`).
-    pub fn link_dest(&self) -> &[PathBuf] { &self.link_dest }
+    pub fn link_dest(&self) -> &[PathBuf] {
+        &self.link_dest
+    }
     /// Copy basis directories (`--copy-dest`).
-    pub fn copy_dest(&self) -> &[PathBuf] { &self.copy_dest }
+    pub fn copy_dest(&self) -> &[PathBuf] {
+        &self.copy_dest
+    }
     /// Compare basis directories (`--compare-dest`).
-    pub fn compare_dest(&self) -> &[PathBuf] { &self.compare_dest }
+    pub fn compare_dest(&self) -> &[PathBuf] {
+        &self.compare_dest
+    }
     /// Whether backup is enabled (`-b`).
-    pub fn backup(&self) -> bool { self.backup }
+    pub fn backup(&self) -> bool {
+        self.backup
+    }
     /// Backup directory path.
-    pub fn backup_dir(&self) -> Option<&PathBuf> { self.backup_dir.as_ref() }
+    pub fn backup_dir(&self) -> Option<&PathBuf> {
+        self.backup_dir.as_ref()
+    }
     /// Suffix for backup files.
-    pub fn suffix(&self) -> &str { &self.suffix }
+    pub fn suffix(&self) -> &str {
+        &self.suffix
+    }
     /// Partial transfer directory.
-    pub fn partial_dir(&self) -> Option<&PathBuf> { self.partial_dir.as_ref() }
+    pub fn partial_dir(&self) -> Option<&PathBuf> {
+        self.partial_dir.as_ref()
+    }
     /// Append mode (`--append`).
-    pub fn append(&self) -> bool { self.append }
+    pub fn append(&self) -> bool {
+        self.append
+    }
     /// Files-from path.
-    pub fn files_from(&self) -> Option<&PathBuf> { self.files_from.as_ref() }
+    pub fn files_from(&self) -> Option<&PathBuf> {
+        self.files_from.as_ref()
+    }
     /// Don't cross filesystem boundaries (`-x`).
-    pub fn one_file_system(&self) -> bool { self.one_file_system }
+    pub fn one_file_system(&self) -> bool {
+        self.one_file_system
+    }
     /// Use numeric uid/gid (`--numeric-ids`).
-    pub fn numeric_ids(&self) -> bool { self.numeric_ids }
+    pub fn numeric_ids(&self) -> bool {
+        self.numeric_ids
+    }
     /// Sparse file handling (`--sparse`).
-    pub fn sparse(&self) -> bool { self.sparse }
+    pub fn sparse(&self) -> bool {
+        self.sparse
+    }
     /// Number of concurrent file transfers (`--concurrent`).
-    pub fn concurrent(&self) -> usize { self.concurrent }
+    pub fn concurrent(&self) -> usize {
+        self.concurrent
+    }
 }
 
 /// Builder for [`TransferOptions`].

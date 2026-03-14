@@ -66,6 +66,7 @@ fn create_single_file(dir: &Path, name: &str, content: &[u8]) {
 }
 
 /// Assert two directory trees are identical (file names and contents).
+#[allow(dead_code)]
 fn assert_trees_equal(expected: &Path, actual: &Path) {
     let expected_files = collect_files(expected, expected);
     let actual_files = collect_files(actual, actual);
@@ -90,10 +91,8 @@ fn assert_trees_equal(expected: &Path, actual: &Path) {
 }
 
 /// Collect all files in a directory tree as (relative_path, contents).
-fn collect_files(
-    root: &Path,
-    current: &Path,
-) -> std::collections::BTreeMap<String, Vec<u8>> {
+#[allow(dead_code)]
+fn collect_files(root: &Path, current: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     let mut files = std::collections::BTreeMap::new();
     if !current.is_dir() {
         return files;
@@ -147,8 +146,11 @@ async fn test_pull_single_file() {
 
     assert!(result.is_ok(), "pull failed: {:?}", result.unwrap_err());
     let result = result.unwrap();
-    assert!(result.stats.files_transferred >= 1,
-        "expected >= 1 files, got {}", result.stats.files_transferred);
+    assert!(
+        result.stats.files_transferred >= 1,
+        "expected >= 1 files, got {}",
+        result.stats.files_transferred
+    );
 
     let dest_content = std::fs::read(dst.join("test.txt")).unwrap();
     assert_eq!(dest_content, b"pull test content\n");
@@ -182,7 +184,11 @@ async fn test_pull_directory_recursive() {
 
     assert!(result.is_ok(), "pull failed: {:?}", result.unwrap_err());
     let result = result.unwrap();
-    assert!(result.stats.files_transferred >= 4, "expected at least 4 files, got {}", result.stats.files_transferred);
+    assert!(
+        result.stats.files_transferred >= 4,
+        "expected at least 4 files, got {}",
+        result.stats.files_transferred
+    );
 
     // Verify file contents match.
     assert_eq!(
@@ -450,7 +456,11 @@ async fn test_pull_delta_transfer() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "delta pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "delta pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     // Verify the file was updated to match source.
     let dest_content = std::fs::read(dst.join("delta.dat")).unwrap();
@@ -488,7 +498,11 @@ async fn test_pull_whole_file() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "whole-file pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "whole-file pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     let dest_content = std::fs::read(dst.join("whole.txt")).unwrap();
     assert_eq!(dest_content, b"whole file transfer\n");
@@ -525,7 +539,11 @@ async fn test_pull_checksum_mode() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "checksum pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "checksum pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     let dest_content = std::fs::read(dst.join("checksum.txt")).unwrap();
     assert_eq!(dest_content, b"checksum mode test\n");
@@ -559,7 +577,11 @@ async fn test_pull_empty_directory() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "empty dir pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "empty dir pull failed: {:?}",
+        result.unwrap_err()
+    );
     assert_eq!(result.unwrap().stats.files_transferred, 0);
 }
 
@@ -595,7 +617,11 @@ async fn test_pull_large_file() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "large file pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "large file pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     let dest_content = std::fs::read(dst.join("large.bin")).unwrap();
     assert_eq!(dest_content.len(), data.len());
@@ -667,8 +693,8 @@ async fn test_handshake_against_real_rsync() {
     let server_opts = build_server_options(&options, false);
     eprintln!("server_opts: {server_opts}");
     // Spawn rsync directly to capture stderr.
-    use tokio::process::Command;
     use std::process::Stdio;
+    use tokio::process::Command;
     let mut child = Command::new("rsync")
         .args(["--server", "--sender", &server_opts, ".", "."])
         .current_dir(&src)
@@ -679,7 +705,7 @@ async fn test_handshake_against_real_rsync() {
         .unwrap();
     let mut writer = child.stdin.take().unwrap();
     let mut reader = child.stdout.take().unwrap();
-    let mut stderr_handle = child.stderr.take().unwrap();
+    let _stderr_handle = child.stderr.take().unwrap();
 
     let protocol = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -691,8 +717,11 @@ async fn test_handshake_against_real_rsync() {
 
     eprintln!(
         "handshake: version={}, flags={:#x}, inc_flist={}, checksum={:?}, seed={}",
-        protocol.version, protocol.compat_flags, protocol.incremental_flist,
-        protocol.checksum, protocol.seed
+        protocol.version,
+        protocol.compat_flags,
+        protocol.incremental_flist,
+        protocol.checksum,
+        protocol.seed
     );
 
     assert_eq!(protocol.version, 31);
@@ -723,24 +752,39 @@ async fn test_handshake_against_real_rsync() {
     let mut all_data = Vec::new();
     loop {
         let mut raw = [0u8; 4096];
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            reader.read(&mut raw),
-        )
-        .await;
+        let n =
+            tokio::time::timeout(std::time::Duration::from_secs(2), reader.read(&mut raw)).await;
         match n {
-            Ok(Ok(0)) => { eprintln!("EOF"); break; }
+            Ok(Ok(0)) => {
+                eprintln!("EOF");
+                break;
+            }
             Ok(Ok(n)) => {
                 eprintln!("read {n} bytes:");
                 for chunk in raw[..n].chunks(32) {
                     let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-                    let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
+                    let ascii: String = chunk
+                        .iter()
+                        .map(|&b| {
+                            if (32..127).contains(&b) {
+                                b as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .collect();
                     eprintln!("  {} | {}", hex.join(" "), ascii);
                 }
                 all_data.extend_from_slice(&raw[..n]);
             }
-            Ok(Err(e)) => { eprintln!("read error: {e}"); break; }
-            Err(_) => { eprintln!("timeout (read {} total bytes)", all_data.len()); break; }
+            Ok(Err(e)) => {
+                eprintln!("read error: {e}");
+                break;
+            }
+            Err(_) => {
+                eprintln!("timeout (read {} total bytes)", all_data.len());
+                break;
+            }
         }
     }
 
@@ -748,7 +792,7 @@ async fn test_handshake_against_real_rsync() {
     eprintln!("\n--- Parsed MUX frames ---");
     let mut pos = 0;
     while pos + 4 <= all_data.len() {
-        let hdr = u32::from_le_bytes(all_data[pos..pos+4].try_into().unwrap());
+        let hdr = u32::from_le_bytes(all_data[pos..pos + 4].try_into().unwrap());
         let tag = hdr >> 24;
         let len = (hdr & 0x00FF_FFFF) as usize;
         let tag_name = match tag {
@@ -761,9 +805,12 @@ async fn test_handshake_against_real_rsync() {
             _ => "UNKNOWN",
         };
         let end = (pos + 4 + len).min(all_data.len());
-        let payload = &all_data[pos+4..end];
+        let payload = &all_data[pos + 4..end];
         if tag >= 7 {
-            eprintln!("  tag={tag} ({tag_name}), len={len}, payload_hex={:02x?}", payload);
+            eprintln!(
+                "  tag={tag} ({tag_name}), len={len}, payload_hex={:02x?}",
+                payload
+            );
             if tag != 7 {
                 eprintln!("    text: {}", String::from_utf8_lossy(payload));
             }
@@ -794,13 +841,21 @@ async fn test_rsync_protocol_version_exchange() {
     let transport = LocalTransport::new(None, false, &server_opts, &src);
 
     let streams: std::result::Result<TransportStreams, _> = Box::new(transport).connect().await;
-    assert!(streams.is_ok(), "connect failed: {:?}", streams.unwrap_err());
+    assert!(
+        streams.is_ok(),
+        "connect failed: {:?}",
+        streams.unwrap_err()
+    );
 
     let mut streams = streams.unwrap();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Send our protocol version (31).
-    streams.writer.write_all(&31_i32.to_le_bytes()).await.unwrap();
+    streams
+        .writer
+        .write_all(&31_i32.to_le_bytes())
+        .await
+        .unwrap();
     streams.writer.flush().await.unwrap();
 
     // Read remote version.
@@ -822,13 +877,13 @@ async fn test_rsync_protocol_version_exchange() {
 async fn test_debug_pull_stderr() {
     skip_if_no_rsync!();
 
+    use ferrosync_core::delta::sum;
     use ferrosync_core::protocol::handshake;
     use ferrosync_core::protocol::multiplex::MplexWriter;
     use ferrosync_core::protocol::varint;
-    use ferrosync_core::delta::sum;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::process::Command;
     use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command;
 
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");
@@ -864,7 +919,10 @@ async fn test_debug_pull_stderr() {
     let protocol = handshake::client_handshake(&mut reader, &mut writer, false, false)
         .await
         .expect("handshake failed");
-    eprintln!("protocol: version={}, checksum={:?}, seed={}", protocol.version, protocol.checksum, protocol.seed);
+    eprintln!(
+        "protocol: version={}, checksum={:?}, seed={}",
+        protocol.version, protocol.checksum, protocol.seed
+    );
 
     // Send empty filter list (MUX-framed)
     let mut mplex = MplexWriter::new(&mut writer);
@@ -880,16 +938,30 @@ async fn test_debug_pull_stderr() {
         let mut raw = [0u8; 4096];
         match tokio::time::timeout(std::time::Duration::from_secs(2), reader.read(&mut raw)).await {
             Ok(Ok(0)) => break,
-            Ok(Ok(n)) => { all_stdout.extend_from_slice(&raw[..n]); }
+            Ok(Ok(n)) => {
+                all_stdout.extend_from_slice(&raw[..n]);
+            }
             Ok(Err(_)) => break,
             Err(_) => break,
         }
     }
-    eprintln!("received {} bytes of file list data from rsync", all_stdout.len());
+    eprintln!(
+        "received {} bytes of file list data from rsync",
+        all_stdout.len()
+    );
     // Hex dump of all file list data
     for chunk in all_stdout.chunks(32) {
         let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        let ascii: String = chunk.iter().map(|&b| if (32..127).contains(&b) { b as char } else { '.' }).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| {
+                if (32..127).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
         eprintln!("  {} | {}", hex.join(" "), ascii);
     }
 
@@ -897,11 +969,11 @@ async fn test_debug_pull_stderr() {
     eprintln!("\n--- MUX frames in file list data ---");
     let mut pos = 0;
     while pos + 4 <= all_stdout.len() {
-        let hdr = u32::from_le_bytes(all_stdout[pos..pos+4].try_into().unwrap());
+        let hdr = u32::from_le_bytes(all_stdout[pos..pos + 4].try_into().unwrap());
         let tag = hdr >> 24;
         let len = (hdr & 0x00FF_FFFF) as usize;
         let end = (pos + 4 + len).min(all_stdout.len());
-        let payload = &all_stdout[pos+4..end];
+        let payload = &all_stdout[pos + 4..end];
         let hex: Vec<String> = payload.iter().map(|b| format!("{b:02x}")).collect();
         eprintln!("  pos={pos} tag={tag} len={len} payload: {}", hex.join(" "));
         if tag == 7 {
@@ -921,7 +993,9 @@ async fn test_debug_pull_stderr() {
     eprintln!("sending NDX={test_ndx} (inc_recurse ndx_start=1, entry[1]=test.txt)");
     let mut sig_buf = Vec::new();
     let mut ndx_state = varint::NdxState::default();
-    varint::write_ndx(&mut sig_buf, test_ndx, &mut ndx_state, protocol.version).await.unwrap();
+    varint::write_ndx(&mut sig_buf, test_ndx, &mut ndx_state, protocol.version)
+        .await
+        .unwrap();
     varint::write_shortint(&mut sig_buf, 0x8000).await.unwrap();
     let sigs = sum::compute_signatures(b"", protocol.seed, protocol.checksum);
     sum::write_sums(&mut sig_buf, &sigs).await.unwrap();
@@ -935,7 +1009,12 @@ async fn test_debug_pull_stderr() {
 
     // Read stderr
     let mut stderr_buf = String::new();
-    match tokio::time::timeout(std::time::Duration::from_secs(1), stderr.read_to_string(&mut stderr_buf)).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        stderr.read_to_string(&mut stderr_buf),
+    )
+    .await
+    {
         Ok(Ok(_)) => eprintln!("rsync stderr: {stderr_buf}"),
         Ok(Err(e)) => eprintln!("stderr read error: {e}"),
         Err(_) => eprintln!("stderr timeout"),
@@ -999,7 +1078,11 @@ async fn test_pull_archive_mode() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "archive pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "archive pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     // Verify content.
     assert_eq!(
@@ -1050,7 +1133,11 @@ async fn test_pull_multiple_files_flat() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "multi-file pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "multi-file pull failed: {:?}",
+        result.unwrap_err()
+    );
     let result = result.unwrap();
     assert_eq!(result.stats.files_transferred, 10);
 
@@ -1095,7 +1182,11 @@ async fn test_pull_idempotent() {
     };
 
     let result1 = build_and_run().await;
-    assert!(result1.is_ok(), "first pull failed: {:?}", result1.unwrap_err());
+    assert!(
+        result1.is_ok(),
+        "first pull failed: {:?}",
+        result1.unwrap_err()
+    );
     assert!(result1.unwrap().stats.files_transferred >= 1);
 
     // Check mtimes match between src and dst
@@ -1107,10 +1198,15 @@ async fn test_pull_idempotent() {
 
     // Second transfer should be a no-op (file already up to date).
     let result2 = build_and_run().await;
-    assert!(result2.is_ok(), "second pull failed: {:?}", result2.unwrap_err());
+    assert!(
+        result2.is_ok(),
+        "second pull failed: {:?}",
+        result2.unwrap_err()
+    );
     // rsync skips files with matching size+mtime, so 0 files transferred.
     assert_eq!(
-        result2.unwrap().stats.files_transferred, 0,
+        result2.unwrap().stats.files_transferred,
+        0,
         "second sync should transfer 0 files"
     );
 }
@@ -1123,13 +1219,13 @@ async fn test_pull_idempotent() {
 async fn test_debug_push_protocol() {
     skip_if_no_rsync!();
 
-    use ferrosync_core::protocol::handshake;
-    use ferrosync_core::protocol::multiplex::MplexWriter;
-    use ferrosync_core::filelist::exchange;
     use ferrosync_core::filelist::entry::{FileEntry, S_IFREG};
+    use ferrosync_core::filelist::exchange;
+    use ferrosync_core::protocol::handshake;
+
+    use std::process::Stdio;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::Command;
-    use std::process::Stdio;
 
     let tmp = tempfile::tempdir().unwrap();
     let dst = tmp.path().join("dst");
@@ -1147,9 +1243,21 @@ async fn test_debug_push_protocol() {
     // Add -vv after the '-' in server_opts for verbose debugging
     let verbose_opts = format!("-vv{}", &server_opts[1..]);
     let mut child = Command::new("strace")
-        .args(["-e", "trace=read,write", "-e", "read=0", "-e", "write=1",
-               "-o", "/tmp/rsync_strace.log",
-               "rsync", "--server", &verbose_opts, ".", "."])
+        .args([
+            "-e",
+            "trace=read,write",
+            "-e",
+            "read=0",
+            "-e",
+            "write=1",
+            "-o",
+            "/tmp/rsync_strace.log",
+            "rsync",
+            "--server",
+            &verbose_opts,
+            ".",
+            ".",
+        ])
         .current_dir(&dst)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1165,9 +1273,14 @@ async fn test_debug_push_protocol() {
     let protocol = handshake::client_handshake(&mut reader, &mut writer, true, false)
         .await
         .expect("handshake failed");
-    eprintln!("handshake: version={} inc_flist={} varint_flist={} checksum={:?} seed={}",
-        protocol.version, protocol.incremental_flist, protocol.varint_flist_flags,
-        protocol.checksum, protocol.seed);
+    eprintln!(
+        "handshake: version={} inc_flist={} varint_flist={} checksum={:?} seed={}",
+        protocol.version,
+        protocol.incremental_flist,
+        protocol.varint_flist_flags,
+        protocol.checksum,
+        protocol.seed
+    );
 
     // Build a simple file list with one file
     let entry = FileEntry {
@@ -1217,36 +1330,58 @@ async fn test_debug_push_protocol() {
     let mut stdout_data = Vec::new();
     loop {
         let mut raw = [0u8; 4096];
-        match tokio::time::timeout(std::time::Duration::from_millis(500), reader.read(&mut raw)).await {
-            Ok(Ok(0)) => { eprintln!("stdout: EOF"); break; }
+        match tokio::time::timeout(std::time::Duration::from_millis(500), reader.read(&mut raw))
+            .await
+        {
+            Ok(Ok(0)) => {
+                eprintln!("stdout: EOF");
+                break;
+            }
             Ok(Ok(n)) => {
                 let hex: Vec<String> = raw[..n].iter().map(|b| format!("{b:02x}")).collect();
                 eprintln!("stdout: {} bytes: {}", n, hex.join(" "));
                 stdout_data.extend_from_slice(&raw[..n]);
             }
-            Ok(Err(e)) => { eprintln!("stdout error: {e}"); break; }
-            Err(_) => { eprintln!("stdout: timeout ({} total bytes read)", stdout_data.len()); break; }
+            Ok(Err(e)) => {
+                eprintln!("stdout error: {e}");
+                break;
+            }
+            Err(_) => {
+                eprintln!("stdout: timeout ({} total bytes read)", stdout_data.len());
+                break;
+            }
         }
     }
 
     // Parse MUX frames from stdout
     let mut pos = 0;
     while pos + 4 <= stdout_data.len() {
-        let hdr = u32::from_le_bytes(stdout_data[pos..pos+4].try_into().unwrap());
+        let hdr = u32::from_le_bytes(stdout_data[pos..pos + 4].try_into().unwrap());
         let tag = hdr >> 24;
         let len = (hdr & 0x00FF_FFFF) as usize;
         let end = (pos + 4 + len).min(stdout_data.len());
-        let payload = &stdout_data[pos+4..end];
+        let payload = &stdout_data[pos + 4..end];
         let hex: Vec<String> = payload.iter().map(|b| format!("{b:02x}")).collect();
         let text = String::from_utf8_lossy(payload);
-        eprintln!("MUX tag={} len={} hex=[{}] text=[{}]", tag, len, hex.join(" "), text.trim());
+        eprintln!(
+            "MUX tag={} len={} hex=[{}] text=[{}]",
+            tag,
+            len,
+            hex.join(" "),
+            text.trim()
+        );
         pos = end;
     }
 
     // Read stderr
     let mut stderr = stderr_handle;
     let mut stderr_buf = String::new();
-    match tokio::time::timeout(std::time::Duration::from_secs(1), stderr.read_to_string(&mut stderr_buf)).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        stderr.read_to_string(&mut stderr_buf),
+    )
+    .await
+    {
         Ok(Ok(_)) => eprintln!("rsync stderr:\n{}", stderr_buf.trim()),
         Ok(Err(e)) => eprintln!("stderr error: {e}"),
         Err(_) => eprintln!("stderr: timeout"),
@@ -1297,7 +1432,11 @@ async fn test_pull_empty_file() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "empty file pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "empty file pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     let dest_path = dst.join("empty.dat");
     assert!(dest_path.exists(), "empty file should exist in dest");
@@ -1331,7 +1470,11 @@ async fn test_push_empty_file() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "empty file push failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "empty file push failed: {:?}",
+        result.unwrap_err()
+    );
 
     let dest_path = dst.join("empty_push.dat");
     assert!(dest_path.exists(), "empty file should exist in dest");
@@ -1373,7 +1516,11 @@ async fn test_pull_symlink() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "symlink pull failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "symlink pull failed: {:?}",
+        result.unwrap_err()
+    );
 
     // Verify the target file was transferred.
     assert_eq!(
@@ -1384,7 +1531,11 @@ async fn test_pull_symlink() {
     // Verify the symlink was recreated as a symlink.
     let link_path = dst.join("link.txt");
     assert!(
-        link_path.symlink_metadata().unwrap().file_type().is_symlink(),
+        link_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "link.txt should be a symlink"
     );
     let link_target = std::fs::read_link(&link_path).unwrap();
@@ -1425,12 +1576,20 @@ async fn test_push_symlink() {
         .run()
         .await;
 
-    assert!(result.is_ok(), "symlink push failed: {:?}", result.unwrap_err());
+    assert!(
+        result.is_ok(),
+        "symlink push failed: {:?}",
+        result.unwrap_err()
+    );
 
     // Verify the symlink was recreated.
     let link_path = dst.join("alias.txt");
     assert!(
-        link_path.symlink_metadata().unwrap().file_type().is_symlink(),
+        link_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "alias.txt should be a symlink"
     );
     let link_target = std::fs::read_link(&link_path).unwrap();
@@ -1463,9 +1622,9 @@ async fn test_pull_special_characters_in_filenames() {
         ("file.multiple.dots.txt", b"dots content\n"),
         ("UPPERCASE.TXT", b"upper content\n"),
         ("MiXeD_CaSe.txt", b"mixed content\n"),
-        ("\u{00e9}\u{00e8}\u{00ea}.txt", b"french accents\n"),       // eee with accents
-        ("\u{00fc}\u{00f6}\u{00e4}.txt", b"german umlauts\n"),       // uoa with umlauts
-        ("\u{4f60}\u{597d}.txt", b"chinese hello\n"),                // nihao
+        ("\u{00e9}\u{00e8}\u{00ea}.txt", b"french accents\n"), // eee with accents
+        ("\u{00fc}\u{00f6}\u{00e4}.txt", b"german umlauts\n"), // uoa with umlauts
+        ("\u{4f60}\u{597d}.txt", b"chinese hello\n"),          // nihao
         ("file (parentheses).txt", b"parens content\n"),
         ("file [brackets].txt", b"brackets content\n"),
         ("file {braces}.txt", b"braces content\n"),

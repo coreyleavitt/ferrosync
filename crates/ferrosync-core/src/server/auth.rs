@@ -40,14 +40,14 @@ pub enum AuthError {
 }
 
 /// Length of the raw challenge in bytes (before base64 encoding).
+#[allow(dead_code)]
 const CHALLENGE_BYTES: usize = 16;
 
 /// Maximum password length (matches rsync's zero-padding size).
 const MAX_PASSWORD_LEN: usize = 64;
 
 /// Counter for challenge uniqueness within a single process.
-static CHALLENGE_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static CHALLENGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Generate a random challenge string, returned as base64.
 ///
@@ -194,8 +194,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// This is a standalone implementation to avoid adding a dependency,
 /// matching the encoder in `transport/daemon.rs`.
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
 
@@ -344,7 +343,7 @@ mod tests {
     fn test_lookup_password_with_comments() {
         let mut secrets = NamedTempFile::new().unwrap();
         writeln!(secrets, "# This is a comment").unwrap();
-        writeln!(secrets, "").unwrap();
+        writeln!(secrets).unwrap();
         writeln!(secrets, "admin:secret").unwrap();
         writeln!(secrets, "# Another comment").unwrap();
         writeln!(secrets, "user:pass").unwrap();

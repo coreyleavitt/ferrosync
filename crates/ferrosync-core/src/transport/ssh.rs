@@ -94,12 +94,7 @@ impl SshTransport {
     /// - `am_sender`: if true, we are sending to the remote (remote is receiver).
     /// - `options`: the server-mode option string (e.g., "-logDtprze.iLsfxCIvu").
     /// - `path`: the remote source or destination path.
-    pub fn new(
-        config: SshTransportConfig,
-        am_sender: bool,
-        options: &str,
-        path: &Path,
-    ) -> Self {
+    pub fn new(config: SshTransportConfig, am_sender: bool, options: &str, path: &Path) -> Self {
         let mut args = vec!["--server".to_string()];
         if !am_sender {
             args.push("--sender".to_string());
@@ -158,8 +153,7 @@ impl SshTransport {
             .await
             .unwrap_or(None)
             .flatten();
-        let key_with_alg =
-            PrivateKeyWithHashAlg::new(Arc::new(private_key), hash_alg);
+        let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(private_key), hash_alg);
 
         match session.authenticate_publickey(user, key_with_alg).await {
             Ok(result) => Ok(result.success()),
@@ -249,11 +243,12 @@ impl Transport for SshTransport {
             let remote_cmd = self.remote_command();
             tracing::debug!(cmd = %remote_cmd, "executing remote command");
 
-            channel.exec(true, remote_cmd).await.map_err(|e| {
-                TransportError::ConnectionFailed {
+            channel
+                .exec(true, remote_cmd)
+                .await
+                .map_err(|e| TransportError::ConnectionFailed {
                     message: format!("failed to exec remote command: {e}"),
-                }
-            })?;
+                })?;
 
             // Convert the channel into an async read/write stream.
             let stream = channel.into_stream();
@@ -330,12 +325,8 @@ impl client::Handler for SshClientHandler {
                         host = %self.host,
                         "no known_hosts file; accepting and saving host key"
                     );
-                    let _ = save_host_key(
-                        &known_hosts_path,
-                        &self.host,
-                        self.port,
-                        server_public_key,
-                    );
+                    let _ =
+                        save_host_key(&known_hosts_path, &self.host, self.port, server_public_key);
                     Ok(true)
                 }
                 KnownHostsPolicy::Strict => Err(TransportError::HostKeyNotFound {
@@ -406,9 +397,7 @@ fn save_host_key(
         format!("[{host}]:{port}")
     };
 
-    let key_str = key.to_openssh().map_err(|e| {
-        std::io::Error::other(e)
-    })?;
+    let key_str = key.to_openssh().map_err(std::io::Error::other)?;
 
     let line = format!("{host_entry} {key_str}\n");
 
@@ -507,22 +496,13 @@ mod tests {
     #[test]
     fn test_remote_command_escapes_spaces() {
         let config = SshTransportConfig::default();
-        let transport = SshTransport::new(
-            config,
-            true,
-            "-r",
-            Path::new("/path with spaces/dir"),
-        );
+        let transport = SshTransport::new(config, true, "-r", Path::new("/path with spaces/dir"));
         let cmd = transport.remote_command();
         assert!(cmd.contains("'/path with spaces/dir'"));
     }
 
     fn generate_test_key() -> keys::PrivateKey {
-        keys::PrivateKey::random(
-            &mut rand_core::OsRng,
-            keys::Algorithm::Ed25519,
-        )
-        .unwrap()
+        keys::PrivateKey::random(&mut rand_core::OsRng, keys::Algorithm::Ed25519).unwrap()
     }
 
     #[test]
@@ -535,8 +515,7 @@ mod tests {
 
         save_host_key(&kh_path, "testhost", 22, &pubkey).unwrap();
 
-        let result =
-            keys::check_known_hosts_path("testhost", 22, &pubkey, &kh_path);
+        let result = keys::check_known_hosts_path("testhost", 22, &pubkey, &kh_path);
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
@@ -550,12 +529,7 @@ mod tests {
         save_host_key(&kh_path, "testhost", 22, key1.public_key()).unwrap();
 
         let key2 = generate_test_key();
-        let result = keys::check_known_hosts_path(
-            "testhost",
-            22,
-            key2.public_key(),
-            &kh_path,
-        );
+        let result = keys::check_known_hosts_path("testhost", 22, key2.public_key(), &kh_path);
         // KeyChanged error for mismatched key.
         assert!(result.is_err());
     }
@@ -569,12 +543,7 @@ mod tests {
         save_host_key(&kh_path, "otherhost", 22, key.public_key()).unwrap();
 
         // Look up a host that isn't there.
-        let result = keys::check_known_hosts_path(
-            "testhost",
-            22,
-            key.public_key(),
-            &kh_path,
-        );
+        let result = keys::check_known_hosts_path("testhost", 22, key.public_key(), &kh_path);
         // Not found returns Ok(false).
         assert!(!result.unwrap());
     }
@@ -591,12 +560,7 @@ mod tests {
         let contents = std::fs::read_to_string(&kh_path).unwrap();
         assert!(contents.contains("[testhost]:2222"));
 
-        let result = keys::check_known_hosts_path(
-            "testhost",
-            2222,
-            key.public_key(),
-            &kh_path,
-        );
+        let result = keys::check_known_hosts_path("testhost", 2222, key.public_key(), &kh_path);
         assert!(result.is_ok());
         assert!(result.unwrap());
     }

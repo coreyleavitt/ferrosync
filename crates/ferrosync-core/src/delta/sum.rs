@@ -89,11 +89,7 @@ pub fn compute_s2length(file_len: i64, blength: i32) -> i32 {
 }
 
 /// Compute block signatures for a file.
-pub fn compute_signatures(
-    data: &[u8],
-    seed: i32,
-    checksum_type: ChecksumType,
-) -> SumStruct {
+pub fn compute_signatures(data: &[u8], seed: i32, checksum_type: ChecksumType) -> SumStruct {
     if data.is_empty() {
         return SumStruct {
             head: SumHead::default(),
@@ -213,10 +209,7 @@ pub fn compute_signatures_cdc(
 }
 
 /// Write a sum_head to the wire.
-pub async fn write_sum_head<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    head: &SumHead,
-) -> Result<()> {
+pub async fn write_sum_head<W: AsyncWrite + Unpin>(w: &mut W, head: &SumHead) -> Result<()> {
     varint::write_int(w, head.count).await?;
     varint::write_int(w, head.blength).await?;
     varint::write_int(w, head.s2length).await?;
@@ -242,10 +235,7 @@ pub async fn read_sum_head<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumHead> {
 ///
 /// For fixed-size blocks (standard rsync format). Use `write_sums_cdc`
 /// for variable-size CDC blocks.
-pub async fn write_sums<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    sums: &SumStruct,
-) -> Result<()> {
+pub async fn write_sums<W: AsyncWrite + Unpin>(w: &mut W, sums: &SumStruct) -> Result<()> {
     write_sum_head(w, &sums.head).await?;
     for entry in &sums.sums {
         w.write_all(&entry.sum1.to_le_bytes())
@@ -270,10 +260,7 @@ pub async fn write_sums<W: AsyncWrite + Unpin>(
 ///   sum1: rolling checksum (4 bytes, little-endian u32)
 ///   sum2: strong checksum (s2length bytes)
 /// ```
-pub async fn write_sums_cdc<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    sums: &SumStruct,
-) -> Result<()> {
+pub async fn write_sums_cdc<W: AsyncWrite + Unpin>(w: &mut W, sums: &SumStruct) -> Result<()> {
     write_sum_head(w, &sums.head).await?;
     for entry in &sums.sums {
         // Write per-block length (required for CDC).
@@ -327,9 +314,7 @@ pub async fn read_sums_cdc<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct>
         let sum1 = u32::from_le_bytes(sum1_buf);
 
         let mut sum2 = vec![0u8; head.s2length as usize];
-        r.read_exact(&mut sum2)
-            .await
-            .map_err(ProtocolError::from)?;
+        r.read_exact(&mut sum2).await.map_err(ProtocolError::from)?;
 
         sums.push(SumEntry {
             sum1,
@@ -374,9 +359,7 @@ pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
         let sum1 = u32::from_le_bytes(sum1_buf);
 
         let mut sum2 = vec![0u8; head.s2length as usize];
-        r.read_exact(&mut sum2)
-            .await
-            .map_err(ProtocolError::from)?;
+        r.read_exact(&mut sum2).await.map_err(ProtocolError::from)?;
 
         sums.push(SumEntry {
             sum1,
@@ -390,8 +373,8 @@ pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::chunker::ChunkingStrategy;
+    use super::*;
     use std::io::Cursor;
 
     #[test]
@@ -528,11 +511,7 @@ mod tests {
         }
 
         // Total of all block lengths should equal data length.
-        let total: u64 = sums
-            .sums
-            .iter()
-            .map(|e| e.block_len.unwrap() as u64)
-            .sum();
+        let total: u64 = sums.sums.iter().map(|e| e.block_len.unwrap() as u64).sum();
         assert_eq!(total, data.len() as u64);
     }
 

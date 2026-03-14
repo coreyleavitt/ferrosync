@@ -439,13 +439,17 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     }
 
     // Username/group name follows (proto >= 30).
-    if opts.preserve_uid && (flags & XMIT_SAME_UID) == 0 && pv >= 30
+    if opts.preserve_uid
+        && (flags & XMIT_SAME_UID) == 0
+        && pv >= 30
         && !entry.user_name.is_empty()
         && entry.user_name != state.prev_user_name
     {
         flags |= XMIT_USER_NAME_FOLLOWS;
     }
-    if opts.preserve_gid && (flags & XMIT_SAME_GID) == 0 && pv >= 30
+    if opts.preserve_gid
+        && (flags & XMIT_SAME_GID) == 0
+        && pv >= 30
         && !entry.group_name.is_empty()
         && entry.group_name != state.prev_group_name
     {
@@ -554,7 +558,11 @@ async fn write_xmit_flags<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     if opts.xfer_flags_as_varint {
         // Varint mode: if flags would be 0, send XMIT_EXTENDED_FLAGS instead.
-        let wire_flags = if flags == 0 { XMIT_EXTENDED_FLAGS } else { flags };
+        let wire_flags = if flags == 0 {
+            XMIT_EXTENDED_FLAGS
+        } else {
+            flags
+        };
         write_varint(w, wire_flags).await?;
     } else if opts.protocol_version >= 28 {
         if (flags & 0xFF00) != 0 || flags == 0 {
@@ -640,13 +648,17 @@ fn update_delta_state(state: &mut DeltaState, entry: &FileEntry) {
 fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
     // Cap at 255 since the prefix length is sent as a single byte.
     let max = a.len().min(b.len()).min(255);
-    a.iter().zip(b.iter()).take(max).take_while(|(x, y)| x == y).count()
+    a.iter()
+        .zip(b.iter())
+        .take(max)
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::entry::S_IFDIR;
+    use super::*;
     use std::io::Cursor;
 
     fn default_opts() -> FileListOptions {
@@ -670,12 +682,16 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        let result = recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap();
+        let result = recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap();
 
         match result {
             ReadEntryResult::Entry(decoded) => {
@@ -688,7 +704,9 @@ mod tests {
         }
 
         // Read end of list.
-        let result = recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap();
+        let result = recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap();
         match result {
             ReadEntryResult::EndOfList { io_error } => assert_eq!(io_error, 0),
             ReadEntryResult::Entry(_) => panic!("expected end of list"),
@@ -725,14 +743,19 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
         for entry in &entries {
-            send_file_entry(&mut buf, entry, &mut enc_state, &opts).await.unwrap();
+            send_file_entry(&mut buf, entry, &mut enc_state, &opts)
+                .await
+                .unwrap();
         }
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
         for expected in &entries {
-            match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+            match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+                .await
+                .unwrap()
+            {
                 ReadEntryResult::Entry(decoded) => {
                     assert_eq!(decoded.name, expected.name);
                     assert_eq!(decoded.len, expected.len);
@@ -758,12 +781,17 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.name, b"mydir");
                 assert_eq!(decoded.mode, S_IFDIR | 0o755);
@@ -796,12 +824,17 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.uid, 1000);
                 assert_eq!(decoded.gid, 100);
@@ -830,12 +863,17 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(decoded) => {
                 assert!(decoded.is_symlink());
                 assert_eq!(decoded.link_target, b"/tmp/target");
@@ -864,12 +902,17 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.checksum, checksum);
             }
@@ -891,29 +934,42 @@ mod tests {
         let entry2 = FileEntry {
             name: b"b.txt".to_vec(),
             len: 200,
-            mtime: 1700000000, // Same mtime
+            mtime: 1700000000,     // Same mtime
             mode: S_IFREG | 0o644, // Same mode
             ..Default::default()
         };
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry1, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry1, &mut enc_state, &opts)
+            .await
+            .unwrap();
         let size_first = buf.len();
-        send_file_entry(&mut buf, &entry2, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry2, &mut enc_state, &opts)
+            .await
+            .unwrap();
         let size_second = buf.len() - size_first;
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         // Second entry should be smaller due to delta encoding.
-        assert!(size_second < size_first, "second entry ({size_second}) should be smaller than first ({size_first})");
+        assert!(
+            size_second < size_first,
+            "second entry ({size_second}) should be smaller than first ({size_first})"
+        );
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(d) => assert_eq!(d.name, b"a.txt"),
             _ => panic!("expected entry"),
         }
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(d) => {
                 assert_eq!(d.name, b"b.txt");
                 assert_eq!(d.mtime, 1700000000);
@@ -937,12 +993,17 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.mtime_nsec, 123456789);
             }
@@ -959,7 +1020,10 @@ mod tests {
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::EndOfList { io_error } => assert_eq!(io_error, 5),
             ReadEntryResult::Entry(_) => panic!("expected end of list"),
         }
@@ -979,7 +1043,10 @@ mod tests {
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::EndOfList { io_error } => assert_eq!(io_error, 0),
             ReadEntryResult::Entry(_) => panic!("expected end of list"),
         }
@@ -1011,12 +1078,17 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts).await.unwrap();
+        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
+            .await
+            .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts).await.unwrap() {
+        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
+            .await
+            .unwrap()
+        {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.name, b"old.txt");
                 assert_eq!(decoded.len, 500);

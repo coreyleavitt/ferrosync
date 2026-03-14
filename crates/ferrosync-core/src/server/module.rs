@@ -97,10 +97,9 @@ impl AccessControl {
             return false;
         }
 
-        if !self.hosts_deny.is_empty() {
-            if self.hosts_deny.iter().any(|p| host_matches(p, &addr_str)) {
-                return false;
-            }
+        if !self.hosts_deny.is_empty() && self.hosts_deny.iter().any(|p| host_matches(p, &addr_str))
+        {
+            return false;
         }
 
         true
@@ -140,10 +139,7 @@ fn host_matches(pattern: &str, addr: &str) -> bool {
 /// Check if an IP address matches a CIDR range.
 fn cidr_match(network: &str, prefix_len: u8, addr: &str) -> bool {
     // Parse both as IPv4 for now.
-    let net_octets: Vec<u8> = network
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let net_octets: Vec<u8> = network.split('.').filter_map(|s| s.parse().ok()).collect();
     let addr_octets: Vec<u8> = addr.split('.').filter_map(|s| s.parse().ok()).collect();
 
     if net_octets.len() != 4 || addr_octets.len() != 4 {
@@ -345,10 +341,7 @@ mod tests {
         registry.register(m2);
 
         assert_eq!(registry.len(), 1);
-        assert_eq!(
-            registry.resolve_module("test").unwrap().comment,
-            "replaced"
-        );
+        assert_eq!(registry.resolve_module("test").unwrap().comment, "replaced");
     }
 
     #[test]

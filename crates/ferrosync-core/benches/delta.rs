@@ -8,7 +8,9 @@ use ferrosync_core::delta::{matcher, sum};
 use ferrosync_core::protocol::handshake::ChecksumType;
 
 fn generate_data(size: usize) -> Vec<u8> {
-    (0..size).map(|i| (i.wrapping_mul(7919).wrapping_add(104729) % 256) as u8).collect()
+    (0..size)
+        .map(|i| (i.wrapping_mul(7919).wrapping_add(104729) % 256) as u8)
+        .collect()
 }
 
 /// Create a modified copy with a given percentage of blocks changed.
@@ -30,8 +32,8 @@ fn generate_modified(original: &[u8], change_pct: usize) -> Vec<u8> {
 
 fn bench_compute_signatures(c: &mut Criterion) {
     let sizes: &[usize] = &[
-        64 * 1024,      // 64 KiB
-        1024 * 1024,    // 1 MiB
+        64 * 1024,        // 64 KiB
+        1024 * 1024,      // 1 MiB
         16 * 1024 * 1024, // 16 MiB
     ];
 
@@ -48,13 +50,9 @@ fn bench_compute_signatures(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(size as u64));
 
         for &(name, alg) in &algorithms {
-            group.bench_with_input(
-                BenchmarkId::new(name, size),
-                &data,
-                |b, data| {
-                    b.iter(|| sum::compute_signatures(data, 42, alg));
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(name, size), &data, |b, data| {
+                b.iter(|| sum::compute_signatures(data, 42, alg));
+            });
         }
     }
 
@@ -62,11 +60,7 @@ fn bench_compute_signatures(c: &mut Criterion) {
 }
 
 fn bench_match_blocks(c: &mut Criterion) {
-    let sizes: &[usize] = &[
-        64 * 1024,
-        1024 * 1024,
-        16 * 1024 * 1024,
-    ];
+    let sizes: &[usize] = &[64 * 1024, 1024 * 1024, 16 * 1024 * 1024];
 
     let mut group = c.benchmark_group("match_blocks_identical");
 
@@ -75,13 +69,9 @@ fn bench_match_blocks(c: &mut Criterion) {
         let sums = sum::compute_signatures(&data, 42, ChecksumType::Md5);
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &data,
-            |b, data| {
-                b.iter(|| matcher::match_blocks(data, &sums, 42, ChecksumType::Md5));
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, data| {
+            b.iter(|| matcher::match_blocks(data, &sums, 42, ChecksumType::Md5));
+        });
     }
 
     group.finish();
@@ -94,13 +84,9 @@ fn bench_match_blocks(c: &mut Criterion) {
         let sums = sum::compute_signatures(&basis, 42, ChecksumType::Md5);
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &source,
-            |b, source| {
-                b.iter(|| matcher::match_blocks(source, &sums, 42, ChecksumType::Md5));
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &source, |b, source| {
+            b.iter(|| matcher::match_blocks(source, &sums, 42, ChecksumType::Md5));
+        });
     }
 
     group.finish();
@@ -113,23 +99,16 @@ fn bench_match_blocks(c: &mut Criterion) {
         let sums = sum::compute_signatures(&basis, 42, ChecksumType::Md5);
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &source,
-            |b, source| {
-                b.iter(|| matcher::match_blocks(source, &sums, 42, ChecksumType::Md5));
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &source, |b, source| {
+            b.iter(|| matcher::match_blocks(source, &sums, 42, ChecksumType::Md5));
+        });
     }
 
     group.finish();
 }
 
 fn bench_apply_ops(c: &mut Criterion) {
-    let sizes: &[usize] = &[
-        64 * 1024,
-        1024 * 1024,
-    ];
+    let sizes: &[usize] = &[64 * 1024, 1024 * 1024];
 
     let mut group = c.benchmark_group("apply_ops");
 
@@ -143,17 +122,18 @@ fn bench_apply_ops(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &ops,
-            |b, ops| {
-                b.iter(|| matcher::apply_ops(&basis, ops, blength, remainder));
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &ops, |b, ops| {
+            b.iter(|| matcher::apply_ops(&basis, ops, blength, remainder));
+        });
     }
 
     group.finish();
 }
 
-criterion_group!(benches, bench_compute_signatures, bench_match_blocks, bench_apply_ops);
+criterion_group!(
+    benches,
+    bench_compute_signatures,
+    bench_match_blocks,
+    bench_apply_ops
+);
 criterion_main!(benches);

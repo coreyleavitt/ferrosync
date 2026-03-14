@@ -249,10 +249,9 @@ where
     consumer_handle.await.map_err(|e| {
         crate::FerrosyncError::Fs(crate::error::FsError::Io {
             path: PathBuf::from("<concurrent-pipeline>"),
-            source: Arc::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("concurrent pipeline join error: {e}"),
-            )),
+            source: Arc::new(std::io::Error::other(format!(
+                "concurrent pipeline join error: {e}"
+            ))),
         })
     })?;
 

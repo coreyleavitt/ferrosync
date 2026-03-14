@@ -6,7 +6,9 @@ use clap::Parser;
 
 use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncSession};
 use ferrosync_core::options::{DeleteMode, TransferOptions, Verbosity};
-use ferrosync_core::transport::daemon::{DaemonTransport, DaemonTransportConfig, DEFAULT_DAEMON_PORT};
+use ferrosync_core::transport::daemon::{
+    DaemonTransport, DaemonTransportConfig, DEFAULT_DAEMON_PORT,
+};
 use ferrosync_core::transport::local::LocalTransport;
 use ferrosync_core::transport::quic::{QuicConfig, QuicTransport};
 use ferrosync_core::transport::ssh::{SshTransport, SshTransportConfig};
@@ -322,7 +324,12 @@ fn parse_path(s: &str) -> RemotePath {
     if let Some(colon_pos) = s.find(':') {
         let before = &s[..colon_pos];
         // Heuristic: if 'before' is a single letter, treat as Windows drive
-        if before.len() == 1 && before.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        if before.len() == 1
+            && before
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+        {
             return RemotePath::Local(PathBuf::from(s));
         }
         // Must not contain path separators before the colon
@@ -536,10 +543,7 @@ fn format_bytes(bytes: u64) -> String {
 fn print_stats(stats: &ferrosync_core::stats::TransferStats) {
     eprintln!();
     eprintln!("Number of files: {}", stats.total_files);
-    eprintln!(
-        "Number of files transferred: {}",
-        stats.files_transferred
-    );
+    eprintln!("Number of files transferred: {}", stats.files_transferred);
     eprintln!("Total file size: {}", format_bytes(stats.total_size));
     eprintln!(
         "Total transferred file size: {}",
@@ -600,12 +604,8 @@ async fn run_sync(
                 opts.source()[0].clone()
             };
 
-            let transport = LocalTransport::new(
-                rsync_path.as_deref(),
-                am_sender,
-                &server_opts,
-                &path,
-            );
+            let transport =
+                LocalTransport::new(rsync_path.as_deref(), am_sender, &server_opts, &path);
             let session = SyncSession::new(transport, opts, fs, direction);
             let result = session.run().await?;
             if show_stats {
@@ -910,10 +910,7 @@ mod tests {
     fn test_parse_daemon_double_colon_no_path() {
         match parse_path("host::module") {
             RemotePath::Daemon {
-                host,
-                module,
-                path,
-                ..
+                host, module, path, ..
             } => {
                 assert_eq!(host, "host");
                 assert_eq!(module, "module");
@@ -945,10 +942,7 @@ mod tests {
     fn test_parse_daemon_url_with_port() {
         match parse_path("rsync://host:8873/mod") {
             RemotePath::Daemon {
-                host,
-                port,
-                module,
-                ..
+                host, port, module, ..
             } => {
                 assert_eq!(host, "host");
                 assert_eq!(port, 8873);

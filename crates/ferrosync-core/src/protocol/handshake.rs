@@ -202,11 +202,7 @@ impl NegotiatedProtocol {
 /// Build the capability string that goes in the `-e.` option for remote rsync.
 ///
 /// Returns a string like `.iLsfxCIvu` (without the leading `e`).
-pub fn build_capability_string(
-    inc_recurse: bool,
-    symlink_times: bool,
-    iconv: bool,
-) -> String {
+pub fn build_capability_string(inc_recurse: bool, symlink_times: bool, iconv: bool) -> String {
     let mut caps = String::from(".");
     if inc_recurse {
         caps.push('i');
@@ -291,9 +287,7 @@ fn negotiate_algorithm<T: Copy>(
         }
     }
     Err(ProtocolError::Handshake {
-        message: format!(
-            "no common algorithm: sender=[{sender_list}], receiver=[{receiver_list}]"
-        ),
+        message: format!("no common algorithm: sender=[{sender_list}], receiver=[{receiver_list}]"),
     })
 }
 
@@ -374,17 +368,9 @@ where
             let remote_compress = read_vstring(r).await?;
 
             compress = if am_sender {
-                negotiate_algorithm(
-                    COMPRESS_LIST,
-                    &remote_compress,
-                    CompressType::from_name,
-                )?
+                negotiate_algorithm(COMPRESS_LIST, &remote_compress, CompressType::from_name)?
             } else {
-                negotiate_algorithm(
-                    &remote_compress,
-                    COMPRESS_LIST,
-                    CompressType::from_name,
-                )?
+                negotiate_algorithm(&remote_compress, COMPRESS_LIST, CompressType::from_name)?
             };
         }
 
@@ -472,17 +458,9 @@ where
             write_vstring(w, COMPRESS_LIST).await?;
 
             compress = if am_sender {
-                negotiate_algorithm(
-                    COMPRESS_LIST,
-                    &remote_compress,
-                    CompressType::from_name,
-                )?
+                negotiate_algorithm(COMPRESS_LIST, &remote_compress, CompressType::from_name)?
             } else {
-                negotiate_algorithm(
-                    &remote_compress,
-                    COMPRESS_LIST,
-                    CompressType::from_name,
-                )?
+                negotiate_algorithm(&remote_compress, COMPRESS_LIST, CompressType::from_name)?
             };
         }
     }
@@ -581,8 +559,7 @@ mod tests {
     fn test_negotiate_checksum() {
         let sender = "md5 md4 none";
         let receiver = "md4 none";
-        let result =
-            negotiate_algorithm(sender, receiver, ChecksumType::from_name).unwrap();
+        let result = negotiate_algorithm(sender, receiver, ChecksumType::from_name).unwrap();
         assert_eq!(result, ChecksumType::Md4);
     }
 
@@ -590,8 +567,7 @@ mod tests {
     fn test_negotiate_checksum_md5() {
         let sender = "md5 md4 none";
         let receiver = "md5 md4 none";
-        let result =
-            negotiate_algorithm(sender, receiver, ChecksumType::from_name).unwrap();
+        let result = negotiate_algorithm(sender, receiver, ChecksumType::from_name).unwrap();
         assert_eq!(result, ChecksumType::Md5);
     }
 
@@ -636,7 +612,9 @@ mod tests {
 
         // Server sends compat_flags as varint.
         let flags = compat_flags::DEFAULT | compat_flags::INC_RECURSE;
-        varint::write_varint(&mut server_output, flags).await.unwrap();
+        varint::write_varint(&mut server_output, flags)
+            .await
+            .unwrap();
 
         // Server reads client's checksum list, then sends its own.
         // For this test, we pre-write the server's response.
@@ -688,11 +666,17 @@ mod tests {
         assert_eq!(ChecksumType::from_name("md5"), Some(ChecksumType::Md5));
         assert_eq!(ChecksumType::from_name("unknown"), None);
         assert_eq!(ChecksumType::Blake3.name(), "blake3");
-        assert_eq!(ChecksumType::from_name("blake3"), Some(ChecksumType::Blake3));
+        assert_eq!(
+            ChecksumType::from_name("blake3"),
+            Some(ChecksumType::Blake3)
+        );
         assert_eq!(ChecksumType::Xxh3.name(), "xxh3");
         assert_eq!(ChecksumType::from_name("xxh3"), Some(ChecksumType::Xxh3));
         assert_eq!(ChecksumType::Xxh128.name(), "xxh128");
-        assert_eq!(ChecksumType::from_name("xxh128"), Some(ChecksumType::Xxh128));
+        assert_eq!(
+            ChecksumType::from_name("xxh128"),
+            Some(ChecksumType::Xxh128)
+        );
     }
 
     #[test]
@@ -714,18 +698,9 @@ mod tests {
 
     #[test]
     fn test_checksum_default_for_version() {
-        assert_eq!(
-            ChecksumType::default_for_version(27),
-            ChecksumType::Md4
-        );
-        assert_eq!(
-            ChecksumType::default_for_version(30),
-            ChecksumType::Md5
-        );
-        assert_eq!(
-            ChecksumType::default_for_version(31),
-            ChecksumType::Md5
-        );
+        assert_eq!(ChecksumType::default_for_version(27), ChecksumType::Md4);
+        assert_eq!(ChecksumType::default_for_version(30), ChecksumType::Md5);
+        assert_eq!(ChecksumType::default_for_version(31), ChecksumType::Md5);
     }
 
     #[test]
@@ -733,12 +708,8 @@ mod tests {
         // When both sides are ferrosync, the first common entry wins.
         // Our CHECKSUM_LIST starts with blake3, so ferrosync-to-ferrosync
         // should negotiate blake3.
-        let result = negotiate_algorithm(
-            CHECKSUM_LIST,
-            CHECKSUM_LIST,
-            ChecksumType::from_name,
-        )
-        .unwrap();
+        let result =
+            negotiate_algorithm(CHECKSUM_LIST, CHECKSUM_LIST, ChecksumType::from_name).unwrap();
         assert_eq!(result, ChecksumType::Blake3);
     }
 
@@ -746,12 +717,8 @@ mod tests {
     fn test_negotiate_ferrosync_to_rsync_falls_back_to_md5() {
         // Standard rsync only supports "md5 md4 none".
         let rsync_list = "md5 md4 none";
-        let result = negotiate_algorithm(
-            CHECKSUM_LIST,
-            rsync_list,
-            ChecksumType::from_name,
-        )
-        .unwrap();
+        let result =
+            negotiate_algorithm(CHECKSUM_LIST, rsync_list, ChecksumType::from_name).unwrap();
         assert_eq!(result, ChecksumType::Md5);
     }
 
@@ -760,12 +727,8 @@ mod tests {
         // rsync is sender, ferrosync is receiver -- rsync's list is checked
         // in order against ferrosync's supported set.
         let rsync_list = "md5 md4 none";
-        let result = negotiate_algorithm(
-            rsync_list,
-            CHECKSUM_LIST,
-            ChecksumType::from_name,
-        )
-        .unwrap();
+        let result =
+            negotiate_algorithm(rsync_list, CHECKSUM_LIST, ChecksumType::from_name).unwrap();
         assert_eq!(result, ChecksumType::Md5);
     }
 
@@ -773,12 +736,7 @@ mod tests {
     fn test_negotiate_xxh128_when_no_blake3() {
         // If one side does not support blake3, fall back to next common.
         let limited = "xxh128 md5 none";
-        let result = negotiate_algorithm(
-            CHECKSUM_LIST,
-            limited,
-            ChecksumType::from_name,
-        )
-        .unwrap();
+        let result = negotiate_algorithm(CHECKSUM_LIST, limited, ChecksumType::from_name).unwrap();
         assert_eq!(result, ChecksumType::Xxh128);
     }
 }

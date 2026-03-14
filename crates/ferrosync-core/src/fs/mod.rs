@@ -155,7 +155,11 @@ pub(crate) struct BufferedFileWriter {
 
 impl BufferedFileWriter {
     fn new(path: std::path::PathBuf, mode: Option<u32>) -> Self {
-        Self { path, mode, buf: Vec::new() }
+        Self {
+            path,
+            mode,
+            buf: Vec::new(),
+        }
     }
 }
 

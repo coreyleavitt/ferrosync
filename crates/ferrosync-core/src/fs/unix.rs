@@ -74,10 +74,7 @@ impl FileSystem for UnixFileSystem {
     fn write_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
         // Write to a temp file in the same directory, then rename for atomicity.
         let parent = path.parent().unwrap_or(Path::new("."));
-        let tmp_name = format!(
-            ".ferrosync.{}.tmp",
-            std::process::id()
-        );
+        let tmp_name = format!(".ferrosync.{}.tmp", std::process::id());
         let tmp_path = parent.join(&tmp_name);
 
         std::fs::write(&tmp_path, data).map_err(|e| Self::map_io_err(&tmp_path, e))?;
@@ -135,14 +132,13 @@ impl FileSystem for UnixFileSystem {
 
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let c_path =
-            CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
-                path: path.to_path_buf(),
-                source: std::sync::Arc::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "path contains null byte",
-                )),
-            })?;
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
+            path: path.to_path_buf(),
+            source: std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains null byte",
+            )),
+        })?;
 
         let ret = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
         if ret != 0 {
@@ -154,14 +150,13 @@ impl FileSystem for UnixFileSystem {
     fn set_owner(&self, path: &Path, uid: u32, gid: u32) -> Result<()> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let c_path =
-            CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
-                path: path.to_path_buf(),
-                source: std::sync::Arc::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "path contains null byte",
-                )),
-            })?;
+        let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| FsError::Io {
+            path: path.to_path_buf(),
+            source: std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains null byte",
+            )),
+        })?;
 
         let ret = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
         if ret != 0 {
@@ -215,7 +210,8 @@ impl FileSystem for UnixFileSystem {
             .open(path)
             .map_err(|e| Self::map_io_err(path, e))?;
 
-        file.write_all(data).map_err(|e| Self::map_io_err(path, e))?;
+        file.write_all(data)
+            .map_err(|e| Self::map_io_err(path, e))?;
 
         if let Some(m) = mode {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(m))
@@ -273,7 +269,8 @@ impl FileSystem for UnixFileSystem {
             .open(path)
             .map_err(|e| Self::map_io_err(path, e))?;
 
-        file.write_all(data).map_err(|e| Self::map_io_err(path, e))?;
+        file.write_all(data)
+            .map_err(|e| Self::map_io_err(path, e))?;
 
         if let Some(m) = mode {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(m))
@@ -301,14 +298,17 @@ impl FileSystem for UnixFileSystem {
         Ok(Box::new(std::io::BufReader::new(file)))
     }
 
-    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn std::io::Write + Send>> {
+    fn write_file_stream(
+        &self,
+        path: &Path,
+        mode: Option<u32>,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
         let parent = path.parent().unwrap_or(Path::new("."));
         let tmp_name = format!(".ferrosync.{}.stream.tmp", std::process::id());
         let tmp_path = parent.join(&tmp_name);
         let dest_path = path.to_path_buf();
 
-        let file = std::fs::File::create(&tmp_path)
-            .map_err(|e| Self::map_io_err(&tmp_path, e))?;
+        let file = std::fs::File::create(&tmp_path).map_err(|e| Self::map_io_err(&tmp_path, e))?;
 
         Ok(Box::new(AtomicFileWriter {
             inner: std::io::BufWriter::new(file),
@@ -349,10 +349,7 @@ impl AtomicFileWriter {
         self.inner.flush()?;
 
         if let Some(m) = self.mode {
-            std::fs::set_permissions(
-                &self.tmp_path,
-                std::fs::Permissions::from_mode(m),
-            )?;
+            std::fs::set_permissions(&self.tmp_path, std::fs::Permissions::from_mode(m))?;
         }
 
         std::fs::rename(&self.tmp_path, &self.dest_path)?;
@@ -362,7 +359,7 @@ impl AtomicFileWriter {
 
 impl Drop for AtomicFileWriter {
     fn drop(&mut self) {
-        if let Err(_) = self.finish_inner() {
+        if self.finish_inner().is_err() {
             // Best-effort cleanup of temp file on failure.
             let _ = std::fs::remove_file(&self.tmp_path);
         }

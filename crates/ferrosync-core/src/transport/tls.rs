@@ -80,11 +80,11 @@ fn build_tls_config(config: &TlsDaemonConfig) -> Result<rustls::ClientConfig> {
                 message: format!("failed to parse CA certificate: {e}"),
             })?;
         for cert in certs {
-            root_store.add(cert).map_err(|e| {
-                TransportError::ConnectionFailed {
+            root_store
+                .add(cert)
+                .map_err(|e| TransportError::ConnectionFailed {
                     message: format!("failed to add CA certificate: {e}"),
-                }
-            })?;
+                })?;
         }
     } else {
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -115,11 +115,11 @@ fn build_tls_config(config: &TlsDaemonConfig) -> Result<rustls::ClientConfig> {
                 message: "no private key found in client key PEM".to_string(),
             })?;
 
-        builder.with_client_auth_cert(certs, key).map_err(|e| {
-            TransportError::ConnectionFailed {
+        builder
+            .with_client_auth_cert(certs, key)
+            .map_err(|e| TransportError::ConnectionFailed {
                 message: format!("failed to configure client auth: {e}"),
-            }
-        })?
+            })?
     } else {
         builder.with_no_client_auth()
     };
@@ -235,17 +235,15 @@ impl Transport for TlsDaemonTransport {
             }
 
             // TCP connect with timeout.
-            let tcp_stream = tokio::time::timeout(
-                self.config.connect_timeout,
-                TcpStream::connect(&addr),
-            )
-            .await
-            .map_err(|_| TransportError::ConnectionFailed {
-                message: format!("connection to {addr} timed out"),
-            })?
-            .map_err(|e| TransportError::ConnectionFailed {
-                message: format!("TCP connection to {addr} failed: {e}"),
-            })?;
+            let tcp_stream =
+                tokio::time::timeout(self.config.connect_timeout, TcpStream::connect(&addr))
+                    .await
+                    .map_err(|_| TransportError::ConnectionFailed {
+                        message: format!("connection to {addr} timed out"),
+                    })?
+                    .map_err(|e| TransportError::ConnectionFailed {
+                        message: format!("TCP connection to {addr} failed: {e}"),
+                    })?;
 
             // TLS handshake.
             let server_name = ServerName::try_from(self.config.host.clone()).map_err(|e| {
@@ -319,9 +317,7 @@ impl Transport for TlsDaemonTransport {
                         });
                     } else {
                         return Err(TransportError::AuthFailed {
-                            message: format!(
-                                "unexpected response after auth: {auth_line}"
-                            ),
+                            message: format!("unexpected response after auth: {auth_line}"),
                         });
                     }
                 } else if line.starts_with("@ERROR:") {
@@ -336,8 +332,7 @@ impl Transport for TlsDaemonTransport {
                     });
                 } else if line.starts_with("@RSYNCD: EXIT") {
                     return Err(TransportError::ConnectionFailed {
-                        message: "daemon sent EXIT before module selection completed"
-                            .to_string(),
+                        message: "daemon sent EXIT before module selection completed".to_string(),
                     });
                 } else {
                     tracing::debug!(motd = %line, "daemon MOTD (TLS)");
@@ -395,9 +390,7 @@ const DAEMON_PROTOCOL_VERSION: u8 = 31;
 const DAEMON_SUB_PROTOCOL_VERSION: u8 = 0;
 const MAX_LINE_LENGTH: usize = 8192;
 
-async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<u8> {
+async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<u8> {
     let line = read_line(reader).await?;
 
     if !line.starts_with("@RSYNCD: ") {
@@ -408,30 +401,27 @@ async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(
 
     let version_str = line.trim_start_matches("@RSYNCD: ").trim();
     let major_str = version_str.split('.').next().unwrap_or(version_str);
-    let major: u8 = major_str.parse().map_err(|_| {
-        TransportError::ConnectionFailed {
+    let major: u8 = major_str
+        .parse()
+        .map_err(|_| TransportError::ConnectionFailed {
             message: format!("invalid daemon version: {version_str}"),
-        }
-    })?;
+        })?;
 
     tracing::debug!(version = %version_str, "daemon greeting received (TLS)");
     Ok(major)
 }
 
-async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-) -> Result<()> {
-    let greeting = format!(
-        "@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n"
-    );
-    writer.write_all(greeting.as_bytes()).await.map_err(io_err)?;
+async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W) -> Result<()> {
+    let greeting = format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n");
+    writer
+        .write_all(greeting.as_bytes())
+        .await
+        .map_err(io_err)?;
     writer.flush().await.map_err(io_err)?;
     Ok(())
 }
 
-async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<String> {
+async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<String> {
     let mut line = String::new();
     let bytes_read = reader.read_line(&mut line).await.map_err(io_err)?;
     if bytes_read == 0 {
@@ -515,8 +505,7 @@ mod tests {
     #[test]
     fn test_build_tls_config_custom_ca() {
         // Generate a self-signed CA certificate for testing.
-        let ca = rcgen::generate_simple_self_signed(Vec::<String>::new())
-            .expect("gen");
+        let ca = rcgen::generate_simple_self_signed(Vec::<String>::new()).expect("gen");
         let ca_pem = ca.cert.pem().into_bytes();
 
         let config = TlsDaemonConfig {
@@ -571,8 +560,8 @@ mod tests {
     #[test]
     fn test_build_tls_config_with_client_cert() {
         // Generate a self-signed cert/key pair for mutual TLS testing.
-        let key_pair = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .expect("gen");
+        let key_pair =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("gen");
 
         let cert_pem = key_pair.cert.pem().into_bytes();
         let key_pem = key_pair.key_pair.serialize_pem().into_bytes();

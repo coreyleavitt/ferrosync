@@ -28,7 +28,6 @@ use super::codec::{
 use super::entry::FileEntry;
 use super::incremental::{IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF, NDX_FLIST_OFFSET};
 
-
 type Result<T> = std::result::Result<T, ProtocolError>;
 
 /// Send a complete file list over the wire.
@@ -98,9 +97,7 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     write_end_of_flist(w, 0, opts).await?;
 
     // Write NDX_FLIST_EOF to signal end of all file lists.
-    sender
-        .write_flist_eof(w, opts.protocol_version)
-        .await?;
+    sender.write_flist_eof(w, opts.protocol_version).await?;
     Ok(())
 }
 
@@ -143,7 +140,7 @@ pub async fn recv_file_list<R: AsyncRead + Unpin>(
         } else {
             // Batch: sort entries and assign NDX by sorted position.
             let mut entries = recv_file_list_batch(r, &flist_opts).await?;
-            entries.sort_by(|a, b| super::sort::f_name_cmp(a, b));
+            entries.sort_by(super::sort::f_name_cmp);
 
             // Read uid/gid name lists (sent after file entries in batch mode).
             // rsync's recv_id_list reads these when preserve_uid/gid and !numeric_ids.
@@ -213,7 +210,7 @@ async fn recv_file_list_incremental<R: AsyncRead + Unpin>(
         all_entries: &mut Vec<FileEntry>,
         all_ndx: &mut Vec<i32>,
     ) {
-        entries.sort_by(|a, b| super::sort::f_name_cmp(a, b));
+        entries.sort_by(super::sort::f_name_cmp);
         for (i, entry) in entries.into_iter().enumerate() {
             all_ndx.push(ndx_start + i as i32);
             all_entries.push(entry);
@@ -325,9 +322,7 @@ async fn recv_file_list_incremental_streaming<R: AsyncRead + Unpin>(
 
     // Subsequent sub-flists prefixed with NDX markers.
     loop {
-        let ndx = receiver
-            .read_ndx_marker(r, opts.protocol_version)
-            .await?;
+        let ndx = receiver.read_ndx_marker(r, opts.protocol_version).await?;
 
         if ndx == NDX_FLIST_EOF {
             break;
@@ -357,10 +352,7 @@ async fn recv_file_list_incremental_streaming<R: AsyncRead + Unpin>(
 /// `preserve_gid` is active and `numeric_ids` is false. Each list is a
 /// series of `(varint30 id, byte name_len, name_bytes)` terminated by
 /// `varint30(0)`.
-async fn recv_id_list<R: AsyncRead + Unpin>(
-    r: &mut R,
-    opts: &FileListOptions,
-) -> Result<()> {
+async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -> Result<()> {
     // uid list
     if opts.preserve_uid {
         loop {

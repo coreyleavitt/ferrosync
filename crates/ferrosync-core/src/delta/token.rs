@@ -114,10 +114,7 @@ pub async fn send_data<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> Result<
 }
 
 /// Write a block match token to the wire.
-pub async fn send_block_match<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    block_index: i32,
-) -> Result<()> {
+pub async fn send_block_match<W: AsyncWrite + Unpin>(w: &mut W, block_index: i32) -> Result<()> {
     let token = -(block_index + 1);
     varint::write_int(w, token).await
 }
@@ -215,7 +212,9 @@ impl CompressedTokenWriter {
 
         if token == -1 {
             // End of file.
-            w.write_all(&[END_FLAG]).await.map_err(ProtocolError::from)?;
+            w.write_all(&[END_FLAG])
+                .await
+                .map_err(ProtocolError::from)?;
         }
 
         Ok(())
@@ -226,7 +225,7 @@ impl CompressedTokenWriter {
         let r = self.run_start - self.last_run_end;
         let n = self.last_token - self.run_start;
 
-        if r >= 0 && r <= 63 {
+        if (0..=63).contains(&r) {
             let flag = if n == 0 {
                 TOKEN_REL + r as u8
             } else {
@@ -290,10 +289,7 @@ impl CompressedTokenWriter {
                         pos += frame_len;
                     }
                 } else {
-                    let hdr = [
-                        DEFLATED_DATA + (n >> 8) as u8,
-                        (n & 0xFF) as u8,
-                    ];
+                    let hdr = [DEFLATED_DATA + (n >> 8) as u8, (n & 0xFF) as u8];
                     w.write_all(&hdr).await.map_err(ProtocolError::from)?;
                     w.write_all(output).await.map_err(ProtocolError::from)?;
                 }
@@ -367,8 +363,8 @@ impl CompressedTokenReader {
 
                     if (flag & 0xC0) == DEFLATED_DATA {
                         // Compressed data frame.
-                        let n = ((flag as usize & 0x3F) << 8)
-                            + varint::read_byte(r).await? as usize;
+                        let n =
+                            ((flag as usize & 0x3F) << 8) + varint::read_byte(r).await? as usize;
                         if n == 0 {
                             continue;
                         }
@@ -387,8 +383,7 @@ impl CompressedTokenReader {
                         // Append the Z_SYNC_FLUSH trailer only for zlib.
                         maybe_append_trailer(&mut compressed, dtype);
 
-                        let decompressed =
-                            self.decompressor.decompress(&compressed, CHUNK_SIZE)?;
+                        let decompressed = self.decompressor.decompress(&compressed, CHUNK_SIZE)?;
                         if !decompressed.is_empty() {
                             return Ok(Token::Data(decompressed));
                         }
@@ -415,8 +410,7 @@ impl CompressedTokenReader {
                         self.rx_token = varint::read_int(r).await?;
                         if self.rx_token < 0 {
                             return Err(ProtocolError::Handshake {
-                                message: "invalid token number in compressed stream"
-                                    .to_string(),
+                                message: "invalid token number in compressed stream".to_string(),
                             });
                         }
                         if flag & 1 != 0 {
@@ -474,10 +468,7 @@ pub async fn send_data_compressed<W: AsyncWrite + Unpin>(
                     pos += frame_len;
                 }
             } else {
-                let hdr = [
-                    DEFLATED_DATA + (n >> 8) as u8,
-                    (n & 0xFF) as u8,
-                ];
+                let hdr = [DEFLATED_DATA + (n >> 8) as u8, (n & 0xFF) as u8];
                 w.write_all(&hdr).await.map_err(ProtocolError::from)?;
                 w.write_all(output).await.map_err(ProtocolError::from)?;
             }
@@ -493,7 +484,9 @@ pub async fn send_block_match_compressed<W: AsyncWrite + Unpin>(
     w: &mut W,
     block_index: i32,
 ) -> Result<()> {
-    w.write_all(&[TOKEN_LONG]).await.map_err(ProtocolError::from)?;
+    w.write_all(&[TOKEN_LONG])
+        .await
+        .map_err(ProtocolError::from)?;
     varint::write_int(w, block_index).await
 }
 
@@ -617,22 +610,13 @@ mod tests {
             recv_token(&mut cursor).await.unwrap(),
             Token::Data(b"literal".to_vec()),
         );
-        assert_eq!(
-            recv_token(&mut cursor).await.unwrap(),
-            Token::BlockMatch(0),
-        );
+        assert_eq!(recv_token(&mut cursor).await.unwrap(), Token::BlockMatch(0),);
         assert_eq!(
             recv_token(&mut cursor).await.unwrap(),
             Token::Data(b"more".to_vec()),
         );
-        assert_eq!(
-            recv_token(&mut cursor).await.unwrap(),
-            Token::BlockMatch(3),
-        );
-        assert_eq!(
-            recv_token(&mut cursor).await.unwrap(),
-            Token::EndOfFile,
-        );
+        assert_eq!(recv_token(&mut cursor).await.unwrap(), Token::BlockMatch(3),);
+        assert_eq!(recv_token(&mut cursor).await.unwrap(), Token::EndOfFile,);
     }
 
     // -----------------------------------------------------------------------

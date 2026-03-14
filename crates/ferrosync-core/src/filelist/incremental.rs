@@ -163,7 +163,8 @@ impl IncrementalSender {
         opts: &FileListOptions,
     ) -> Result<()> {
         // Write the sub-flist marker.
-        self.write_sub_flist_marker(w, dir_ndx, opts.protocol_version).await?;
+        self.write_sub_flist_marker(w, dir_ndx, opts.protocol_version)
+            .await?;
 
         // Write entries.
         let mut delta_state = DeltaState::default();
@@ -222,53 +223,75 @@ mod tests {
             },
         ];
 
-        let sub_entries = vec![
-            FileEntry {
-                name: b"inner.txt".to_vec(),
-                len: 50,
-                mtime: 1700000001,
-                mode: S_IFREG | 0o644,
-                ..Default::default()
-            },
-        ];
+        let sub_entries = vec![FileEntry {
+            name: b"inner.txt".to_vec(),
+            len: 50,
+            mtime: 1700000001,
+            mode: S_IFREG | 0o644,
+            ..Default::default()
+        }];
 
         // Encode.
         let mut buf = Vec::new();
         let mut sender = IncrementalSender::default();
 
         // Send root flist (index 0 = dir for root).
-        sender.send_sub_flist(&mut buf, 0, &root_entries, &opts).await.unwrap();
+        sender
+            .send_sub_flist(&mut buf, 0, &root_entries, &opts)
+            .await
+            .unwrap();
         // Send sub-flist for directory at index 1.
-        sender.send_sub_flist(&mut buf, 1, &sub_entries, &opts).await.unwrap();
+        sender
+            .send_sub_flist(&mut buf, 1, &sub_entries, &opts)
+            .await
+            .unwrap();
         // EOF.
-        sender.write_flist_eof(&mut buf, opts.protocol_version).await.unwrap();
+        sender
+            .write_flist_eof(&mut buf, opts.protocol_version)
+            .await
+            .unwrap();
 
         // Decode.
         let mut cursor = Cursor::new(&buf);
         let mut receiver = IncrementalReceiver::default();
 
         // Read first marker.
-        let ndx = receiver.read_ndx_marker(&mut cursor, opts.protocol_version).await.unwrap();
+        let ndx = receiver
+            .read_ndx_marker(&mut cursor, opts.protocol_version)
+            .await
+            .unwrap();
         assert!(ndx <= NDX_FLIST_OFFSET);
         let dir_ndx = NDX_FLIST_OFFSET - ndx;
         assert_eq!(dir_ndx, 0);
 
-        let sub_flist = receiver.recv_sub_flist(&mut cursor, dir_ndx, &opts).await.unwrap();
+        let sub_flist = receiver
+            .recv_sub_flist(&mut cursor, dir_ndx, &opts)
+            .await
+            .unwrap();
         assert_eq!(sub_flist.entries.len(), 2);
         assert_eq!(sub_flist.entries[0].name, b"file.txt");
         assert_eq!(sub_flist.entries[1].name, b"subdir");
 
         // Read second marker.
-        let ndx = receiver.read_ndx_marker(&mut cursor, opts.protocol_version).await.unwrap();
+        let ndx = receiver
+            .read_ndx_marker(&mut cursor, opts.protocol_version)
+            .await
+            .unwrap();
         let dir_ndx = NDX_FLIST_OFFSET - ndx;
         assert_eq!(dir_ndx, 1);
 
-        let sub_flist = receiver.recv_sub_flist(&mut cursor, dir_ndx, &opts).await.unwrap();
+        let sub_flist = receiver
+            .recv_sub_flist(&mut cursor, dir_ndx, &opts)
+            .await
+            .unwrap();
         assert_eq!(sub_flist.entries.len(), 1);
         assert_eq!(sub_flist.entries[0].name, b"inner.txt");
 
         // Read EOF.
-        let ndx = receiver.read_ndx_marker(&mut cursor, opts.protocol_version).await.unwrap();
+        let ndx = receiver
+            .read_ndx_marker(&mut cursor, opts.protocol_version)
+            .await
+            .unwrap();
         assert_eq!(ndx, NDX_FLIST_EOF);
     }
 
@@ -297,7 +320,10 @@ mod tests {
         assert_eq!(sender.next_ndx, 0);
 
         let mut buf = Vec::new();
-        sender.send_sub_flist(&mut buf, 0, &entries, &opts).await.unwrap();
+        sender
+            .send_sub_flist(&mut buf, 0, &entries, &opts)
+            .await
+            .unwrap();
         assert_eq!(sender.next_ndx, 2);
     }
 }
