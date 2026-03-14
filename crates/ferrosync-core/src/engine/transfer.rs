@@ -1256,7 +1256,7 @@ mod tests {
         std::fs::write(src.join("file.txt"), content).unwrap();
         std::fs::write(dst.join("file.txt"), content).unwrap();
 
-        // Set both files to the same mtime using libc::utimensat.
+        // Set both files to the same mtime.
         let fs = UnixFileSystem::new();
         let target_mtime: i64 = 1_000_000;
         fs.set_mtime(&src.join("file.txt"), target_mtime, 0)
