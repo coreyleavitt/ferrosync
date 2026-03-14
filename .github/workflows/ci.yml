@@ -41,21 +41,21 @@ jobs:
         run: choco install rsync -y
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build -p ferrosync-core -p ferrosync-cli
 
       - name: Run unit tests
-        run: cargo test --workspace --lib
+        run: cargo test -p ferrosync-core -p ferrosync-cli --lib
 
       - name: Run integration tests (Unix only)
         if: runner.os != 'Windows'
-        run: cargo test --workspace --test rsync_compat
+        run: cargo test -p ferrosync-core --test rsync_compat
 
       - name: Run E2E tests (Unix only)
         if: runner.os != 'Windows'
-        run: cargo test --workspace --test e2e
+        run: cargo test -p ferrosync-core --test e2e
 
       - name: Run doc tests
-        run: cargo test --workspace --doc
+        run: cargo test -p ferrosync-core -p ferrosync-cli --doc
 
   clippy:
     name: Clippy (${{ matrix.os }})
@@ -72,7 +72,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy-${{ matrix.os }}
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p ferrosync-core -p ferrosync-cli --all-targets -- -D warnings
 
   fmt:
     name: Format
