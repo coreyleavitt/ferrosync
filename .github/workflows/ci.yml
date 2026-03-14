@@ -40,11 +40,16 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install rsync -y
 
+      - name: Set up Python (for ferrosync-py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Build
-        run: cargo build -p ferrosync-core -p ferrosync-cli
+        run: cargo build --workspace
 
       - name: Run unit tests
-        run: cargo test -p ferrosync-core -p ferrosync-cli --lib
+        run: cargo test --workspace --lib
 
       - name: Run integration tests (Unix only)
         if: runner.os != 'Windows'
@@ -55,7 +60,7 @@ jobs:
         run: cargo test -p ferrosync-core --test e2e
 
       - name: Run doc tests
-        run: cargo test -p ferrosync-core -p ferrosync-cli --doc
+        run: cargo test --workspace --doc
 
   clippy:
     name: Clippy (${{ matrix.os }})
@@ -69,10 +74,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: Swatinem/rust-cache@v2
         with:
           key: clippy-${{ matrix.os }}
-      - run: cargo clippy -p ferrosync-core -p ferrosync-cli --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
     name: Format
