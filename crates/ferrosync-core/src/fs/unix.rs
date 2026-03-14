@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(read_target, b"target.txt");
 
         let meta = fs.lstat(&link_path).unwrap();
-        assert_eq!(meta.mode & crate::filelist::entry::S_IFMT, libc::S_IFLNK);
+        assert_eq!(meta.mode & crate::filelist::entry::S_IFMT, libc::S_IFLNK as u32);
     }
 
     #[test]

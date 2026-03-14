@@ -133,7 +133,7 @@ pub const S_IFSOCK: u32 = 0o140000;
 /// as the file-type bits, regardless of the platform's `S_IFLNK` value.
 #[cfg(unix)]
 pub fn to_wire_mode(mode: u32) -> u32 {
-    if (mode & S_IFMT) == libc::S_IFLNK {
+    if (mode & S_IFMT) == libc::S_IFLNK as u32 {
         (mode & !S_IFMT) | WIRE_S_IFLNK
     } else {
         mode
@@ -150,7 +150,7 @@ pub fn to_wire_mode(mode: u32) -> u32 {
 #[cfg(unix)]
 pub fn from_wire_mode(mode: u32) -> u32 {
     if (mode & S_IFMT) == WIRE_S_IFLNK {
-        (mode & !S_IFMT) | libc::S_IFLNK
+        (mode & !S_IFMT) | libc::S_IFLNK as u32
     } else {
         mode
     }

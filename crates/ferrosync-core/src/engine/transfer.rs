@@ -826,7 +826,7 @@ fn collect_directory(
 /// Get the platform's S_IFLNK value.
 #[cfg(unix)]
 fn libc_s_iflnk() -> u32 {
-    libc::S_IFLNK
+    libc::S_IFLNK as u32
 }
 
 #[cfg(not(unix))]
