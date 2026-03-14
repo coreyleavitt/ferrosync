@@ -87,17 +87,17 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
                 token::send_data_compressed(token_writer, data, compressor).await?;
             }
             MatchOp::BlockMatch(idx) => {
-                token::send_block_match(token_writer, *idx).await?;
+                token::send_block_match_compressed(token_writer, *idx).await?;
             }
         }
     }
-    token::send_eof(token_writer).await?;
+    token::send_eof_compressed(token_writer).await?;
 
     let file_sum = checksum::file_checksum(source_data, seed, checksum_type);
     token_writer
         .write_all(&file_sum)
         .await
-        .map_err(ProtocolError::Io)?;
+        .map_err(ProtocolError::from)?;
 
     Ok(())
 }
@@ -119,7 +119,7 @@ async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     token::send_eof(w).await?;
 
     let file_sum = checksum::file_checksum(source_data, seed, checksum_type);
-    w.write_all(&file_sum).await.map_err(ProtocolError::Io)?;
+    w.write_all(&file_sum).await.map_err(ProtocolError::from)?;
 
     Ok(())
 }

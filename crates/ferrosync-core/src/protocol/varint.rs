@@ -53,14 +53,14 @@ pub async fn write_shortint<W: AsyncWrite + Unpin>(w: &mut W, val: u16) -> Resul
 // ---------------------------------------------------------------------------
 
 /// Read a 4-byte little-endian signed integer.
-pub async fn read_int<R: AsyncRead + Unpin>(r: &mut R) -> Result<i32> {
+pub(crate) async fn read_int<R: AsyncRead + Unpin>(r: &mut R) -> Result<i32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).await?;
     Ok(i32::from_le_bytes(buf))
 }
 
 /// Write a 4-byte little-endian signed integer.
-pub async fn write_int<W: AsyncWrite + Unpin>(w: &mut W, val: i32) -> Result<()> {
+pub(crate) async fn write_int<W: AsyncWrite + Unpin>(w: &mut W, val: i32) -> Result<()> {
     w.write_all(&val.to_le_bytes()).await?;
     Ok(())
 }
@@ -71,7 +71,7 @@ pub async fn write_int<W: AsyncWrite + Unpin>(w: &mut W, val: i32) -> Result<()>
 
 /// Read a 64-bit integer: 4 bytes if it fits in i32, otherwise a 0xFFFFFFFF
 /// sentinel followed by 8 bytes little-endian.
-pub async fn read_longint<R: AsyncRead + Unpin>(r: &mut R) -> Result<i64> {
+pub(crate) async fn read_longint<R: AsyncRead + Unpin>(r: &mut R) -> Result<i64> {
     let val = read_int(r).await?;
     if val != -1 {
         // Not the sentinel -- value fits in 32 bits.
@@ -85,7 +85,7 @@ pub async fn read_longint<R: AsyncRead + Unpin>(r: &mut R) -> Result<i64> {
 
 /// Write a 64-bit integer: 4 bytes if it fits in 0..=0x7FFFFFFF, otherwise
 /// the 0xFFFFFFFF sentinel + 8 bytes.
-pub async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) -> Result<()> {
+pub(crate) async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) -> Result<()> {
     if (0..=0x7FFF_FFFF_i64).contains(&val) {
         write_int(w, val as i32).await
     } else {
@@ -106,13 +106,13 @@ pub async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) -> Result
 /// rsync's varint uses up to 5 wire bytes: 1 prefix byte + 4 extra bytes.
 /// For values > 0x0FFFFFFF, the prefix byte is 0xF0 (no data bits) and all
 /// 32 bits come from the 4 extra bytes. This covers the full u32 range.
-pub const VARINT_MAX: u32 = u32::MAX;
+pub(crate) const VARINT_MAX: u32 = u32::MAX;
 
 /// Read a compact variable-length 32-bit integer (protocol >= 30).
 ///
 /// The first byte's high bits encode the number of extra bytes via the
 /// `INT_BYTE_EXTRA` lookup table. Supports the full u32 range (1-5 bytes).
-pub async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
+pub(crate) async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
     let mut ch = [0u8; 1];
     r.read_exact(&mut ch).await?;
     let ch = ch[0];
@@ -148,7 +148,7 @@ pub async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
 /// Write a compact variable-length 32-bit integer (protocol >= 30).
 ///
 /// Encodes any u32 value in 1-5 bytes using prefix-coded variable length.
-pub async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()> {
+pub(crate) async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()> {
 
     let mut b = [0u8; 5]; // b[0] = prefix byte, b[1..4] = LE value bytes
     let le = x.to_le_bytes();
@@ -194,7 +194,7 @@ pub async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()
 ///
 /// `min_bytes` specifies the minimum number of bytes on the wire (typically 3
 /// for file sizes).
-pub async fn read_varlong<R: AsyncRead + Unpin>(
+pub(crate) async fn read_varlong<R: AsyncRead + Unpin>(
     r: &mut R,
     min_bytes: usize,
 ) -> Result<i64> {
@@ -234,7 +234,7 @@ pub async fn read_varlong<R: AsyncRead + Unpin>(
 /// Write a compact variable-length 64-bit integer (protocol >= 30).
 ///
 /// `min_bytes` specifies the minimum number of bytes on the wire.
-pub async fn write_varlong<W: AsyncWrite + Unpin>(
+pub(crate) async fn write_varlong<W: AsyncWrite + Unpin>(
     w: &mut W,
     x: i64,
     min_bytes: usize,
@@ -277,7 +277,7 @@ pub async fn write_varlong<W: AsyncWrite + Unpin>(
 
 /// Read a 32-bit integer using compact varint for proto >= 30, fixed 4 bytes
 /// otherwise.
-pub async fn read_varint30<R: AsyncRead + Unpin>(
+pub(crate) async fn read_varint30<R: AsyncRead + Unpin>(
     r: &mut R,
     protocol_version: u8,
 ) -> Result<u32> {
@@ -290,7 +290,7 @@ pub async fn read_varint30<R: AsyncRead + Unpin>(
 
 /// Write a 32-bit integer using compact varint for proto >= 30, fixed 4 bytes
 /// otherwise.
-pub async fn write_varint30<W: AsyncWrite + Unpin>(
+pub(crate) async fn write_varint30<W: AsyncWrite + Unpin>(
     w: &mut W,
     val: u32,
     protocol_version: u8,
@@ -304,7 +304,7 @@ pub async fn write_varint30<W: AsyncWrite + Unpin>(
 
 /// Read a 64-bit integer using compact varlong for proto >= 30, sentinel-based
 /// longint otherwise.
-pub async fn read_varlong30<R: AsyncRead + Unpin>(
+pub(crate) async fn read_varlong30<R: AsyncRead + Unpin>(
     r: &mut R,
     min_bytes: usize,
     protocol_version: u8,
@@ -318,7 +318,7 @@ pub async fn read_varlong30<R: AsyncRead + Unpin>(
 
 /// Write a 64-bit integer using compact varlong for proto >= 30, sentinel-based
 /// longint otherwise.
-pub async fn write_varlong30<W: AsyncWrite + Unpin>(
+pub(crate) async fn write_varlong30<W: AsyncWrite + Unpin>(
     w: &mut W,
     val: i64,
     min_bytes: usize,
@@ -479,14 +479,14 @@ pub async fn write_ndx<W: AsyncWrite + Unpin>(
 // ---------------------------------------------------------------------------
 
 /// Read a single byte from the stream.
-pub async fn read_byte<R: AsyncRead + Unpin>(r: &mut R) -> Result<u8> {
+pub(crate) async fn read_byte<R: AsyncRead + Unpin>(r: &mut R) -> Result<u8> {
     let mut buf = [0u8; 1];
     r.read_exact(&mut buf).await?;
     Ok(buf[0])
 }
 
 /// Write a single byte to the stream.
-pub async fn write_byte<W: AsyncWrite + Unpin>(w: &mut W, val: u8) -> Result<()> {
+pub(crate) async fn write_byte<W: AsyncWrite + Unpin>(w: &mut W, val: u8) -> Result<()> {
     w.write_all(&[val]).await?;
     Ok(())
 }
@@ -750,5 +750,158 @@ mod tests {
 
         let mut cursor = Cursor::new(&buf);
         assert_eq!(read_byte(&mut cursor).await.unwrap(), 0xAB);
+    }
+
+    // -----------------------------------------------------------------------
+    // Truncated / malformed input tests (#54)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_read_shortint_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let result = read_shortint(&mut cursor).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_shortint_truncated_one_byte() {
+        let mut cursor = Cursor::new(&[0x42]);
+        let result = read_shortint(&mut cursor).await;
+        assert!(result.is_err(), "1 byte for shortint should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_int_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let result = read_int(&mut cursor).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_int_truncated_partial() {
+        let mut cursor = Cursor::new(&[0x01, 0x02]);
+        let result = read_int(&mut cursor).await;
+        assert!(result.is_err(), "2 bytes for int should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_longint_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let result = read_longint(&mut cursor).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_longint_truncated_sentinel_no_payload() {
+        // Sentinel bytes (0xFFFFFFFF) with no 8-byte payload following.
+        let mut cursor = Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        let result = read_longint(&mut cursor).await;
+        assert!(result.is_err(), "sentinel with no payload should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_longint_truncated_sentinel_partial_payload() {
+        // Sentinel followed by only 4 bytes instead of 8.
+        let mut cursor = Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02, 0x03, 0x04]);
+        let result = read_longint(&mut cursor).await;
+        assert!(result.is_err(), "sentinel with partial payload should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varint_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let result = read_varint(&mut cursor).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varint_truncated_multibyte() {
+        // 0x80 prefix means 1 extra byte needed, but none provided.
+        let mut cursor = Cursor::new(&[0x80]);
+        let result = read_varint(&mut cursor).await;
+        assert!(result.is_err(), "truncated varint should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varint_malformed_too_many_extra_bytes() {
+        // 0xF8 prefix byte => INT_BYTE_EXTRA[(0xF8/4)] = INT_BYTE_EXTRA[62] = 5
+        // extra=5 > 4, should return InvalidVarint.
+        let mut cursor = Cursor::new(&[0xF8, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let result = read_varint(&mut cursor).await;
+        assert!(result.is_err(), "varint with extra > 4 should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varint_malformed_0xfc() {
+        // 0xFC prefix byte => INT_BYTE_EXTRA[(0xFC/4)] = INT_BYTE_EXTRA[63] = 6
+        // extra=6 > 4, should return InvalidVarint.
+        let mut cursor = Cursor::new(&[0xFC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let result = read_varint(&mut cursor).await;
+        assert!(result.is_err(), "varint with 0xFC prefix should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varlong_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let result = read_varlong(&mut cursor, 3).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varlong_truncated_partial_min_bytes() {
+        // min_bytes=3 but only 2 bytes provided.
+        let mut cursor = Cursor::new(&[0x00, 0x00]);
+        let result = read_varlong(&mut cursor, 3).await;
+        assert!(result.is_err(), "partial min_bytes should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_varlong_truncated_extra_bytes_missing() {
+        // min_bytes=3, first byte 0x80 => extra=1, but no extra byte provided.
+        let mut cursor = Cursor::new(&[0x80, 0x00, 0x00]);
+        let result = read_varlong(&mut cursor, 3).await;
+        assert!(result.is_err(), "varlong with missing extra bytes should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_byte_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let result = read_byte(&mut cursor).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_ndx_truncated_empty() {
+        let mut cursor = Cursor::new(&[] as &[u8]);
+        let mut state = NdxState::default();
+        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_ndx_truncated_negative_prefix_no_value() {
+        // 0xFF prefix (negative marker) with no following byte.
+        let mut cursor = Cursor::new(&[0xFF]);
+        let mut state = NdxState::default();
+        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        assert!(result.is_err(), "negative prefix with no value should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_ndx_truncated_fe_prefix_no_payload() {
+        // 0xFE prefix means 2-byte or 4-byte absolute/delta encoding follows.
+        let mut cursor = Cursor::new(&[0xFE]);
+        let mut state = NdxState::default();
+        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        assert!(result.is_err(), "0xFE prefix with no payload should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_ndx_truncated_fe_4byte_incomplete() {
+        // 0xFE, then 2 bytes with high bit set (4-byte encoding), but missing last 2 bytes.
+        let mut cursor = Cursor::new(&[0xFE, 0x80, 0x00]);
+        let mut state = NdxState::default();
+        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        assert!(result.is_err(), "4-byte ndx with missing bytes should return error");
     }
 }

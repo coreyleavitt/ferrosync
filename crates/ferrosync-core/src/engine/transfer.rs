@@ -12,7 +12,7 @@ use crate::delta::checksum;
 use crate::error::FsError;
 use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT, S_IFREG};
 use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem};
+use crate::fs::{DirEntry, FileSystem, STREAMING_THRESHOLD};
 use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::{ChecksumType, NegotiatedProtocol};
 use crate::stats::TransferStats;
@@ -41,7 +41,7 @@ pub async fn execute_transfer(
     checksum_type: ChecksumType,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
-    if let Some(timeout_secs) = options.timeout {
+    if let Some(timeout_secs) = options.timeout() {
         match tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             execute_transfer_impl(fs, options, seed, checksum_type, progress),
@@ -51,10 +51,10 @@ pub async fn execute_transfer(
             Ok(result) => result,
             Err(_) => Err(crate::FerrosyncError::Fs(FsError::Io {
                 path: PathBuf::from("<timeout>"),
-                source: std::io::Error::new(
+                source: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!("transfer timed out after {timeout_secs} seconds"),
-                ),
+                )),
             })),
         }
     } else {
@@ -95,7 +95,7 @@ pub async fn execute_transfer_streaming(
     let seed = protocol.seed;
     let checksum_type = protocol.checksum;
 
-    if let Some(timeout_secs) = options.timeout {
+    if let Some(timeout_secs) = options.timeout() {
         match tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             execute_transfer_streaming_impl(fs, options, seed, checksum_type, rx, progress),
@@ -105,10 +105,10 @@ pub async fn execute_transfer_streaming(
             Ok(result) => result,
             Err(_) => Err(crate::FerrosyncError::Fs(FsError::Io {
                 path: PathBuf::from("<timeout>"),
-                source: std::io::Error::new(
+                source: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     format!("transfer timed out after {timeout_secs} seconds"),
-                ),
+                )),
             })),
         }
     } else {
@@ -126,23 +126,22 @@ async fn execute_transfer_impl(
     let mut stats = TransferStats::new();
     stats.start();
 
-    let source_paths = &options.source;
+    let source_paths = options.source();
     let dest = options
-        .dest
-        .as_ref()
+        .dest()
         .ok_or_else(|| FsError::NotFound {
             path: PathBuf::from("<no destination>"),
         })?;
 
     // Build filter rules from options.
     let filters =
-        FilterRuleList::from_options(&options.exclude, &options.include, &options.filter)?;
+        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
 
     // Build the source file list.
-    let source_entries = if let Some(ref files_from) = options.files_from {
+    let source_entries = if let Some(ref files_from) = options.files_from() {
         build_file_list_from_file(fs, source_paths, files_from, &filters)?
     } else {
-        build_file_list(fs, source_paths, options.recursive, &filters, options.one_file_system)?
+        build_file_list(fs, source_paths, options.recursive(), &filters, options.one_file_system())?
     };
     stats.total_files = source_entries.len() as u64;
 
@@ -150,12 +149,12 @@ async fn execute_transfer_impl(
     let total_bytes: i64 = source_entries.iter().map(|e| e.entry.len).sum();
     progress.set_totals(stats.total_files, total_bytes as u64);
 
-    let delete_excluded = options.delete == DeleteMode::Excluded;
+    let delete_excluded = options.delete() == DeleteMode::Excluded;
 
     // Handle --delete-before.
-    if options.delete == DeleteMode::Before || (delete_excluded && options.delete == DeleteMode::Excluded) {
+    if options.delete() == DeleteMode::Before || (delete_excluded && options.delete() == DeleteMode::Excluded) {
         let deleted =
-            delete_extraneous(fs, dest, &source_entries, &filters, options.dry_run, delete_excluded)?;
+            delete_extraneous(fs, dest, &source_entries, &filters, options.dry_run(), delete_excluded)?;
         stats.files_deleted = deleted;
     }
 
@@ -164,8 +163,8 @@ async fn execute_transfer_impl(
         let dest_path = dest.join(std::str::from_utf8(&item.entry.name).unwrap_or("?"));
 
         if item.entry.is_dir() {
-            if !options.dry_run {
-                let mode = if options.preserve_perms {
+            if !options.dry_run() {
+                let mode = if options.preserve_perms() {
                     item.entry.mode & 0o7777
                 } else {
                     0o755
@@ -175,14 +174,14 @@ async fn execute_transfer_impl(
             stats.directories_created += 1;
 
             // --delete-during: remove extraneous files in this directory.
-            if options.delete == DeleteMode::During {
+            if options.delete() == DeleteMode::During {
                 let deleted = delete_extraneous_in_dir(
                     fs,
                     &dest_path,
                     &source_entries,
                     &item.entry.name,
                     &filters,
-                    options.dry_run,
+                    options.dry_run(),
                     false,
                 )?;
                 stats.files_deleted += deleted;
@@ -191,14 +190,14 @@ async fn execute_transfer_impl(
             continue;
         }
 
-        if item.entry.is_symlink() && options.preserve_links {
-            if !options.dry_run && !item.entry.link_target.is_empty() {
+        if item.entry.is_symlink() && options.preserve_links() {
+            if !options.dry_run() && !item.entry.link_target.is_empty() {
                 fs.create_symlink(&item.entry.link_target, &dest_path)?;
             }
             stats.symlinks += 1;
             progress.emit(ProgressEvent::FileComplete {
                 index: item.index,
-                name: item.entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                 literal_bytes: 0,
                 matched_bytes: 0,
             });
@@ -210,47 +209,47 @@ async fn execute_transfer_impl(
         }
 
         // Check file size limits (--max-size, --min-size).
-        if let Some(max) = options.max_size {
+        if let Some(max) = options.max_size() {
             if item.entry.len as u64 > max {
                 stats.files_skipped += 1;
                 progress.emit(ProgressEvent::FileSkipped {
                     index: item.index,
-                    name: item.entry.name.clone(),
+                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                 });
                 continue;
             }
         }
-        if let Some(min) = options.min_size {
+        if let Some(min) = options.min_size() {
             if (item.entry.len as u64) < min {
                 stats.files_skipped += 1;
                 progress.emit(ProgressEvent::FileSkipped {
                     index: item.index,
-                    name: item.entry.name.clone(),
+                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                 });
                 continue;
             }
         }
 
         // --compare-dest: skip if identical file exists in any compare-dest dir.
-        if !options.compare_dest.is_empty()
-            && check_alt_dest(fs, &item.entry, &options.compare_dest).is_some()
+        if !options.compare_dest().is_empty()
+            && check_alt_dest(fs, &item.entry, &options.compare_dest()).is_some()
         {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
                 index: item.index,
-                name: item.entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
             });
             continue;
         }
 
         // --link-dest: hard-link from alt dir if unchanged.
-        if !options.link_dest.is_empty() && !options.dry_run {
-            if let Some(alt_path) = check_alt_dest(fs, &item.entry, &options.link_dest) {
+        if !options.link_dest().is_empty() && !options.dry_run() {
+            if let Some(alt_path) = check_alt_dest(fs, &item.entry, &options.link_dest()) {
                 if fs.hard_link(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
                         index: item.index,
-                        name: item.entry.name.clone(),
+                        name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                         literal_bytes: 0,
                         matched_bytes: item.entry.len as u64,
                     });
@@ -260,13 +259,13 @@ async fn execute_transfer_impl(
         }
 
         // --copy-dest: copy from alt dir if unchanged (also use as basis).
-        if !options.copy_dest.is_empty() && !options.dry_run {
-            if let Some(alt_path) = check_alt_dest(fs, &item.entry, &options.copy_dest) {
+        if !options.copy_dest().is_empty() && !options.dry_run() {
+            if let Some(alt_path) = check_alt_dest(fs, &item.entry, &options.copy_dest()) {
                 if fs.copy_file(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
                         index: item.index,
-                        name: item.entry.name.clone(),
+                        name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                         literal_bytes: 0,
                         matched_bytes: item.entry.len as u64,
                     });
@@ -276,17 +275,17 @@ async fn execute_transfer_impl(
         }
 
         // Check if the file needs updating.
-        if !options.checksum_mode && should_skip(fs, &item.entry, &dest_path, options) {
+        if !options.checksum_mode() && should_skip(fs, &item.entry, &dest_path, options) {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
                 index: item.index,
-                name: item.entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
             });
             continue;
         }
 
         // Checksum mode: compare file-level checksums.
-        if options.checksum_mode {
+        if options.checksum_mode() {
             if let Ok(dest_data) = fs.read_file(&dest_path) {
                 let src_sum =
                     checksum::file_checksum(&item.source_data, seed, checksum_type);
@@ -295,7 +294,7 @@ async fn execute_transfer_impl(
                     stats.files_skipped += 1;
                     progress.emit(ProgressEvent::FileSkipped {
                         index: item.index,
-                        name: item.entry.name.clone(),
+                        name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                     });
                     continue;
                 }
@@ -303,27 +302,27 @@ async fn execute_transfer_impl(
         }
 
         // Compute and emit itemized changes if requested.
-        if options.itemize_changes {
+        if options.itemize_changes() {
             let changes = compute_itemized_changes(fs, &item.entry, &dest_path, options);
             progress.emit(ProgressEvent::FileItemized {
                 index: item.index,
-                name: item.entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                 changes,
             });
         }
 
         progress.emit(ProgressEvent::FileStart {
             index: item.index,
-            name: item.entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
             size: item.entry.len,
         });
 
-        if options.dry_run {
+        if options.dry_run() {
             stats.files_transferred += 1;
             stats.total_size += item.entry.len as u64;
             progress.emit(ProgressEvent::FileComplete {
                 index: item.index,
-                name: item.entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                 literal_bytes: item.entry.len as u64,
                 matched_bytes: 0,
             });
@@ -334,11 +333,11 @@ async fn execute_transfer_impl(
         let basis_data = fs.read_file(&dest_path).unwrap_or_default();
 
         // --append: if dest exists and source is longer, only transfer the tail.
-        if options.append && !basis_data.is_empty() {
+        if options.append() && !basis_data.is_empty() {
             let dest_len = basis_data.len();
             if item.source_data.len() > dest_len {
                 let append_data = &item.source_data[dest_len..];
-                let mode = if options.preserve_perms {
+                let mode = if options.preserve_perms() {
                     Some(item.entry.mode & 0o7777)
                 } else {
                     None
@@ -353,7 +352,7 @@ async fn execute_transfer_impl(
 
                 progress.emit(ProgressEvent::FileComplete {
                     index: item.index,
-                    name: item.entry.name.clone(),
+                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                     literal_bytes,
                     matched_bytes: dest_len as u64,
                 });
@@ -363,23 +362,23 @@ async fn execute_transfer_impl(
                 stats.files_skipped += 1;
                 progress.emit(ProgressEvent::FileSkipped {
                     index: item.index,
-                    name: item.entry.name.clone(),
+                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
                 });
                 continue;
             }
         }
 
         // Transfer via delta pipeline.
-        let result_data = if options.whole_file || basis_data.is_empty() {
+        let result_data = if options.whole_file() || basis_data.is_empty() {
             // Whole-file mode or no basis: just copy the data.
             item.source_data.clone()
-        } else if options.compress {
+        } else if options.compress() {
             pipeline::transfer_file_compressed(
                 &item.source_data,
                 &basis_data,
                 seed,
                 checksum_type,
-                options.compress_level,
+                options.compress_level(),
             )
             .await
             .map_err(crate::FerrosyncError::Protocol)?
@@ -392,12 +391,12 @@ async fn execute_transfer_impl(
         let literal_bytes = result_data.len() as u64;
 
         // --backup: create backup before overwriting.
-        if options.backup && fs.lexists(&dest_path) {
-            create_backup(fs, &dest_path, &options.suffix, options.backup_dir.as_deref())?;
+        if options.backup() && fs.lexists(&dest_path) {
+            create_backup(fs, &dest_path, options.suffix(), options.backup_dir().map(|p| p.as_path()))?;
         }
 
         // Choose write target (--partial-dir writes to temp location first).
-        let write_path = if let Some(ref partial_dir) = options.partial_dir {
+        let write_path = if let Some(ref partial_dir) = options.partial_dir() {
             let partial = partial_dir.join(
                 dest_path.file_name().unwrap_or_default(),
             );
@@ -408,29 +407,47 @@ async fn execute_transfer_impl(
         };
 
         // Write the file (choosing method based on options).
-        let mode = if options.preserve_perms {
+        let mode = if options.preserve_perms() {
             Some(item.entry.mode & 0o7777)
         } else {
             None
         };
-        if options.sparse {
+        if options.sparse() {
             fs.write_file_sparse(&write_path, &result_data, mode)?;
-        } else if options.inplace {
+        } else if options.inplace() {
             fs.write_file_inplace(&write_path, &result_data, mode)?;
+        } else if result_data.len() as i64 >= STREAMING_THRESHOLD {
+            // Use streaming write for large files to avoid peak memory.
+            use std::io::Write;
+            let mut writer = fs.write_file_stream(&write_path, mode)?;
+            writer.write_all(&result_data).map_err(|e| {
+                crate::FerrosyncError::Fs(FsError::Io {
+                    path: write_path.clone(),
+                    source: std::sync::Arc::new(e),
+                })
+            })?;
+            writer.flush().map_err(|e| {
+                crate::FerrosyncError::Fs(FsError::Io {
+                    path: write_path.clone(),
+                    source: std::sync::Arc::new(e),
+                })
+            })?;
+            drop(writer);
         } else {
             fs.write_file(&write_path, &result_data, mode)?;
         }
 
         // --partial-dir: move from partial dir to final destination.
-        if options.partial_dir.is_some() && write_path != dest_path {
+        if options.partial_dir().is_some() && write_path != dest_path {
             fs.rename(&write_path, &dest_path)?;
         }
 
         // Set metadata.
-        if options.preserve_times {
+        if options.preserve_times() {
             fs.set_mtime(&dest_path, item.entry.mtime, item.entry.mtime_nsec)?;
         }
-        if options.preserve_owner {
+        #[cfg(unix)]
+        if options.preserve_owner() {
             if let Err(e) = fs.set_owner(&dest_path, item.entry.uid, item.entry.gid) {
                 tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
             }
@@ -443,13 +460,13 @@ async fn execute_transfer_impl(
 
         progress.emit(ProgressEvent::FileComplete {
             index: item.index,
-            name: item.entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
             literal_bytes,
             matched_bytes: 0,
         });
 
         // Bandwidth limiting: sleep to maintain the target rate.
-        if let Some(limit) = options.bwlimit {
+        if let Some(limit) = options.bwlimit() {
             if limit > 0 {
                 let sleep_secs = literal_bytes as f64 / limit as f64;
                 if sleep_secs > 0.001 {
@@ -460,9 +477,9 @@ async fn execute_transfer_impl(
     }
 
     // Handle --delete-after.
-    if options.delete == DeleteMode::After {
+    if options.delete() == DeleteMode::After {
         let deleted =
-            delete_extraneous(fs, dest, &source_entries, &filters, options.dry_run, false)?;
+            delete_extraneous(fs, dest, &source_entries, &filters, options.dry_run(), false)?;
         stats.files_deleted = deleted;
     }
 
@@ -488,14 +505,13 @@ async fn execute_transfer_streaming_impl(
     stats.start();
 
     let dest = options
-        .dest
-        .as_ref()
+        .dest()
         .ok_or_else(|| FsError::NotFound {
             path: PathBuf::from("<no destination>"),
         })?;
 
     let filters =
-        FilterRuleList::from_options(&options.exclude, &options.include, &options.filter)?;
+        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
 
     let mut index = 0i32;
 
@@ -510,8 +526,8 @@ async fn execute_transfer_streaming_impl(
         stats.total_files += 1;
 
         if entry.is_dir() {
-            if !options.dry_run {
-                let mode = if options.preserve_perms {
+            if !options.dry_run() {
+                let mode = if options.preserve_perms() {
                     entry.mode & 0o7777
                 } else {
                     0o755
@@ -523,14 +539,14 @@ async fn execute_transfer_streaming_impl(
             continue;
         }
 
-        if entry.is_symlink() && options.preserve_links {
-            if !options.dry_run && !entry.link_target.is_empty() {
+        if entry.is_symlink() && options.preserve_links() {
+            if !options.dry_run() && !entry.link_target.is_empty() {
                 fs.create_symlink(&entry.link_target, &dest_path)?;
             }
             stats.symlinks += 1;
             progress.emit(ProgressEvent::FileComplete {
                 index,
-                name: entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&entry.name),
                 literal_bytes: 0,
                 matched_bytes: 0,
             });
@@ -544,23 +560,23 @@ async fn execute_transfer_streaming_impl(
         }
 
         // Check file size limits.
-        if let Some(max) = options.max_size {
+        if let Some(max) = options.max_size() {
             if entry.len as u64 > max {
                 stats.files_skipped += 1;
                 progress.emit(ProgressEvent::FileSkipped {
                     index,
-                    name: entry.name.clone(),
+                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
                 });
                 index += 1;
                 continue;
             }
         }
-        if let Some(min) = options.min_size {
+        if let Some(min) = options.min_size() {
             if (entry.len as u64) < min {
                 stats.files_skipped += 1;
                 progress.emit(ProgressEvent::FileSkipped {
                     index,
-                    name: entry.name.clone(),
+                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
                 });
                 index += 1;
                 continue;
@@ -574,16 +590,16 @@ async fn execute_transfer_streaming_impl(
         // pipeline to the transport streams) is deferred to the CLI phase.
         progress.emit(ProgressEvent::FileStart {
             index,
-            name: entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&entry.name),
             size: entry.len,
         });
 
-        if options.dry_run {
+        if options.dry_run() {
             stats.files_transferred += 1;
             stats.total_size += entry.len as u64;
             progress.emit(ProgressEvent::FileComplete {
                 index,
-                name: entry.name.clone(),
+                name: crate::engine::progress::name_to_pathbuf(&entry.name),
                 literal_bytes: entry.len as u64,
                 matched_bytes: 0,
             });
@@ -592,12 +608,13 @@ async fn execute_transfer_streaming_impl(
         }
 
         // Set metadata for received files.
-        if options.preserve_times && fs.lexists(&dest_path) {
+        if options.preserve_times() && fs.lexists(&dest_path) {
             if let Err(e) = fs.set_mtime(&dest_path, entry.mtime, entry.mtime_nsec) {
                 tracing::warn!(path = %dest_path.display(), error = %e, "failed to set mtime");
             }
         }
-        if options.preserve_owner && fs.lexists(&dest_path) {
+        #[cfg(unix)]
+        if options.preserve_owner() && fs.lexists(&dest_path) {
             if let Err(e) = fs.set_owner(&dest_path, entry.uid, entry.gid) {
                 tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
             }
@@ -608,7 +625,7 @@ async fn execute_transfer_streaming_impl(
 
         progress.emit(ProgressEvent::FileComplete {
             index,
-            name: entry.name.clone(),
+            name: crate::engine::progress::name_to_pathbuf(&entry.name),
             literal_bytes: entry.len as u64,
             matched_bytes: 0,
         });
@@ -704,6 +721,7 @@ fn collect_directory(
     root_dev: Option<u64>,
 ) -> std::result::Result<(), FsError> {
     // Check filesystem boundary (--one-file-system).
+    #[cfg(unix)]
     if let Some(dev) = root_dev {
         if let Ok(current_dev) = fs.device_id(dir_path) {
             if current_dev != dev {
@@ -711,6 +729,8 @@ fn collect_directory(
             }
         }
     }
+    #[cfg(not(unix))]
+    let _ = root_dev;
 
     // Add the directory itself.
     let dir_meta = fs.lstat(dir_path)?;
@@ -906,7 +926,7 @@ fn should_skip(
     }
 
     // --update: skip if dest is newer.
-    if options.update && dest_meta.mtime > src_entry.mtime {
+    if options.update() && dest_meta.mtime > src_entry.mtime {
         return true;
     }
 
@@ -955,10 +975,10 @@ fn compute_itemized_changes(
     let size_changed = dest_meta.len != src_entry.len;
     let time_changed = dest_meta.mtime != src_entry.mtime;
     let perms_changed =
-        options.preserve_perms && (dest_meta.mode & 0o7777) != (src_entry.mode & 0o7777);
-    let owner_changed = options.preserve_owner && dest_meta.uid != src_entry.uid;
+        options.preserve_perms() && (dest_meta.mode & 0o7777) != (src_entry.mode & 0o7777);
+    let owner_changed = options.preserve_owner() && dest_meta.uid != src_entry.uid;
     let group_changed =
-        (options.preserve_group || options.preserve_owner) && dest_meta.gid != src_entry.gid;
+        (options.preserve_group() || options.preserve_owner()) && dest_meta.gid != src_entry.gid;
 
     let any_change = size_changed || time_changed || perms_changed || owner_changed || group_changed;
     let update_type = if any_change { '>' } else { '.' };
@@ -1097,6 +1117,7 @@ fn delete_extraneous_in_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::chunker::ChunkingStrategy;
     use crate::fs::unix::UnixFileSystem;
     use tempfile::TempDir;
 
@@ -1780,6 +1801,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         };
 
         let opts = TransferOptions::builder()
@@ -1818,6 +1840,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         };
 
         let opts = TransferOptions::builder()
@@ -1879,6 +1902,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         };
 
         let opts = TransferOptions::builder()
@@ -1937,6 +1961,7 @@ mod tests {
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
+            chunking: ChunkingStrategy::default(),
         };
 
         let opts = TransferOptions::builder()

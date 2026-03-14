@@ -183,7 +183,10 @@ impl DaemonTransport {
 }
 
 impl Transport for DaemonTransport {
-    async fn connect(self: Box<Self>) -> Result<TransportStreams> {
+    fn connect(
+        self: Box<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TransportStreams>> + Send>> {
+        Box::pin(async move {
         let addr = format!("{}:{}", self.config.host, self.config.port);
         tracing::debug!(
             addr = %addr,
@@ -302,16 +305,21 @@ impl Transport for DaemonTransport {
             Ok(TransportStreams {
                 reader: Box::new(read_half),
                 writer: Box::new(write_half),
+                background_task: None,
             })
         } else {
-            let cursor = std::io::Cursor::new(buffered);
-            let chained = tokio::io::join(cursor, stream);
-            let (read_half, write_half) = tokio::io::split(chained);
+            // Chain the buffered bytes with the stream for reads;
+            // writes go directly to the stream.
+            let (read_half, write_half) = tokio::io::split(stream);
+            use tokio::io::AsyncReadExt as _;
+            let chained_read = std::io::Cursor::new(buffered).chain(read_half);
             Ok(TransportStreams {
-                reader: Box::new(read_half),
+                reader: Box::new(chained_read),
                 writer: Box::new(write_half),
+                background_task: None,
             })
         }
+        })
     }
 }
 
@@ -403,6 +411,15 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
     Ok(line)
 }
 
+/// Compute the authentication response for a daemon challenge (for use by TLS transport).
+pub(crate) fn compute_auth_response_for_tls(
+    challenge: &str,
+    user: &str,
+    password: &str,
+) -> String {
+    compute_auth_response(challenge, user, password)
+}
+
 /// Compute the authentication response for a daemon challenge.
 ///
 /// The rsync daemon auth protocol:
@@ -466,7 +483,7 @@ fn base64_encode(data: &[u8]) -> String {
 
 /// Map I/O errors to TransportError.
 fn io_err(e: std::io::Error) -> TransportError {
-    TransportError::Io(e)
+    TransportError::Io(std::sync::Arc::new(e))
 }
 
 #[cfg(test)]

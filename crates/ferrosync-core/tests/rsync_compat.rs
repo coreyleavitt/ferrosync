@@ -697,7 +697,15 @@ async fn test_handshake_against_real_rsync() {
 
     assert_eq!(protocol.version, 31);
     assert!(protocol.varint_flist_flags);
-    assert!(matches!(protocol.checksum, handshake::ChecksumType::Md5));
+    // Modern rsync (3.2+) supports xxh128/xxh3; older versions only md5/md4.
+    // Accept any successfully negotiated algorithm.
+    assert!(matches!(
+        protocol.checksum,
+        handshake::ChecksumType::Blake3
+            | handshake::ChecksumType::Xxh128
+            | handshake::ChecksumType::Xxh3
+            | handshake::ChecksumType::Md5
+    ));
     assert_ne!(protocol.seed, 0);
 
     // Send MUX-framed empty filter list and read file list response.
@@ -1255,5 +1263,314 @@ async fn test_debug_push_protocol() {
                 eprintln!("{}", line);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Empty (0-byte) file transfer (#52)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_pull_empty_file() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create a 0-byte file.
+    create_single_file(&src, "empty.dat", b"");
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&options, false);
+    let transport = LocalTransport::new(None, false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+
+    let result = SyncSession::new(transport, options, fs, SyncDirection::Pull)
+        .run()
+        .await;
+
+    assert!(result.is_ok(), "empty file pull failed: {:?}", result.unwrap_err());
+
+    let dest_path = dst.join("empty.dat");
+    assert!(dest_path.exists(), "empty file should exist in dest");
+    let dest_content = std::fs::read(&dest_path).unwrap();
+    assert_eq!(dest_content.len(), 0, "empty file should be 0 bytes");
+}
+
+#[tokio::test]
+async fn test_push_empty_file() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create a 0-byte file.
+    create_single_file(&src, "empty_push.dat", b"");
+
+    let options = TransferOptions::builder()
+        .preserve_times(true)
+        .source(src.join("empty_push.dat"))
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&options, true);
+    let transport = LocalTransport::new(None, true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+
+    let result = SyncSession::new(transport, options, fs, SyncDirection::Push)
+        .run()
+        .await;
+
+    assert!(result.is_ok(), "empty file push failed: {:?}", result.unwrap_err());
+
+    let dest_path = dst.join("empty_push.dat");
+    assert!(dest_path.exists(), "empty file should exist in dest");
+    let dest_content = std::fs::read(&dest_path).unwrap();
+    assert_eq!(dest_content.len(), 0, "empty file should be 0 bytes");
+}
+
+// ---------------------------------------------------------------------------
+// Symlink transfer (#53)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_pull_symlink() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create a regular file and a symlink pointing to it.
+    std::fs::write(src.join("target.txt"), b"symlink target content\n").unwrap();
+    std::os::unix::fs::symlink("target.txt", src.join("link.txt")).unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_links(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&options, false);
+    let transport = LocalTransport::new(None, false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+
+    let result = SyncSession::new(transport, options, fs, SyncDirection::Pull)
+        .run()
+        .await;
+
+    assert!(result.is_ok(), "symlink pull failed: {:?}", result.unwrap_err());
+
+    // Verify the target file was transferred.
+    assert_eq!(
+        std::fs::read(dst.join("target.txt")).unwrap(),
+        b"symlink target content\n"
+    );
+
+    // Verify the symlink was recreated as a symlink.
+    let link_path = dst.join("link.txt");
+    assert!(
+        link_path.symlink_metadata().unwrap().file_type().is_symlink(),
+        "link.txt should be a symlink"
+    );
+    let link_target = std::fs::read_link(&link_path).unwrap();
+    assert_eq!(
+        link_target.to_string_lossy(),
+        "target.txt",
+        "symlink should point to target.txt"
+    );
+}
+
+#[tokio::test]
+async fn test_push_symlink() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create a regular file and a symlink pointing to it.
+    std::fs::write(src.join("real.txt"), b"real file\n").unwrap();
+    std::os::unix::fs::symlink("real.txt", src.join("alias.txt")).unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_links(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&options, true);
+    let transport = LocalTransport::new(None, true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+
+    let result = SyncSession::new(transport, options, fs, SyncDirection::Push)
+        .run()
+        .await;
+
+    assert!(result.is_ok(), "symlink push failed: {:?}", result.unwrap_err());
+
+    // Verify the symlink was recreated.
+    let link_path = dst.join("alias.txt");
+    assert!(
+        link_path.symlink_metadata().unwrap().file_type().is_symlink(),
+        "alias.txt should be a symlink"
+    );
+    let link_target = std::fs::read_link(&link_path).unwrap();
+    assert_eq!(
+        link_target.to_string_lossy(),
+        "real.txt",
+        "symlink should point to real.txt"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Special characters in filenames (#55)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_pull_special_characters_in_filenames() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create files with various special characters in their names.
+    let special_files: &[(&str, &[u8])] = &[
+        ("file with spaces.txt", b"spaces content\n"),
+        ("file-with-dashes.txt", b"dashes content\n"),
+        ("file_with_underscores.txt", b"underscores content\n"),
+        ("file.multiple.dots.txt", b"dots content\n"),
+        ("UPPERCASE.TXT", b"upper content\n"),
+        ("MiXeD_CaSe.txt", b"mixed content\n"),
+        ("\u{00e9}\u{00e8}\u{00ea}.txt", b"french accents\n"),       // eee with accents
+        ("\u{00fc}\u{00f6}\u{00e4}.txt", b"german umlauts\n"),       // uoa with umlauts
+        ("\u{4f60}\u{597d}.txt", b"chinese hello\n"),                // nihao
+        ("file (parentheses).txt", b"parens content\n"),
+        ("file [brackets].txt", b"brackets content\n"),
+        ("file {braces}.txt", b"braces content\n"),
+        ("file #hash.txt", b"hash content\n"),
+        ("file @at.txt", b"at content\n"),
+        ("file +plus.txt", b"plus content\n"),
+        ("file =equals.txt", b"equals content\n"),
+        ("file ,comma.txt", b"comma content\n"),
+    ];
+
+    for (name, content) in special_files {
+        std::fs::write(src.join(name), content).unwrap();
+    }
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&options, false);
+    let transport = LocalTransport::new(None, false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+
+    let result = SyncSession::new(transport, options, fs, SyncDirection::Pull)
+        .run()
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "special chars pull failed: {:?}",
+        result.unwrap_err()
+    );
+
+    // Verify each file arrived with correct name and content.
+    for (name, expected_content) in special_files {
+        let dest_path = dst.join(name);
+        assert!(
+            dest_path.exists(),
+            "file with special name should exist: {name}"
+        );
+        let actual = std::fs::read(&dest_path).unwrap();
+        assert_eq!(
+            &actual[..],
+            *expected_content,
+            "content mismatch for file: {name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_push_special_characters_in_filenames() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create files with special characters.
+    let special_files: &[(&str, &[u8])] = &[
+        ("spaces in name.txt", b"push spaces\n"),
+        ("\u{00e9}l\u{00e8}ve.txt", b"push accents\n"),
+        ("\u{65e5}\u{672c}\u{8a9e}.txt", b"push japanese\n"),
+        ("file (1) [2] {3}.txt", b"push brackets\n"),
+    ];
+
+    for (name, content) in special_files {
+        std::fs::write(src.join(name), content).unwrap();
+    }
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&options, true);
+    let transport = LocalTransport::new(None, true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+
+    let result = SyncSession::new(transport, options, fs, SyncDirection::Push)
+        .run()
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "special chars push failed: {:?}",
+        result.unwrap_err()
+    );
+
+    for (name, expected_content) in special_files {
+        let dest_path = dst.join(name);
+        assert!(
+            dest_path.exists(),
+            "file with special name should exist: {name}"
+        );
+        let actual = std::fs::read(&dest_path).unwrap();
+        assert_eq!(
+            &actual[..],
+            *expected_content,
+            "content mismatch for file: {name}"
+        );
     }
 }

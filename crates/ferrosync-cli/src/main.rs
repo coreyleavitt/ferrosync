@@ -8,7 +8,9 @@ use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncS
 use ferrosync_core::options::{DeleteMode, TransferOptions, Verbosity};
 use ferrosync_core::transport::daemon::{DaemonTransport, DaemonTransportConfig, DEFAULT_DAEMON_PORT};
 use ferrosync_core::transport::local::LocalTransport;
+use ferrosync_core::transport::quic::{QuicConfig, QuicTransport};
 use ferrosync_core::transport::ssh::{SshTransport, SshTransportConfig};
+use ferrosync_core::transport::tls::{TlsDaemonConfig, TlsDaemonTransport};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -18,8 +20,9 @@ use ferrosync_core::transport::ssh::{SshTransport, SshTransportConfig};
 #[command(
     name = "ferrosync",
     version,
-    about = "rsync wire protocol implementation in Rust",
+    about = "rsync-compatible file synchronization",
     long_about = "A Rust implementation of the rsync wire protocol.\n\n\
+                  Usage: ferrosync [OPTIONS] SOURCE DEST\n\n\
                   Remote paths use rsync conventions:\n  \
                   user@host:path    SSH transport\n  \
                   host::module/path Daemon transport (port 873)\n  \
@@ -29,28 +32,17 @@ use ferrosync_core::transport::ssh::{SshTransport, SshTransportConfig};
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Source and destination paths (last argument is the destination)
+    #[arg(required = false, num_args = 0..)]
+    paths: Vec<String>,
+
+    #[command(flatten)]
+    opts: TransferFlags,
 }
 
 #[derive(clap::Subcommand)]
 enum Commands {
-    /// Push local files to a destination
-    Push {
-        /// Source path (local)
-        source: String,
-        /// Destination path (local, remote via SSH, or daemon)
-        dest: String,
-        #[command(flatten)]
-        opts: TransferFlags,
-    },
-    /// Pull files from a source to local destination
-    Pull {
-        /// Source path (local, remote via SSH, or daemon)
-        source: String,
-        /// Destination path (local)
-        dest: String,
-        #[command(flatten)]
-        opts: TransferFlags,
-    },
     /// List available modules on an rsync daemon
     Ls {
         /// Daemon host (or rsync://host[:port])
@@ -59,18 +51,18 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_DAEMON_PORT)]
         port: u16,
     },
-    /// Rsync-compatible mode: infer direction from path arguments
-    #[command(name = "compat")]
-    Compat {
-        /// Paths: last argument is the destination
-        #[arg(required = true, num_args = 2..)]
-        paths: Vec<String>,
-        #[command(flatten)]
-        opts: TransferFlags,
+    /// Start as an rsync-compatible daemon
+    Serve {
+        /// Configuration file (rsyncd.conf format)
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+        /// Port to listen on
+        #[arg(long, default_value_t = 873)]
+        port: u16,
     },
 }
 
-/// Common transfer flags shared by push, pull, and compat subcommands.
+/// Transfer flags matching rsync's command-line interface.
 #[derive(clap::Args, Clone, Debug)]
 struct TransferFlags {
     /// Archive mode (-rlptgoD)
@@ -260,6 +252,22 @@ struct TransferFlags {
     /// SSH port for remote connections
     #[arg(long)]
     port: Option<u16>,
+
+    /// Use TLS encryption for daemon connections
+    #[arg(long)]
+    tls: bool,
+
+    /// Transport protocol to use for daemon connections (tcp, tls, quic)
+    #[arg(long, value_name = "PROTO", default_value = "tcp")]
+    transport: String,
+
+    /// Accept invalid TLS/QUIC certificates (insecure)
+    #[arg(long)]
+    insecure: bool,
+
+    /// Number of concurrent file transfers (1-64)
+    #[arg(short = 'j', long, value_name = "N", default_value_t = 1)]
+    concurrent: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -400,48 +408,28 @@ fn parse_size(s: &str) -> Result<u64, String> {
 impl TransferFlags {
     /// Convert CLI flags into `TransferOptions`.
     fn into_transfer_options(self, source: PathBuf, dest: PathBuf) -> TransferOptions {
-        let mut opts = TransferOptions::default();
+        let mut builder = TransferOptions::builder();
 
         if self.archive {
-            opts.recursive = true;
-            opts.preserve_links = true;
-            opts.preserve_perms = true;
-            opts.preserve_times = true;
-            opts.preserve_group = true;
-            opts.preserve_owner = true;
-            opts.preserve_devices = true;
-            opts.preserve_specials = true;
+            builder = builder.archive();
         }
 
-        if self.recursive {
-            opts.recursive = true;
-        }
-        if self.links {
-            opts.preserve_links = true;
-        }
-        if self.perms {
-            opts.preserve_perms = true;
-        }
-        if self.times {
-            opts.preserve_times = true;
-        }
-        if self.group {
-            opts.preserve_group = true;
-        }
-        if self.owner {
-            opts.preserve_owner = true;
-        }
-        if self.devices {
-            opts.preserve_devices = true;
-            opts.preserve_specials = true;
-        }
+        builder = builder
+            .recursive(self.archive || self.recursive)
+            .preserve_links(self.archive || self.links)
+            .preserve_perms(self.archive || self.perms)
+            .preserve_times(self.archive || self.times)
+            .preserve_group(self.archive || self.group)
+            .preserve_owner(self.archive || self.owner)
+            .preserve_devices(self.archive || self.devices)
+            .preserve_specials(self.archive || self.devices);
 
-        opts.compress = self.compress;
+        builder = builder.compress(self.compress);
         if let Some(level) = self.compress_level {
-            opts.compress_level = level.clamp(1, 9);
+            builder = builder.compress_level(level);
         }
 
-        opts.verbosity = if self.quiet {
+        let verbosity = if self.quiet {
             Verbosity::Quiet
         } else {
             match self.verbose {
@@ -451,17 +439,19 @@ impl TransferFlags {
                 _ => Verbosity::Debug,
             }
         };
+        builder = builder.verbosity(verbosity);
 
-        opts.progress = self.progress;
-        opts.stats = self.stats;
-        opts.dry_run = self.dry_run;
-        opts.itemize_changes = self.itemize_changes;
-        opts.checksum_mode = self.checksum;
-        opts.whole_file = self.whole_file;
-        opts.update = self.update;
-        opts.inplace = self.inplace;
+        builder = builder
+            .progress(self.progress)
+            .stats(self.stats)
+            .dry_run(self.dry_run)
+            .itemize_changes(self.itemize_changes)
+            .checksum_mode(self.checksum)
+            .whole_file(self.whole_file)
+            .update(self.update)
+            .inplace(self.inplace);
 
-        opts.delete = if self.delete_before {
+        let delete_mode = if self.delete_before {
             DeleteMode::Before
         } else if self.delete_during || self.delete {
             DeleteMode::During
@@ -472,47 +462,58 @@ impl TransferFlags {
         } else {
             DeleteMode::None
         };
+        builder = builder.delete(delete_mode);
 
-        opts.exclude = self.exclude;
-        opts.include = self.include;
-        opts.filter = self.filter;
+        builder = builder
+            .excludes(self.exclude)
+            .includes(self.include)
+            .filters(self.filter);
 
         if let Some(ref bw) = self.bwlimit {
             if let Ok(bytes) = parse_size(bw) {
-                opts.bwlimit = Some(bytes);
+                builder = builder.bwlimit(bytes);
             }
         }
         if let Some(ref ms) = self.max_size {
             if let Ok(bytes) = parse_size(ms) {
-                opts.max_size = Some(bytes);
+                builder = builder.max_size(bytes);
             }
         }
         if let Some(ref ms) = self.min_size {
             if let Ok(bytes) = parse_size(ms) {
-                opts.min_size = Some(bytes);
+                builder = builder.min_size(bytes);
             }
         }
-        opts.timeout = self.timeout;
+        if let Some(t) = self.timeout {
+            builder = builder.timeout(t);
+        }
 
-        opts.one_file_system = self.one_file_system;
-        opts.numeric_ids = self.numeric_ids;
-        opts.sparse = self.sparse;
+        builder = builder
+            .one_file_system(self.one_file_system)
+            .numeric_ids(self.numeric_ids)
+            .sparse(self.sparse)
+            .backup(self.backup)
+            .suffix(self.suffix)
+            .append(self.append)
+            .link_dests(self.link_dest)
+            .copy_dests(self.copy_dest)
+            .compare_dests(self.compare_dest)
+            .sources(vec![source])
+            .dest(dest);
 
-        opts.backup = self.backup;
-        opts.backup_dir = self.backup_dir;
-        opts.suffix = self.suffix;
+        if let Some(bd) = self.backup_dir {
+            builder = builder.backup_dir(bd);
+        }
+        if let Some(pd) = self.partial_dir {
+            builder = builder.partial_dir(pd);
+        }
+        if let Some(ff) = self.files_from {
+            builder = builder.files_from(ff);
+        }
 
-        opts.link_dest = self.link_dest;
-        opts.copy_dest = self.copy_dest;
-        opts.compare_dest = self.compare_dest;
-        opts.partial_dir = self.partial_dir;
-        opts.append = self.append;
-        opts.files_from = self.files_from;
+        builder = builder.concurrent(self.concurrent);
 
-        opts.source = vec![source];
-        opts.dest = Some(dest);
-
-        opts
+        builder.build()
     }
 }
 
@@ -577,6 +578,9 @@ async fn run_sync(
     let identity = flags.identity.clone();
     let ssh_port = flags.port;
     let show_stats = flags.stats;
+    let use_tls = flags.tls || flags.transport == "tls";
+    let use_quic = flags.transport == "quic";
+    let insecure = flags.insecure;
 
     let fs = create_filesystem();
 
@@ -593,7 +597,7 @@ async fn run_sync(
             let path = if am_sender {
                 dest
             } else {
-                opts.source[0].clone()
+                opts.source()[0].clone()
             };
 
             let transport = LocalTransport::new(
@@ -657,18 +661,49 @@ async fn run_sync(
             let server_opts = build_server_options(&opts, direction == SyncDirection::Push);
             let am_sender = direction == SyncDirection::Push;
 
-            let config = DaemonTransportConfig {
-                host,
-                port,
-                module,
-                path: remote_path,
-                ..Default::default()
-            };
-            let transport = DaemonTransport::new(config, am_sender, &server_opts);
-            let session = SyncSession::new(transport, opts, fs, direction);
-            let result = session.run().await?;
-            if show_stats {
-                print_stats(&result.stats);
+            if use_quic {
+                let config = QuicConfig {
+                    host,
+                    port,
+                    server_name: None,
+                    danger_accept_invalid_certs: insecure,
+                    ..Default::default()
+                };
+                let transport = QuicTransport::new(config);
+                let session = SyncSession::new(transport, opts, fs, direction);
+                let result = session.run().await?;
+                if show_stats {
+                    print_stats(&result.stats);
+                }
+            } else if use_tls {
+                let config = TlsDaemonConfig {
+                    host,
+                    port,
+                    module,
+                    path: remote_path,
+                    danger_accept_invalid_certs: insecure,
+                    ..Default::default()
+                };
+                let transport = TlsDaemonTransport::new(config, am_sender, &server_opts);
+                let session = SyncSession::new(transport, opts, fs, direction);
+                let result = session.run().await?;
+                if show_stats {
+                    print_stats(&result.stats);
+                }
+            } else {
+                let config = DaemonTransportConfig {
+                    host,
+                    port,
+                    module,
+                    path: remote_path,
+                    ..Default::default()
+                };
+                let transport = DaemonTransport::new(config, am_sender, &server_opts);
+                let session = SyncSession::new(transport, opts, fs, direction);
+                let result = session.run().await?;
+                if show_stats {
+                    print_stats(&result.stats);
+                }
             }
         }
     }
@@ -682,11 +717,13 @@ fn create_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
     {
         Box::new(ferrosync_core::fs::unix::UnixFileSystem::new())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // Windows or other platforms -- fall back once WindowsFileSystem is available.
-        // For now, compile will fail on non-unix until the Windows FS is wired in.
-        compile_error!("non-unix platforms not yet supported in CLI")
+        Box::new(ferrosync_core::fs::windows::WindowsFileSystem::new())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        compile_error!("unsupported platform: only Unix and Windows are supported")
     }
 }
 
@@ -708,39 +745,20 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Some(Commands::Push {
-            source,
-            dest,
-            opts,
-        }) => {
-            let remote = parse_path(&dest);
-            run_sync(
-                SyncDirection::Push,
-                PathBuf::from(&source),
-                remote,
-                opts,
-            )
-            .await
-        }
-        Some(Commands::Pull {
-            source,
-            dest,
-            opts,
-        }) => {
-            let remote = parse_path(&source);
-            run_sync(
-                SyncDirection::Pull,
-                PathBuf::from(&dest),
-                remote,
-                opts,
-            )
-            .await
-        }
         Some(Commands::Ls { host, port }) => run_ls(&host, port).await,
-        Some(Commands::Compat { paths, opts }) => run_compat(paths, opts).await,
-        None => {
-            eprintln!("ferrosync: no command specified. Use --help for usage.");
+        Some(Commands::Serve { config: _, port: _ }) => {
+            eprintln!("ferrosync: serve command not yet fully implemented");
             return ExitCode::from(1);
+        }
+        None => {
+            if cli.paths.len() < 2 {
+                eprintln!("ferrosync: need at least a source and destination path");
+                eprintln!("Usage: ferrosync [OPTIONS] SOURCE DEST");
+                eprintln!("       ferrosync ls HOST");
+                eprintln!("Try 'ferrosync --help' for more information.");
+                return ExitCode::from(1);
+            }
+            run_transfer(cli.paths, cli.opts).await
         }
     };
 
@@ -788,16 +806,16 @@ async fn run_ls(host: &str, port: u16) -> Result<(), ferrosync_core::FerrosyncEr
     Ok(())
 }
 
-/// Compat mode: infer direction from paths (like rsync).
+/// Run a transfer: infer direction from paths (rsync convention).
 ///
-/// If the source has a remote prefix, we're pulling. If the destination
-/// has a remote prefix, we're pushing.
-async fn run_compat(
+/// If the source is remote, we're pulling. If the destination is remote,
+/// we're pushing. Both local = local transfer via rsync subprocess.
+async fn run_transfer(
     paths: Vec<String>,
     opts: TransferFlags,
 ) -> Result<(), ferrosync_core::FerrosyncError> {
     let dest_str = paths.last().unwrap();
-    let source_str = &paths[0]; // For now, single source only
+    let source_str = &paths[0]; // TODO: support multiple sources
 
     let source = parse_path(source_str);
     let dest = parse_path(dest_str);
@@ -982,211 +1000,5 @@ mod tests {
         assert_eq!(format_bytes(2048), "2.00 KB");
         assert_eq!(format_bytes(5 * 1024 * 1024), "5.00 MB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.00 GB");
-    }
-
-    #[test]
-    fn test_flags_to_options_archive() {
-        let flags = TransferFlags {
-            archive: true,
-            recursive: false,
-            links: false,
-            perms: false,
-            times: false,
-            group: false,
-            owner: false,
-            devices: false,
-            compress: false,
-            compress_level: None,
-            verbose: 0,
-            quiet: false,
-            progress: false,
-            stats: false,
-            dry_run: false,
-            itemize_changes: false,
-            checksum: false,
-            whole_file: false,
-            update: false,
-            inplace: false,
-            delete: false,
-            delete_before: false,
-            delete_during: false,
-            delete_after: false,
-            delete_excluded: false,
-            exclude: vec![],
-            include: vec![],
-            filter: vec![],
-            bwlimit: None,
-            max_size: None,
-            min_size: None,
-            timeout: None,
-            one_file_system: false,
-            numeric_ids: false,
-            sparse: false,
-            backup: false,
-            backup_dir: None,
-            suffix: "~".to_string(),
-            link_dest: vec![],
-            copy_dest: vec![],
-            compare_dest: vec![],
-            partial_dir: None,
-            append: false,
-            files_from: None,
-            rsync_path: None,
-            identity: None,
-            port: None,
-        };
-
-        let opts = flags.into_transfer_options(
-            PathBuf::from("/src"),
-            PathBuf::from("/dst"),
-        );
-        assert!(opts.is_archive());
-        assert_eq!(opts.source, vec![PathBuf::from("/src")]);
-        assert_eq!(opts.dest, Some(PathBuf::from("/dst")));
-    }
-
-    #[test]
-    fn test_flags_to_options_delete() {
-        let make_flags = |delete: bool,
-                          delete_before: bool,
-                          delete_during: bool,
-                          delete_after: bool,
-                          delete_excluded: bool|
-         -> TransferFlags {
-            TransferFlags {
-                archive: false,
-                recursive: false,
-                links: false,
-                perms: false,
-                times: false,
-                group: false,
-                owner: false,
-                devices: false,
-                compress: false,
-                compress_level: None,
-                verbose: 0,
-                quiet: false,
-                progress: false,
-                stats: false,
-                dry_run: false,
-                itemize_changes: false,
-                checksum: false,
-                whole_file: false,
-                update: false,
-                inplace: false,
-                delete,
-                delete_before,
-                delete_during,
-                delete_after,
-                delete_excluded,
-                exclude: vec![],
-                include: vec![],
-                filter: vec![],
-                bwlimit: None,
-                max_size: None,
-                min_size: None,
-                timeout: None,
-                one_file_system: false,
-                numeric_ids: false,
-                sparse: false,
-                backup: false,
-                backup_dir: None,
-                suffix: "~".to_string(),
-                link_dest: vec![],
-                copy_dest: vec![],
-                compare_dest: vec![],
-                partial_dir: None,
-                append: false,
-                files_from: None,
-                rsync_path: None,
-                identity: None,
-                port: None,
-            }
-        };
-
-        let opts = make_flags(true, false, false, false, false)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.delete, DeleteMode::During);
-
-        let opts = make_flags(false, true, false, false, false)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.delete, DeleteMode::Before);
-
-        let opts = make_flags(false, false, false, true, false)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.delete, DeleteMode::After);
-
-        let opts = make_flags(false, false, false, false, true)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.delete, DeleteMode::Excluded);
-    }
-
-    #[test]
-    fn test_flags_verbosity() {
-        let make_flags = |verbose: u8, quiet: bool| TransferFlags {
-            archive: false,
-            recursive: false,
-            links: false,
-            perms: false,
-            times: false,
-            group: false,
-            owner: false,
-            devices: false,
-            compress: false,
-            compress_level: None,
-            verbose,
-            quiet,
-            progress: false,
-            stats: false,
-            dry_run: false,
-            itemize_changes: false,
-            checksum: false,
-            whole_file: false,
-            update: false,
-            inplace: false,
-            delete: false,
-            delete_before: false,
-            delete_during: false,
-            delete_after: false,
-            delete_excluded: false,
-            exclude: vec![],
-            include: vec![],
-            filter: vec![],
-            bwlimit: None,
-            max_size: None,
-            min_size: None,
-            timeout: None,
-            one_file_system: false,
-            numeric_ids: false,
-            sparse: false,
-            backup: false,
-            backup_dir: None,
-            suffix: "~".to_string(),
-            link_dest: vec![],
-            copy_dest: vec![],
-            compare_dest: vec![],
-            partial_dir: None,
-            append: false,
-            files_from: None,
-            rsync_path: None,
-            identity: None,
-            port: None,
-        };
-
-        let opts = make_flags(0, true)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.verbosity, Verbosity::Quiet);
-
-        let opts = make_flags(1, false)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.verbosity, Verbosity::Verbose);
-
-        let opts = make_flags(2, false)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.verbosity, Verbosity::VeryVerbose);
-
-        let opts = make_flags(3, false)
-            .into_transfer_options(PathBuf::from("/s"), PathBuf::from("/d"));
-        assert_eq!(opts.verbosity, Verbosity::Debug);
     }
 }

@@ -31,6 +31,7 @@ pub mod filter;
 pub mod fs;
 pub mod options;
 pub mod protocol;
+pub mod server;
 pub mod stats;
 pub mod transport;
 

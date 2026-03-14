@@ -14,6 +14,7 @@ mod metadata;
 
 pub use metadata::FileMetadata;
 
+use std::io::{Read, Write};
 use std::path::Path;
 
 use crate::error::FsError;
@@ -23,6 +24,10 @@ type Result<T> = std::result::Result<T, FsError>;
 /// Abstraction over filesystem operations needed for rsync transfers.
 ///
 /// Object-safe for testability and future server-mode reuse.
+///
+/// Platform-specific methods (`set_owner`, `device_id`) are only available
+/// on Unix via `#[cfg(unix)]`. Non-Unix platforms should use the platform
+/// filesystem implementation which handles these concepts differently.
 pub trait FileSystem: Send + Sync {
     /// Read file metadata without following symlinks.
     fn lstat(&self, path: &Path) -> Result<FileMetadata>;
@@ -55,6 +60,10 @@ pub trait FileSystem: Send + Sync {
     fn set_mtime(&self, path: &Path, mtime: i64, mtime_nsec: u32) -> Result<()>;
 
     /// Set file ownership (uid, gid). May require elevated privileges.
+    ///
+    /// Only available on Unix platforms. Non-Unix implementations should
+    /// handle ownership through platform-specific mechanisms.
+    #[cfg(unix)]
     fn set_owner(&self, path: &Path, uid: u32, gid: u32) -> Result<()>;
 
     /// Remove a file.
@@ -70,6 +79,10 @@ pub trait FileSystem: Send + Sync {
     fn lexists(&self, path: &Path) -> bool;
 
     /// Get the device ID for a path (for `--one-file-system`).
+    ///
+    /// Only available on Unix platforms. Non-Unix platforms do not have
+    /// a portable device ID concept.
+    #[cfg(unix)]
     fn device_id(&self, path: &Path) -> Result<u64>;
 
     /// Write data to a file in-place (overwrites directly, no atomic rename).
@@ -98,6 +111,63 @@ pub trait FileSystem: Send + Sync {
 
     /// Copy a file from `src` to `dst`.
     fn copy_file(&self, src: &Path, dst: &Path) -> Result<()>;
+
+    /// Return a streaming reader for the file at `path`.
+    ///
+    /// Enables reading large files without loading them entirely into memory.
+    /// The default implementation reads the whole file via [`read_file`] and
+    /// wraps it in a `Cursor`.
+    fn read_file_stream(&self, path: &Path) -> Result<Box<dyn Read + Send>> {
+        let data = self.read_file(path)?;
+        Ok(Box::new(std::io::Cursor::new(data)))
+    }
+
+    /// Return a streaming writer for the file at `path`.
+    ///
+    /// The writer creates the file (or truncates if it exists). The optional
+    /// `mode` sets Unix permissions after the write completes (platform
+    /// permitting). The default implementation collects all written bytes
+    /// into a buffer; callers should flush and drop the writer, then call
+    /// [`write_file`] with the accumulated data.
+    ///
+    /// Platform implementations override this with proper file I/O.
+    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
+        Ok(Box::new(BufferedFileWriter::new(path.to_path_buf(), mode)))
+    }
+}
+
+/// Threshold in bytes above which streaming I/O is preferred over buffered
+/// whole-file reads/writes. Currently set to 64 MiB.
+pub const STREAMING_THRESHOLD: i64 = 64 * 1024 * 1024;
+
+/// Collects writes into a buffer.
+///
+/// Used by the default [`FileSystem::write_file_stream`] implementation.
+/// Callers are expected to retrieve the buffered data via
+/// [`into_inner`](BufferedFileWriter::into_inner) or simply rely on the
+/// platform-specific override that writes to an actual file.
+#[allow(dead_code)]
+pub(crate) struct BufferedFileWriter {
+    path: std::path::PathBuf,
+    mode: Option<u32>,
+    buf: Vec<u8>,
+}
+
+impl BufferedFileWriter {
+    fn new(path: std::path::PathBuf, mode: Option<u32>) -> Self {
+        Self { path, mode, buf: Vec::new() }
+    }
+}
+
+impl Write for BufferedFileWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A directory entry returned by [`FileSystem::read_dir`].

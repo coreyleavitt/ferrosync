@@ -87,7 +87,7 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     let mut received_checksum = vec![0u8; digest_len];
     r.read_exact(&mut received_checksum)
         .await
-        .map_err(ProtocolError::Io)?;
+        .map_err(ProtocolError::from)?;
 
     let computed_checksum = checksum::file_checksum(&output, seed, checksum_type);
     if received_checksum != computed_checksum {
@@ -150,7 +150,7 @@ pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
     let mut received_checksum = vec![0u8; digest_len];
     r.read_exact(&mut received_checksum)
         .await
-        .map_err(ProtocolError::Io)?;
+        .map_err(ProtocolError::from)?;
 
     let computed_checksum = checksum::file_checksum(&output, seed, checksum_type);
     if received_checksum != computed_checksum {

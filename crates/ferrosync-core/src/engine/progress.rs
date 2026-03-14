@@ -3,6 +3,8 @@
 //! The progress system allows callers to observe transfer progress
 //! at both per-file and overall levels.
 
+use std::path::PathBuf;
+
 /// Progress event emitted during a transfer.
 #[derive(Debug, Clone)]
 pub enum ProgressEvent {
@@ -11,7 +13,7 @@ pub enum ProgressEvent {
         /// File index in the file list.
         index: i32,
         /// File name (relative path).
-        name: Vec<u8>,
+        name: PathBuf,
         /// Total file size in bytes.
         size: i64,
     },
@@ -29,7 +31,7 @@ pub enum ProgressEvent {
         /// File index.
         index: i32,
         /// File name.
-        name: Vec<u8>,
+        name: PathBuf,
         /// Bytes of literal data sent (not matched).
         literal_bytes: u64,
         /// Bytes matched from basis file.
@@ -40,19 +42,19 @@ pub enum ProgressEvent {
         /// File index.
         index: i32,
         /// File name.
-        name: Vec<u8>,
+        name: PathBuf,
     },
     /// A file was deleted from the receiver.
     FileDeleted {
         /// File name.
-        name: Vec<u8>,
+        name: PathBuf,
     },
     /// Itemized change description for a file (`--itemize-changes`).
     FileItemized {
         /// File index.
         index: i32,
         /// File name.
-        name: Vec<u8>,
+        name: PathBuf,
         /// Itemized change flags.
         changes: ItemizedChanges,
     },
@@ -203,6 +205,22 @@ impl ProgressTracker {
     }
 }
 
+/// Helper to convert a byte slice (rsync file name) to a `PathBuf`.
+///
+/// On Unix, uses `OsStr::from_encoded_bytes_unchecked` to preserve
+/// arbitrary byte sequences. On other platforms, uses lossy UTF-8 conversion.
+pub fn name_to_pathbuf(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,12 +233,12 @@ mod tests {
         // Should not panic with no callback.
         tracker.emit(ProgressEvent::FileStart {
             index: 0,
-            name: b"test.txt".to_vec(),
+            name: PathBuf::from("test.txt"),
             size: 100,
         });
         tracker.emit(ProgressEvent::FileComplete {
             index: 0,
-            name: b"test.txt".to_vec(),
+            name: PathBuf::from("test.txt"),
             literal_bytes: 50,
             matched_bytes: 50,
         });
@@ -235,10 +253,10 @@ mod tests {
         let mut tracker = ProgressTracker::with_callback(Box::new(move |event| {
             let desc = match event {
                 ProgressEvent::FileStart { name, .. } => {
-                    format!("start:{}", String::from_utf8_lossy(name))
+                    format!("start:{}", name.display())
                 }
                 ProgressEvent::FileComplete { name, .. } => {
-                    format!("complete:{}", String::from_utf8_lossy(name))
+                    format!("complete:{}", name.display())
                 }
                 _ => "other".to_string(),
             };
@@ -247,12 +265,12 @@ mod tests {
 
         tracker.emit(ProgressEvent::FileStart {
             index: 0,
-            name: b"a.txt".to_vec(),
+            name: PathBuf::from("a.txt"),
             size: 10,
         });
         tracker.emit(ProgressEvent::FileComplete {
             index: 0,
-            name: b"a.txt".to_vec(),
+            name: PathBuf::from("a.txt"),
             literal_bytes: 10,
             matched_bytes: 0,
         });

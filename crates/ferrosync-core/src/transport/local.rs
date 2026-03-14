@@ -73,51 +73,56 @@ impl LocalTransport {
 }
 
 impl Transport for LocalTransport {
-    async fn connect(self: Box<Self>) -> Result<TransportStreams> {
-        let mut cmd = Command::new(&self.rsync_path);
-        cmd.args(&self.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+    fn connect(
+        self: Box<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TransportStreams>> + Send>> {
+        Box::pin(async move {
+            let mut cmd = Command::new(&self.rsync_path);
+            cmd.args(&self.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
 
-        if let Some(ref cwd) = self.cwd {
-            cmd.current_dir(cwd);
-        }
+            if let Some(ref cwd) = self.cwd {
+                cmd.current_dir(cwd);
+            }
 
-        let mut child = cmd.spawn()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    TransportError::CommandNotFound {
-                        command: self.rsync_path.clone(),
+            let mut child = cmd.spawn()
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        TransportError::CommandNotFound {
+                            command: self.rsync_path.clone(),
+                        }
+                    } else {
+                        TransportError::ConnectionFailed {
+                            message: format!(
+                                "failed to spawn {}: {e}",
+                                self.rsync_path
+                            ),
+                        }
                     }
-                } else {
-                    TransportError::ConnectionFailed {
-                        message: format!(
-                            "failed to spawn {}: {e}",
-                            self.rsync_path
-                        ),
-                    }
+                })?;
+
+            let stdin = child.stdin.take().ok_or_else(|| {
+                TransportError::ConnectionFailed {
+                    message: "failed to open stdin pipe".to_string(),
                 }
             })?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            TransportError::ConnectionFailed {
-                message: "failed to open stdin pipe".to_string(),
-            }
-        })?;
+            let stdout = child.stdout.take().ok_or_else(|| {
+                TransportError::ConnectionFailed {
+                    message: "failed to open stdout pipe".to_string(),
+                }
+            })?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            TransportError::ConnectionFailed {
-                message: "failed to open stdout pipe".to_string(),
-            }
-        })?;
+            // Spawn a background task to reap the child process and capture stderr.
+            let monitor_handle = tokio::spawn(monitor_child(child));
 
-        // Spawn a background task to reap the child process and capture stderr.
-        tokio::spawn(monitor_child(child));
-
-        Ok(TransportStreams {
-            reader: Box::new(stdout),
-            writer: Box::new(stdin),
+            Ok(TransportStreams {
+                reader: Box::new(stdout),
+                writer: Box::new(stdin),
+                background_task: Some(monitor_handle),
+            })
         })
     }
 }

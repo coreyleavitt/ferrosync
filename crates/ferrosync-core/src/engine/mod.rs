@@ -9,10 +9,13 @@
 //! - **Receiver**: Receives delta tokens, reconstructs files from basis +
 //!   delta, verifies file-level checksums.
 
+pub mod checkpoint;
+pub mod concurrent;
 pub mod generator;
 pub mod pipeline;
 pub mod progress;
 pub mod receiver;
 pub mod sender;
 pub mod session;
+pub mod streaming_flist;
 pub mod transfer;

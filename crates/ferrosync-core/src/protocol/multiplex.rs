@@ -27,7 +27,7 @@ const MPLEX_BASE: u8 = 7;
 const MAX_PAYLOAD: u32 = 0x00FF_FFFF;
 
 /// Typical data chunk size (matches rsync's IO_BUFFER_SIZE).
-pub const DATA_CHUNK_SIZE: usize = 32_768;
+pub(crate) const DATA_CHUNK_SIZE: usize = 32_768;
 
 // ---------------------------------------------------------------------------
 // Message codes
@@ -36,7 +36,7 @@ pub const DATA_CHUNK_SIZE: usize = 32_768;
 /// Rsync multiplexed message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum MsgCode {
+pub(crate) enum MsgCode {
     /// Raw file/transfer data.
     Data = 0,
     /// Transfer error (FERROR_XFER).
@@ -77,7 +77,7 @@ pub enum MsgCode {
 
 impl MsgCode {
     /// Convert from the raw tag byte (after subtracting MPLEX_BASE).
-    pub fn from_tag(tag: u8) -> Result<Self> {
+    pub(crate) fn from_tag(tag: u8) -> Result<Self> {
         match tag {
             0 => Ok(Self::Data),
             1 => Ok(Self::ErrorXfer),
@@ -108,7 +108,7 @@ impl MsgCode {
 
 /// A decoded multiplexed message.
 #[derive(Debug, Clone)]
-pub enum MplexMessage {
+pub(crate) enum MplexMessage {
     /// Raw transfer data.
     Data(Bytes),
     /// Informational text (MSG_INFO).
@@ -146,7 +146,7 @@ pub enum MplexMessage {
 /// Demultiplexes an rsync multiplexed input stream.
 ///
 /// Reads 4-byte headers and dispatches messages by type.
-pub struct MplexReader<R> {
+pub(crate) struct MplexReader<R> {
     inner: R,
     /// Remaining bytes of the current MSG_DATA payload.
     data_remaining: u32,
@@ -303,7 +303,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     }
 
     /// Write a multiplexed message with the given code and payload.
-    pub async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
+    pub(crate) async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
         let len = payload.len() as u32;
         if len > MAX_PAYLOAD {
             return Err(ProtocolError::FrameTooLarge {
@@ -333,7 +333,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
 
     /// Write a control message carrying a file list index (MSG_REDO,
     /// MSG_SUCCESS, MSG_DELETED, MSG_NO_SEND).
-    pub async fn write_index(&mut self, code: MsgCode, idx: i32) -> Result<()> {
+    pub(crate) async fn write_index(&mut self, code: MsgCode, idx: i32) -> Result<()> {
         self.write_message(code, &idx.to_le_bytes()).await
     }
 
@@ -350,6 +350,17 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     /// Flush the underlying writer.
     pub async fn flush(&mut self) -> Result<()> {
         self.inner.flush().await?;
+        Ok(())
+    }
+
+    /// Consume the writer and return the inner stream.
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
+
+    /// Shut down the underlying writer (send EOF).
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.inner.shutdown().await?;
         Ok(())
     }
 }
@@ -560,5 +571,134 @@ mod tests {
             .write_message(MsgCode::Data, &oversized)
             .await
             .is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Truncated / malformed multiplex input tests (#54)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_read_message_truncated_empty() {
+        let mut reader = MplexReader::new(Cursor::new(&[] as &[u8]));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "empty input should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_truncated_partial_header() {
+        // Only 2 bytes instead of the required 4-byte header.
+        let mut reader = MplexReader::new(Cursor::new(&[0x05, 0x00]));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "partial header should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_truncated_data_payload() {
+        // Valid header claiming 100 bytes of MSG_DATA, but only 5 bytes follow.
+        let hdr: u32 = (7u32 << 24) | 100; // tag=MPLEX_BASE+DATA, len=100
+        let mut buf = hdr.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0xAA; 5]); // only 5 of 100 bytes
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "truncated data payload should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_truncated_info_payload() {
+        // Valid header claiming 50 bytes of MSG_INFO, but no payload.
+        let hdr: u32 = (9u32 << 24) | 50; // tag=MPLEX_BASE+INFO, len=50
+        let buf = hdr.to_le_bytes().to_vec();
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "truncated info payload should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_invalid_tag_zero() {
+        // Tag byte of 0 is below MPLEX_BASE.
+        let hdr: u32 = (0u32 << 24) | 10;
+        let mut buf = hdr.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0; 10]);
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "tag below MPLEX_BASE should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_invalid_tag_below_base() {
+        // Tag byte of 5 is below MPLEX_BASE (7).
+        let hdr: u32 = (5u32 << 24) | 4;
+        let mut buf = hdr.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0; 4]);
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "tag below MPLEX_BASE should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_unknown_message_type() {
+        // Tag byte for an unrecognized message code (MPLEX_BASE + 50 = 57).
+        let hdr: u32 = (57u32 << 24) | 0;
+        let buf = hdr.to_le_bytes().to_vec();
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "unknown message type should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_message_truncated_index_payload() {
+        // MSG_REDO (code=9) expects a 4-byte i32 payload, but only 2 bytes given.
+        let hdr: u32 = ((MPLEX_BASE as u32 + 9) << 24) | 4; // tag for Redo, len=4
+        let mut buf = hdr.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0x01, 0x02]); // only 2 of 4 bytes
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+        let result = reader.read_message().await;
+        assert!(result.is_err(), "truncated index payload should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_data_truncated_mid_stream() {
+        // Build a valid data frame followed by a truncated one.
+        let mut buf = Vec::new();
+
+        // First frame: valid 5-byte data.
+        let hdr1: u32 = (7u32 << 24) | 5;
+        buf.extend_from_slice(&hdr1.to_le_bytes());
+        buf.extend_from_slice(b"hello");
+
+        // Second frame: header claims 100 bytes but has only 3.
+        let hdr2: u32 = (7u32 << 24) | 100;
+        buf.extend_from_slice(&hdr2.to_le_bytes());
+        buf.extend_from_slice(&[0xBB; 3]);
+
+        let mut reader = MplexReader::new(Cursor::new(buf));
+
+        // First read should succeed.
+        let mut data_buf = [0u8; 64];
+        let n = reader
+            .read_data(&mut data_buf, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(&data_buf[..n], b"hello");
+
+        // Second read should fail due to truncated payload.
+        let result = reader.read_data(&mut data_buf, |_| {}).await;
+        assert!(result.is_err(), "truncated second frame should return error");
+    }
+
+    #[tokio::test]
+    async fn test_msg_code_from_tag_all_invalid_values() {
+        // Verify that unrecognized tag values return errors, not panics.
+        let invalid_tags: &[u8] = &[11, 12, 13, 20, 21, 23, 30, 40, 41, 43, 50, 80, 85, 87, 99, 103, 200, 255];
+        for &tag in invalid_tags {
+            let result = MsgCode::from_tag(tag);
+            assert!(result.is_err(), "tag {tag} should return error");
+        }
     }
 }

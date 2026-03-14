@@ -119,7 +119,7 @@ pub async fn transfer_file(
     // Wait for all tasks.
     let (gen_result, send_result, recv_result) =
         tokio::try_join!(gen_handle, send_handle, recv_handle)
-            .map_err(|e| ProtocolError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| ProtocolError::Io(std::sync::Arc::new(std::io::Error::other(e))))?;
 
     gen_result?;
     send_result?;
@@ -227,7 +227,7 @@ pub async fn transfer_file_compressed(
 
     let (gen_result, send_result, recv_result) =
         tokio::try_join!(gen_handle, send_handle, recv_handle)
-            .map_err(|e| ProtocolError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| ProtocolError::Io(std::sync::Arc::new(std::io::Error::other(e))))?;
 
     gen_result?;
     send_result?;

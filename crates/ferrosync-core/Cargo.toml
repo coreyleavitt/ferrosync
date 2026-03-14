@@ -13,11 +13,23 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fast_rsync = { workspace = true }
+fastcdc = { workspace = true }
 md-5 = { workspace = true }
 md4 = { workspace = true }
+blake3 = { workspace = true }
+xxhash-rust = { workspace = true }
 flate2 = { workspace = true }
+zstd = { workspace = true }
+lz4_flex = { workspace = true }
 russh = { workspace = true }
 ssh2-config = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-pki-types = { workspace = true }
+snow = { workspace = true }
+quinn = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -27,4 +39,18 @@ tokio-test = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rand_core = { version = "0.6", features = ["std"] }
+rcgen = { workspace = true }
 filetime = "0.2"
+criterion = { workspace = true }
+
+[[bench]]
+name = "checksums"
+harness = false
+
+[[bench]]
+name = "compression"
+harness = false
+
+[[bench]]
+name = "delta"
+harness = false

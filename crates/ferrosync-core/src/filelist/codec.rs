@@ -78,13 +78,13 @@ impl FileListOptions {
         Self {
             protocol_version: proto.version,
             xfer_flags_as_varint: proto.varint_flist_flags,
-            preserve_uid: opts.preserve_owner,
-            preserve_gid: opts.preserve_group || opts.preserve_owner,
-            preserve_devices: opts.preserve_devices,
-            preserve_specials: opts.preserve_specials,
-            preserve_links: opts.preserve_links,
+            preserve_uid: opts.preserve_owner(),
+            preserve_gid: opts.preserve_group() || opts.preserve_owner(),
+            preserve_devices: opts.preserve_devices(),
+            preserve_specials: opts.preserve_specials(),
+            preserve_links: opts.preserve_links(),
             preserve_hard_links: false,
-            always_checksum: opts.checksum_mode,
+            always_checksum: opts.checksum_mode(),
             checksum_len: proto.checksum.digest_len(),
         }
     }
