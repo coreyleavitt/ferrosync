@@ -194,7 +194,7 @@ impl CheckpointFile {
         if pos + 4 > data.len() {
             return Err(err());
         }
-        let path_len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let path_len = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| err())?) as usize;
         pos += 4;
         if pos + path_len > data.len() {
             return Err(err());
@@ -208,35 +208,35 @@ impl CheckpointFile {
         if pos + 8 > data.len() {
             return Err(err());
         }
-        let file_size = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        let file_size = u64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| err())?);
         pos += 8;
 
         // block_size
         if pos + 8 > data.len() {
             return Err(err());
         }
-        let block_size = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()) as usize;
+        let block_size = u64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| err())?) as usize;
         pos += 8;
 
         // checksum_seed
         if pos + 4 > data.len() {
             return Err(err());
         }
-        let checksum_seed = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+        let checksum_seed = i32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| err())?);
         pos += 4;
 
         // timestamp
         if pos + 8 > data.len() {
             return Err(err());
         }
-        let timestamp = i64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+        let timestamp = i64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| err())?);
         pos += 8;
 
         // completed_blocks
         if pos + 4 > data.len() {
             return Err(err());
         }
-        let count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| err())?) as usize;
         pos += 4;
 
         let byte_count = count.div_ceil(8);

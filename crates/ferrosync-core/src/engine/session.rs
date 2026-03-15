@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use tokio::io::{AsyncRead, AsyncWriteExt};
+use tokio::io::AsyncRead;
 
 use crate::delta::checksum;
 use crate::delta::sum;
@@ -22,10 +22,10 @@ use crate::error::{FsError, ProtocolError};
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem, STREAMING_THRESHOLD};
+use crate::fs::{FileSystem, STREAMING_THRESHOLD};
 use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
-use crate::protocol::multiplex::{MplexMessage, MplexReader, MplexWriter};
+use crate::protocol::multiplex::MplexWriter;
 use crate::stats::TransferStats;
 use crate::transport::Transport;
 
@@ -163,7 +163,8 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
 /// # Example
 ///
 /// ```ignore
-/// let transport = LocalTransport::new(None, true, &options_str, path);
+/// let config = DaemonTransportConfig { host: "server".into(), module: "data".into(), ..Default::default() };
+/// let transport = DaemonTransport::new(config, true, &server_opts);
 /// let session = SyncSession::new(transport, options, fs, SyncDirection::Push);
 /// let result = session.run().await?;
 /// println!("transferred {} files", result.stats.files_transferred);
@@ -286,17 +287,9 @@ async fn run_push(
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
     let mut mplex_out = MplexWriter::new(writer);
 
-    // 1. Send filter list (only for non-local connections).
+    // 1. Send filter list.
     //
-    // rsync's recv_filter_list skips reading when local_server=true (the
-    // server was spawned locally, not over SSH/daemon). For LocalTransport
-    // we must NOT send filter data, otherwise the 4-byte terminator ends
-    // up in the file list stream, causing recv_file_list to see flags=0
-    // (end-of-list) immediately.
-    //
-    // TODO: For SSH/daemon transports, send filter list here.
-
-    // eprintln!("[client-push] about to build and send file list");
+    // TODO: Send filter list here for SSH/daemon transports.
 
     // 2. Build and send file list.
     // DEBUG: print entries before send
@@ -335,7 +328,7 @@ async fn run_push(
         .map(|(i, _)| (ndx_start + i as i32, i))
         .collect();
 
-    // eprintln!("[client-push] file list sent, entering sender loop");
+
 
     // 3. Sender loop: read NDX from generator, send delta data.
     let mut gen_ndx_state = crate::protocol::varint::NdxState::default();
@@ -345,12 +338,10 @@ async fn run_push(
     let mut phase: u32 = 0;
 
     loop {
-        // eprintln!("[client-push] waiting for NDX from generator...");
         let ndx = crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver)
             .await
             .map_err(crate::FerrosyncError::Protocol)?;
 
-        // eprintln!("[client-push] got NDX={ndx}");
         if ndx == crate::protocol::varint::NDX_DONE {
             phase += 1;
             if phase > max_phase {
@@ -456,7 +447,7 @@ async fn run_push(
         let source_data = read_source_file(fs, entry, options)?;
 
         // Match blocks and compute delta.
-        let ops = crate::delta::matcher::match_blocks(&source_data, &sums, seed, checksum_type);
+        let ops = crate::delta::matcher::match_blocks(&source_data, &sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
 
         // Build sender response: NDX + iflags + sum_head + tokens + checksum.
         let mut resp_buf = Vec::new();
@@ -765,7 +756,7 @@ async fn run_pull(
                 .await
                 .map_err(crate::FerrosyncError::Protocol)?;
         }
-        let sigs = sum::compute_signatures(&basis_data, seed, checksum_type);
+        let sigs = sum::compute_signatures(&basis_data, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
         sum::write_sums(&mut sig_buf, &sigs)
             .await
             .map_err(crate::FerrosyncError::Protocol)?;
@@ -1109,7 +1100,9 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
         }
 
         if meta.mode & S_IFMT == S_IFDIR && options.recursive() {
-            collect_directory_entries(fs, source, &[], &mut entries, &filters)?;
+            crate::filelist::walk::collect_directory_entries(
+                fs, source, &[], &mut entries, &filters,
+            )?;
         } else {
             let mut entry = meta.to_file_entry(name);
             if entry.is_symlink() {
@@ -1120,56 +1113,6 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
     }
 
     Ok(entries)
-}
-
-/// Recursively collect directory entries.
-fn collect_directory_entries(
-    fs: &dyn FileSystem,
-    dir_path: &std::path::Path,
-    prefix: &[u8],
-    entries: &mut Vec<FileEntry>,
-    filters: &FilterRuleList,
-) -> std::result::Result<(), FsError> {
-    let dir_meta = fs.lstat(dir_path)?;
-    let dir_name = if prefix.is_empty() {
-        b".".to_vec()
-    } else {
-        prefix.to_vec()
-    };
-    entries.push(dir_meta.to_file_entry(dir_name));
-
-    let mut children: Vec<DirEntry> = fs.read_dir(dir_path)?;
-    children.sort_by(|a, b| a.name.cmp(&b.name));
-
-    for child in children {
-        let child_name = if prefix.is_empty() {
-            child.name.clone()
-        } else {
-            let mut n = prefix.to_vec();
-            n.push(b'/');
-            n.extend(&child.name);
-            n
-        };
-
-        let is_dir = child.metadata.mode & S_IFMT == S_IFDIR;
-        if !filters.is_included(&child_name, is_dir) {
-            continue;
-        }
-
-        let child_path = dir_path.join(std::str::from_utf8(&child.name).unwrap_or("?"));
-
-        if is_dir {
-            collect_directory_entries(fs, &child_path, &child_name, entries, filters)?;
-        } else {
-            let mut entry = child.metadata.to_file_entry(child_name);
-            if entry.is_symlink() {
-                entry.link_target = fs.read_link(&child_path).unwrap_or_default();
-            }
-            entries.push(entry);
-        }
-    }
-
-    Ok(())
 }
 
 /// Read source file data for a given file entry.
@@ -1194,57 +1137,8 @@ fn read_source_file(
     Ok(Vec::new())
 }
 
-// ---------------------------------------------------------------------------
-// Demux background task
-// ---------------------------------------------------------------------------
-
-/// Background task that reads multiplexed frames from the wire and forwards
-/// MSG_DATA payloads to a pipe. Control messages are logged/handled separately.
-///
-/// This allows the existing generator/sender/receiver protocol code to read
-/// from the pipe as a plain `AsyncRead` stream, transparently demultiplexing.
-async fn demux_task(reader: Box<dyn AsyncRead + Unpin + Send>, mut pipe: tokio::io::DuplexStream) {
-    let mut mplex = MplexReader::new(reader);
-
-    loop {
-        match mplex.read_message().await {
-            Ok(MplexMessage::Data(data)) => {
-                if AsyncWriteExt::write_all(&mut pipe, &data).await.is_err() {
-                    break;
-                }
-            }
-            Ok(msg) => {
-                handle_control_message(&msg);
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "demux stream ended");
-                break;
-            }
-        }
-    }
-}
-
-/// Handle a control message from the multiplexed stream.
-fn handle_control_message(msg: &MplexMessage) {
-    match msg {
-        MplexMessage::Info(text) => {
-            tracing::info!(remote = %text.trim(), "remote info");
-        }
-        MplexMessage::Warning(text) => {
-            tracing::warn!(remote = %text.trim(), "remote warning");
-        }
-        MplexMessage::Error { code, text } => {
-            tracing::error!(code = ?code, remote = %text.trim(), "remote error");
-        }
-        MplexMessage::Log(text) => {
-            tracing::debug!(remote = %text.trim(), "remote log");
-        }
-        MplexMessage::Noop => {}
-        _ => {
-            tracing::trace!(msg = ?msg, "control message");
-        }
-    }
-}
+// Re-export the shared demux_task for use within this module.
+use crate::protocol::multiplex::demux_task;
 
 // ---------------------------------------------------------------------------
 // Tests

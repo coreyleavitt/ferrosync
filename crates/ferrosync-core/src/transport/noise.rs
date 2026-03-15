@@ -116,27 +116,71 @@ impl NoiseStream {
                 noise: Arc::clone(&self.noise),
                 read_buf: self.read_buf,
                 read_pos: self.read_pos,
+                read_state: NoiseReadState::Idle,
             },
             NoiseWriter {
                 tcp_writer,
                 noise: self.noise,
+                write_state: NoiseWriteState::Idle,
             },
         )
     }
+}
+
+/// State machine for reading framed Noise messages.
+///
+/// Each Noise message on the wire is prefixed by a 2-byte big-endian length.
+/// Because `poll_read` may return partial data at any point, we must track
+/// exactly where we are in the read sequence across calls.
+#[allow(dead_code)]
+enum NoiseReadState {
+    /// Ready to start reading a new frame.
+    Idle,
+    /// Partially read the 2-byte length prefix.
+    ReadingLen { buf: [u8; 2], pos: usize },
+    /// Partially read the encrypted message body.
+    ReadingBody { len: usize, buf: Vec<u8>, pos: usize },
+    /// Delivering decrypted plaintext to the caller.
+    Delivering { plaintext: Vec<u8>, pos: usize },
+}
+
+/// State machine for writing framed Noise messages.
+///
+/// If the underlying TCP write is partial, the encrypted frame (length prefix
+/// + ciphertext) must be retained and retried on the next `poll_write` call.
+/// Without this, a partial write would lose the encrypted frame while the
+/// Noise nonce has already advanced, corrupting the stream.
+enum NoiseWriteState {
+    /// Ready to accept new plaintext for encryption.
+    Idle,
+    /// A previously encrypted frame is partially written; retry from `pos`.
+    Flushing {
+        frame: Vec<u8>,
+        pos: usize,
+        /// Number of plaintext bytes this frame represents (returned to caller
+        /// once the frame is fully written).
+        plaintext_len: usize,
+    },
 }
 
 /// Read half of a `NoiseStream`.
 pub struct NoiseReader {
     tcp_reader: tokio::io::ReadHalf<TcpStream>,
     noise: Arc<Mutex<TransportState>>,
+    /// Buffered decrypted data from a previous frame that didn't fit in the
+    /// caller's buffer.
     read_buf: Vec<u8>,
     read_pos: usize,
+    /// State machine tracking partial reads of the length prefix and body.
+    read_state: NoiseReadState,
 }
 
 /// Write half of a `NoiseStream`.
 pub struct NoiseWriter {
     tcp_writer: tokio::io::WriteHalf<TcpStream>,
     noise: Arc<Mutex<TransportState>>,
+    /// State machine tracking partially-written encrypted frames.
+    write_state: NoiseWriteState,
 }
 
 impl AsyncRead for NoiseReader {
@@ -147,7 +191,7 @@ impl AsyncRead for NoiseReader {
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
 
-        // If we have buffered decrypted data, return it.
+        // If we have buffered decrypted data from a previous frame, return it.
         if me.read_pos < me.read_buf.len() {
             let remaining = &me.read_buf[me.read_pos..];
             let to_copy = remaining.len().min(buf.remaining());
@@ -160,66 +204,134 @@ impl AsyncRead for NoiseReader {
             return Poll::Ready(Ok(()));
         }
 
-        // Read the 2-byte length prefix.
-        let mut len_buf = [0u8; 2];
-        let mut len_read_buf = ReadBuf::new(&mut len_buf);
-        match Pin::new(&mut me.tcp_reader).poll_read(cx, &mut len_read_buf) {
-            Poll::Ready(Ok(())) => {
-                let filled = len_read_buf.filled().len();
-                if filled == 0 {
-                    return Poll::Ready(Ok(())); // EOF
+        loop {
+            match &mut me.read_state {
+                NoiseReadState::Idle => {
+                    me.read_state = NoiseReadState::ReadingLen {
+                        buf: [0u8; 2],
+                        pos: 0,
+                    };
                 }
-                if filled < 2 {
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-            }
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-
-        let msg_len = u16::from_be_bytes(len_buf) as usize;
-        if msg_len == 0 {
-            return Poll::Ready(Ok(()));
-        }
-
-        // Read the encrypted message body.
-        let mut encrypted = vec![0u8; msg_len];
-        let mut body_buf = ReadBuf::new(&mut encrypted);
-        match Pin::new(&mut me.tcp_reader).poll_read(cx, &mut body_buf) {
-            Poll::Ready(Ok(())) => {
-                let filled = body_buf.filled().len();
-                if filled < msg_len {
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-            }
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-
-        // Decrypt the message.
-        let mut plaintext = vec![0u8; msg_len];
-        match me.noise.try_lock() {
-            Ok(mut transport) => match transport.read_message(&encrypted, &mut plaintext) {
-                Ok(len) => {
-                    plaintext.truncate(len);
-                    let to_copy = len.min(buf.remaining());
-                    buf.put_slice(&plaintext[..to_copy]);
-                    if to_copy < len {
-                        me.read_buf = plaintext;
-                        me.read_pos = to_copy;
+                NoiseReadState::ReadingLen {
+                    buf: len_buf,
+                    pos: len_pos,
+                } => {
+                    let mut tmp = ReadBuf::new(&mut len_buf[*len_pos..]);
+                    match Pin::new(&mut me.tcp_reader).poll_read(cx, &mut tmp) {
+                        Poll::Ready(Ok(())) => {
+                            let n = tmp.filled().len();
+                            if n == 0 && *len_pos == 0 {
+                                // Clean EOF before any data in this frame.
+                                me.read_state = NoiseReadState::Idle;
+                                return Poll::Ready(Ok(()));
+                            }
+                            if n == 0 {
+                                // Unexpected EOF mid-length-prefix.
+                                me.read_state = NoiseReadState::Idle;
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::UnexpectedEof,
+                                    "EOF while reading Noise frame length",
+                                )));
+                            }
+                            *len_pos += n;
+                            if *len_pos >= 2 {
+                                let msg_len = u16::from_be_bytes(*len_buf) as usize;
+                                if msg_len == 0 {
+                                    me.read_state = NoiseReadState::Idle;
+                                    return Poll::Ready(Ok(()));
+                                }
+                                me.read_state = NoiseReadState::ReadingBody {
+                                    len: msg_len,
+                                    buf: vec![0u8; msg_len],
+                                    pos: 0,
+                                };
+                            }
+                            // Loop to continue reading.
+                        }
+                        Poll::Ready(Err(e)) => {
+                            me.read_state = NoiseReadState::Idle;
+                            return Poll::Ready(Err(e));
+                        }
+                        Poll::Pending => return Poll::Pending,
                     }
-                    Poll::Ready(Ok(()))
                 }
-                Err(e) => Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Noise decrypt error: {e}"),
-                ))),
-            },
-            Err(_) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
+                NoiseReadState::ReadingBody {
+                    len,
+                    buf: body_buf,
+                    pos: body_pos,
+                } => {
+                    let mut tmp = ReadBuf::new(&mut body_buf[*body_pos..]);
+                    match Pin::new(&mut me.tcp_reader).poll_read(cx, &mut tmp) {
+                        Poll::Ready(Ok(())) => {
+                            let n = tmp.filled().len();
+                            if n == 0 {
+                                me.read_state = NoiseReadState::Idle;
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::UnexpectedEof,
+                                    "EOF while reading Noise frame body",
+                                )));
+                            }
+                            *body_pos += n;
+                            if *body_pos >= *len {
+                                // Full body read; decrypt it.
+                                let encrypted = std::mem::take(body_buf);
+                                let enc_len = *len;
+                                me.read_state = NoiseReadState::Idle;
+
+                                let mut plaintext = vec![0u8; enc_len];
+                                match me.noise.try_lock() {
+                                    Ok(mut transport) => {
+                                        match transport.read_message(&encrypted, &mut plaintext) {
+                                            Ok(pt_len) => {
+                                                plaintext.truncate(pt_len);
+                                                let to_copy = pt_len.min(buf.remaining());
+                                                buf.put_slice(&plaintext[..to_copy]);
+                                                if to_copy < pt_len {
+                                                    me.read_buf = plaintext;
+                                                    me.read_pos = to_copy;
+                                                }
+                                                return Poll::Ready(Ok(()));
+                                            }
+                                            Err(e) => {
+                                                return Poll::Ready(Err(io::Error::new(
+                                                    io::ErrorKind::InvalidData,
+                                                    format!("Noise decrypt error: {e}"),
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Could not acquire lock; stash the body back and
+                                        // deliver on next poll via the Delivering state.
+                                        me.read_state = NoiseReadState::ReadingBody {
+                                            len: enc_len,
+                                            buf: encrypted,
+                                            pos: enc_len,
+                                        };
+                                        cx.waker().wake_by_ref();
+                                        return Poll::Pending;
+                                    }
+                                }
+                            }
+                            // Loop to continue reading body bytes.
+                        }
+                        Poll::Ready(Err(e)) => {
+                            me.read_state = NoiseReadState::Idle;
+                            return Poll::Ready(Err(e));
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                NoiseReadState::Delivering { plaintext, pos } => {
+                    let remaining = &plaintext[*pos..];
+                    let to_copy = remaining.len().min(buf.remaining());
+                    buf.put_slice(&remaining[..to_copy]);
+                    *pos += to_copy;
+                    if *pos >= plaintext.len() {
+                        me.read_state = NoiseReadState::Idle;
+                    }
+                    return Poll::Ready(Ok(()));
+                }
             }
         }
     }
@@ -233,7 +345,34 @@ impl AsyncWrite for NoiseWriter {
     ) -> Poll<io::Result<usize>> {
         let me = self.get_mut();
 
-        // Encrypt the data. Leave room for the poly1305 MAC tag (16 bytes).
+        // If we have a partially-written frame from a previous call, finish it.
+        if let NoiseWriteState::Flushing {
+            ref frame,
+            ref mut pos,
+            plaintext_len,
+        } = me.write_state
+        {
+            match Pin::new(&mut me.tcp_writer).poll_write(cx, &frame[*pos..]) {
+                Poll::Ready(Ok(n)) => {
+                    *pos += n;
+                    if *pos >= frame.len() {
+                        let pt_len = plaintext_len;
+                        me.write_state = NoiseWriteState::Idle;
+                        return Poll::Ready(Ok(pt_len));
+                    }
+                    // Partial write; wake and return pending to retry.
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(e)) => {
+                    me.write_state = NoiseWriteState::Idle;
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // Encrypt new data. Leave room for the poly1305 MAC tag (16 bytes).
         let chunk_size = buf.len().min(MAX_NOISE_MSG_LEN - 16);
         let chunk = &buf[..chunk_size];
         let mut encrypted = vec![0u8; chunk_size + 16];
@@ -257,22 +396,39 @@ impl AsyncWrite for NoiseWriter {
             }
         };
 
-        // Write length prefix + encrypted data as a single frame.
+        // Build length-prefixed frame.
         let len_bytes = (enc_len as u16).to_be_bytes();
         let mut frame = Vec::with_capacity(2 + enc_len);
         frame.extend_from_slice(&len_bytes);
         frame.extend_from_slice(&encrypted);
 
+        // Try to write the entire frame.
         match Pin::new(&mut me.tcp_writer).poll_write(cx, &frame) {
             Poll::Ready(Ok(n)) => {
-                if n >= 2 + enc_len {
+                if n >= frame.len() {
                     Poll::Ready(Ok(chunk_size))
                 } else {
-                    Poll::Ready(Ok(0))
+                    // Partial write: buffer the remainder for the next call.
+                    me.write_state = NoiseWriteState::Flushing {
+                        frame,
+                        pos: n,
+                        plaintext_len: chunk_size,
+                    };
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
                 }
             }
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                // The frame was encrypted but the write returned Pending.
+                // Buffer it so we don't lose the encrypted data / nonce.
+                me.write_state = NoiseWriteState::Flushing {
+                    frame,
+                    pos: 0,
+                    plaintext_len: chunk_size,
+                };
+                Poll::Pending
+            }
         }
     }
 
@@ -412,15 +568,23 @@ fn io_err(e: std::io::Error) -> TransportError {
 
 /// Generate a random Curve25519 keypair for Noise protocol.
 ///
-/// Returns `(private_key, public_key)` as 32-byte vectors.
-pub fn generate_keypair() -> (Vec<u8>, Vec<u8>) {
+/// Returns `(private_key, public_key)` as 32-byte vectors, or an error
+/// if keypair generation fails.
+pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
     let builder = Builder::new(
         "Noise_XX_25519_ChaChaPoly_BLAKE2s"
             .parse()
-            .expect("valid protocol name"),
+            .map_err(|e| TransportError::ConnectionFailed {
+                message: format!("invalid Noise protocol name: {e}"),
+            })?,
     );
-    let keypair = builder.generate_keypair().expect("keypair generation");
-    (keypair.private, keypair.public)
+    let keypair =
+        builder
+            .generate_keypair()
+            .map_err(|e| TransportError::ConnectionFailed {
+                message: format!("Noise keypair generation failed: {e}"),
+            })?;
+    Ok((keypair.private, keypair.public))
 }
 
 #[cfg(test)]
@@ -450,18 +614,18 @@ mod tests {
 
     #[test]
     fn test_generate_keypair() {
-        let (private_key, public_key) = generate_keypair();
+        let (private_key, public_key) = generate_keypair().unwrap();
         assert_eq!(private_key.len(), 32);
         assert_eq!(public_key.len(), 32);
 
-        let (private_key2, public_key2) = generate_keypair();
+        let (private_key2, public_key2) = generate_keypair().unwrap();
         assert_ne!(private_key, private_key2);
         assert_ne!(public_key, public_key2);
     }
 
     #[test]
     fn test_noise_builder_xx() {
-        let (private_key, _public_key) = generate_keypair();
+        let (private_key, _public_key) = generate_keypair().unwrap();
         let result = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
             .local_private_key(&private_key)
             .build_initiator();
@@ -470,8 +634,8 @@ mod tests {
 
     #[test]
     fn test_noise_builder_ik_requires_remote_key() {
-        let (init_priv, _) = generate_keypair();
-        let (_, remote_pub) = generate_keypair();
+        let (init_priv, _) = generate_keypair().unwrap();
+        let (_, remote_pub) = generate_keypair().unwrap();
 
         let result = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
@@ -484,8 +648,8 @@ mod tests {
     /// using in-memory buffers (no TCP).
     #[test]
     fn test_noise_xx_handshake_simulation() {
-        let (init_priv, _init_pub) = generate_keypair();
-        let (resp_priv, _resp_pub) = generate_keypair();
+        let (init_priv, _init_pub) = generate_keypair().unwrap();
+        let (resp_priv, _resp_pub) = generate_keypair().unwrap();
 
         let mut initiator = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
@@ -533,8 +697,8 @@ mod tests {
     /// Test Noise_IK handshake simulation.
     #[test]
     fn test_noise_ik_handshake_simulation() {
-        let (init_priv, _init_pub) = generate_keypair();
-        let (resp_priv, resp_pub) = generate_keypair();
+        let (init_priv, _init_pub) = generate_keypair().unwrap();
+        let (resp_priv, resp_pub) = generate_keypair().unwrap();
 
         let mut initiator = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
@@ -574,8 +738,8 @@ mod tests {
     async fn test_noise_full_duplex_handshake() {
         let (client_stream, server_stream) = tokio::io::duplex(4096);
 
-        let (init_priv, _init_pub) = generate_keypair();
-        let (resp_priv, _resp_pub) = generate_keypair();
+        let (init_priv, _init_pub) = generate_keypair().unwrap();
+        let (resp_priv, _resp_pub) = generate_keypair().unwrap();
 
         let server_handle = tokio::spawn(async move {
             let (mut reader, mut writer) = tokio::io::split(server_stream);

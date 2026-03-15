@@ -9,7 +9,7 @@
 //! the arguments received from the client.
 
 use std::net::SocketAddr;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::module::Module;
 use crate::delta::{checksum, matcher, sum, token};
@@ -18,10 +18,10 @@ use crate::error::{FsError, ProtocolError};
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT, S_IFREG};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem};
+use crate::fs::FileSystem;
 use crate::options::TransferOptions;
 use crate::protocol::handshake::{self, NegotiatedProtocol};
-use crate::protocol::multiplex::{MplexMessage, MplexReader, MplexWriter};
+use crate::protocol::multiplex::MplexWriter;
 use crate::protocol::varint;
 
 /// Server-side session error type.
@@ -350,7 +350,7 @@ impl ServerSession {
             let source_data = read_module_file(fs, &self.module.path, entry)?;
 
             // Match blocks and compute delta.
-            let ops = matcher::match_blocks(&source_data, &sums, seed, checksum_type);
+            let ops = matcher::match_blocks(&source_data, &sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
 
             // Build sender response: NDX + iflags + sum_head + tokens + checksum.
             let mut resp_buf = Vec::new();
@@ -502,8 +502,6 @@ impl ServerSession {
             .dest(self.module.path.clone())
             .build();
 
-        // eprintln!("[server-recv] about to recv file list");
-
         // Receive file list from client sender.
         let received_flist = exchange::recv_file_list(&mut demux_read, protocol, &opts)
             .await
@@ -512,11 +510,6 @@ impl ServerSession {
             })?;
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
-
-        // eprintln!("[server-recv] got {} entries", entries.len());
-        for _entry in entries.iter() {
-            // eprintln!("[server-recv] entry[{}] ndx={} name={} is_file={}", i, entry_ndx[i], String::from_utf8_lossy(&entry.name), entry.is_file());
-        }
 
         let dest = &self.module.path;
 
@@ -554,7 +547,6 @@ impl ServerSession {
 
             // Send generator output: NDX + iflags + sum_head + block sigs.
             let file_ndx = entry_ndx[idx];
-            // eprintln!("[server-recv] sending generator for file {} (ndx={})", name_str, file_ndx);
             let mut sig_buf = Vec::new();
             varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, proto_ver).await?;
             // iflags: ITEM_TRANSFER (1<<15) signals data transfer needed.
@@ -562,19 +554,15 @@ impl ServerSession {
                 const ITEM_TRANSFER: u16 = 1 << 15;
                 varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
             }
-            let sigs = sum::compute_signatures(&basis_data, seed, checksum_type);
+            let sigs = sum::compute_signatures(&basis_data, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
             sum::write_sums(&mut sig_buf, &sigs).await?;
             mplex_out.write_data(&sig_buf).await?;
             mplex_out.flush().await?;
-
-            // eprintln!("[server-recv] waiting for sender response NDX for file {}", name_str);
 
             // Read sender's response.
             // Wire format: NDX + iflags + sum_head + tokens + checksum
             let _file_ndx =
                 varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
-            // eprintln!("[server-recv] got sender response NDX={}", _file_ndx);
-
             // Read iflags (protocol >= 29).
             if proto_ver >= 29 {
                 use tokio::io::AsyncReadExt;
@@ -612,7 +600,6 @@ impl ServerSession {
             .await?;
 
             // Write reconstructed file.
-            // eprintln!("[server-recv] writing {} bytes to {}", result_data.len(), dest_path.display());
             fs.write_file(&dest_path, &result_data, None)?;
         }
 
@@ -695,56 +682,6 @@ impl ServerSession {
         Ok(())
     }
 
-    /// Handle a pull request (server sends files to client).
-    ///
-    /// Placeholder for the sender-side protocol implementation.
-    pub async fn handle_send<R, W>(
-        &self,
-        _reader: &mut R,
-        _writer: &mut W,
-    ) -> Result<(), SessionError>
-    where
-        R: AsyncRead + Unpin,
-        W: AsyncWrite + Unpin,
-    {
-        tracing::debug!(
-            module = %self.module.name,
-            path = %self.module.path.display(),
-            "handle_send placeholder"
-        );
-        Ok(())
-    }
-
-    /// Handle a push request (server receives files from client).
-    ///
-    /// Placeholder for the receiver-side protocol implementation.
-    pub async fn handle_receive<R, W>(
-        &self,
-        _reader: &mut R,
-        _writer: &mut W,
-    ) -> Result<(), SessionError>
-    where
-        R: AsyncRead + Unpin,
-        W: AsyncWrite + Unpin,
-    {
-        tracing::debug!(
-            module = %self.module.name,
-            path = %self.module.path.display(),
-            "handle_receive placeholder"
-        );
-
-        if self.module.read_only {
-            return Err(SessionError::Protocol {
-                message: format!(
-                    "module '{}' is read-only, cannot receive files",
-                    self.module.name
-                ),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Get the transfer direction for this session.
     pub fn direction(&self) -> TransferDirection {
         self.direction
@@ -814,7 +751,27 @@ fn build_module_entries(
 
     let meta = fs.lstat(module_path)?;
     if meta.mode & S_IFMT == S_IFDIR {
-        collect_dir_entries(fs, module_path, &[], &mut entries, &filters, recursive)?;
+        if recursive {
+            crate::filelist::walk::collect_directory_entries(
+                fs,
+                module_path,
+                &[],
+                &mut entries,
+                &filters,
+            )?;
+        } else {
+            // Non-recursive: add the directory itself and its immediate
+            // non-directory children only.
+            entries.push(meta.to_file_entry(b".".to_vec()));
+            let mut children: Vec<crate::fs::DirEntry> = fs.read_dir(module_path)?;
+            children.sort_by(|a, b| a.name.cmp(&b.name));
+            for child in children {
+                let is_dir = child.metadata.mode & S_IFMT == S_IFDIR;
+                if !is_dir {
+                    entries.push(child.metadata.to_file_entry(child.name));
+                }
+            }
+        }
     } else {
         let name = module_path
             .file_name()
@@ -836,51 +793,6 @@ fn build_module_entries(
     Ok(entries)
 }
 
-/// Recursively collect directory entries.
-fn collect_dir_entries(
-    fs: &dyn FileSystem,
-    dir_path: &std::path::Path,
-    prefix: &[u8],
-    entries: &mut Vec<FileEntry>,
-    _filters: &FilterRuleList,
-    recursive: bool,
-) -> Result<(), SessionError> {
-    let dir_meta = fs.lstat(dir_path)?;
-    let dir_name = if prefix.is_empty() {
-        b".".to_vec()
-    } else {
-        prefix.to_vec()
-    };
-    entries.push(dir_meta.to_file_entry(dir_name));
-
-    let mut children: Vec<DirEntry> = fs.read_dir(dir_path)?;
-    children.sort_by(|a, b| a.name.cmp(&b.name));
-
-    for child in children {
-        let child_name = if prefix.is_empty() {
-            child.name.clone()
-        } else {
-            let mut n = prefix.to_vec();
-            n.push(b'/');
-            n.extend(&child.name);
-            n
-        };
-
-        let is_dir = child.metadata.mode & S_IFMT == S_IFDIR;
-
-        let child_path = dir_path.join(std::str::from_utf8(&child.name).unwrap_or("?"));
-
-        if is_dir && recursive {
-            collect_dir_entries(fs, &child_path, &child_name, entries, _filters, recursive)?;
-        } else if !is_dir {
-            let entry = child.metadata.to_file_entry(child_name);
-            entries.push(entry);
-        }
-    }
-
-    Ok(())
-}
-
 /// Read a file from the module path given a file entry.
 fn read_module_file(
     fs: &dyn FileSystem,
@@ -892,50 +804,8 @@ fn read_module_file(
     Ok(fs.read_file(&path).unwrap_or_default())
 }
 
-/// Background task that reads multiplexed frames and forwards MSG_DATA
-/// payloads to a pipe.
-async fn demux_task<R: AsyncRead + Unpin>(reader: R, mut pipe: tokio::io::DuplexStream) {
-    let mut mplex = MplexReader::new(reader);
-
-    loop {
-        match mplex.read_message().await {
-            Ok(MplexMessage::Data(data)) => {
-                if AsyncWriteExt::write_all(&mut pipe, &data).await.is_err() {
-                    break;
-                }
-            }
-            Ok(msg) => {
-                handle_control_message(&msg);
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "server demux stream ended");
-                break;
-            }
-        }
-    }
-}
-
-/// Handle a control message from the multiplexed stream.
-fn handle_control_message(msg: &MplexMessage) {
-    match msg {
-        MplexMessage::Info(text) => {
-            tracing::info!(remote = %text.trim(), "remote info");
-        }
-        MplexMessage::Warning(text) => {
-            tracing::warn!(remote = %text.trim(), "remote warning");
-        }
-        MplexMessage::Error { code, text } => {
-            tracing::error!(code = ?code, remote = %text.trim(), "remote error");
-        }
-        MplexMessage::Log(text) => {
-            tracing::debug!(remote = %text.trim(), "remote log");
-        }
-        MplexMessage::Noop => {}
-        _ => {
-            tracing::trace!(msg = ?msg, "control message");
-        }
-    }
-}
+// Use the shared demux_task from protocol::multiplex.
+use crate::protocol::multiplex::demux_task;
 
 #[cfg(test)]
 mod tests {
@@ -1050,50 +920,19 @@ mod tests {
         assert_eq!(extract_client_info(&args), ".LsfxCIvu");
     }
 
-    #[tokio::test]
-    async fn test_handle_receive_read_only_error() {
+    #[test]
+    fn test_read_only_module_direction() {
+        // A read-only module accessed without --sender means server receives,
+        // but handle_receive_impl will reject it at runtime. Verify the
+        // direction is correctly parsed so `run()` dispatches properly.
         let module = make_test_module("readonly", true);
         let args = vec![
             "--server".to_string(),
-            "--sender".to_string(),
+            "-logDtprze.iLsfxCIvu".to_string(),
             ".".to_string(),
+            "path/".to_string(),
         ];
         let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
-
-        let (mut reader, mut writer) = tokio::io::split(tokio::io::duplex(1024).0);
-        let result = session.handle_receive(&mut reader, &mut writer).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            SessionError::Protocol { message } => {
-                assert!(message.contains("read-only"));
-            }
-            other => panic!("expected Protocol error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_handle_send_placeholder() {
-        let module = make_test_module("test", true);
-        let args = vec!["--server".to_string(), ".".to_string()];
-        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
-
-        let (mut reader, mut writer) = tokio::io::split(tokio::io::duplex(1024).0);
-        let result = session.handle_send(&mut reader, &mut writer).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_handle_receive_writable_placeholder() {
-        let module = make_test_module("writable", false);
-        let args = vec![
-            "--server".to_string(),
-            "--sender".to_string(),
-            ".".to_string(),
-        ];
-        let session = ServerSession::new(module, args, "127.0.0.1:12345".parse().unwrap());
-
-        let (mut reader, mut writer) = tokio::io::split(tokio::io::duplex(1024).0);
-        let result = session.handle_receive(&mut reader, &mut writer).await;
-        assert!(result.is_ok());
+        assert_eq!(session.direction(), TransferDirection::Receive);
     }
 }

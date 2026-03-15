@@ -33,7 +33,7 @@ fn bench_compress(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("zlib_6", size), &data, |b, data| {
             let mut comp = Compressor::new(6);
             b.iter(|| {
-                comp.reset();
+                comp.reset().unwrap();
                 comp.compress(data).unwrap()
             });
         });
@@ -41,7 +41,7 @@ fn bench_compress(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("zstd_3", size), &data, |b, data| {
             let mut comp = Compressor::new_zstd(3).unwrap();
             b.iter(|| {
-                comp.reset();
+                comp.reset().unwrap();
                 comp.compress(data).unwrap()
             });
         });
@@ -63,7 +63,7 @@ fn bench_compress(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("zlib_6", size), &data, |b, data| {
             let mut comp = Compressor::new(6);
             b.iter(|| {
-                comp.reset();
+                comp.reset().unwrap();
                 comp.compress(data).unwrap()
             });
         });
@@ -71,7 +71,7 @@ fn bench_compress(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("zstd_3", size), &data, |b, data| {
             let mut comp = Compressor::new_zstd(3).unwrap();
             b.iter(|| {
-                comp.reset();
+                comp.reset().unwrap();
                 comp.compress(data).unwrap()
             });
         });
@@ -104,7 +104,7 @@ fn bench_decompress(c: &mut Criterion) {
                 |b, compressed| {
                     let mut decomp = Decompressor::new();
                     b.iter(|| {
-                        decomp.reset();
+                        decomp.reset().unwrap();
                         decomp.decompress(compressed, size).unwrap()
                     });
                 },
@@ -121,7 +121,7 @@ fn bench_decompress(c: &mut Criterion) {
                 |b, compressed| {
                     let mut decomp = Decompressor::new_zstd().unwrap();
                     b.iter(|| {
-                        decomp.reset();
+                        decomp.reset().unwrap();
                         decomp.decompress(compressed, size).unwrap()
                     });
                 },

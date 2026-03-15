@@ -2,6 +2,7 @@
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::FsError;
 
@@ -9,6 +10,20 @@ use super::metadata::FileMetadata;
 use super::{DirEntry, FileSystem};
 
 type Result<T> = std::result::Result<T, FsError>;
+
+/// Atomic counter for generating unique temp file names.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a unique temp file name to avoid collisions from concurrent writes.
+fn unique_tmp_name(suffix: &str) -> String {
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        ".ferrosync.{}.{}{}.tmp",
+        std::process::id(),
+        seq,
+        suffix
+    )
+}
 
 /// Standard Unix filesystem implementation.
 #[derive(Debug, Default)]
@@ -74,7 +89,7 @@ impl FileSystem for UnixFileSystem {
     fn write_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
         // Write to a temp file in the same directory, then rename for atomicity.
         let parent = path.parent().unwrap_or(Path::new("."));
-        let tmp_name = format!(".ferrosync.{}.tmp", std::process::id());
+        let tmp_name = unique_tmp_name("");
         let tmp_path = parent.join(&tmp_name);
 
         std::fs::write(&tmp_path, data).map_err(|e| Self::map_io_err(&tmp_path, e))?;
@@ -264,7 +279,7 @@ impl FileSystem for UnixFileSystem {
         mode: Option<u32>,
     ) -> Result<Box<dyn std::io::Write + Send>> {
         let parent = path.parent().unwrap_or(Path::new("."));
-        let tmp_name = format!(".ferrosync.{}.stream.tmp", std::process::id());
+        let tmp_name = unique_tmp_name(".stream");
         let tmp_path = parent.join(&tmp_name);
         let dest_path = path.to_path_buf();
 
