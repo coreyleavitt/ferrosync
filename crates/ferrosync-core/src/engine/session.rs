@@ -287,9 +287,19 @@ async fn run_push(
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
     let mut mplex_out = MplexWriter::new(writer);
 
-    // 1. Send filter list.
+    // 1. Send filter list (exclude/include/filter rules).
     //
-    // TODO: Send filter list here for SSH/daemon transports.
+    // rsync's receiver reads the filter list before the file list.
+    // Even if there are no rules, we must send the terminator (4 zero bytes).
+    let filter_data = collect_filter_list(options)?;
+    mplex_out
+        .write_data(&filter_data)
+        .await
+        .map_err(crate::FerrosyncError::Protocol)?;
+    mplex_out
+        .flush()
+        .await
+        .map_err(crate::FerrosyncError::Protocol)?;
 
     // 2. Build and send file list.
     // DEBUG: print entries before send

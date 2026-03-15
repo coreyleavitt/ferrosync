@@ -498,9 +498,29 @@ impl ServerSession {
         let demux_handle = tokio::spawn(demux_task(reader, demux_write));
         let mut mplex_out = MplexWriter::new(writer);
 
-        // Note: filter list exchange is handled differently for daemon mode.
-        // The client sender does not expect a filter list from the server
-        // over daemon connections (unlike local --server mode). Omit it.
+        // Read and discard the client's filter list.
+        // The filter list is a series of (len: i32, rule: bytes) pairs
+        // terminated by len=0.
+        {
+            use tokio::io::AsyncReadExt;
+            loop {
+                let mut len_buf = [0u8; 4];
+                demux_read
+                    .read_exact(&mut len_buf)
+                    .await
+                    .map_err(SessionError::Io)?;
+                let rule_len = i32::from_le_bytes(len_buf);
+                if rule_len == 0 {
+                    break;
+                }
+                let abs_len = rule_len.unsigned_abs() as usize;
+                let mut discard = vec![0u8; abs_len];
+                demux_read
+                    .read_exact(&mut discard)
+                    .await
+                    .map_err(SessionError::Io)?;
+            }
+        }
 
         // Build TransferOptions for the file list decoder.
         let opts = TransferOptions::builder()
