@@ -340,6 +340,25 @@ struct SshClientHandler {
 impl client::Handler for SshClientHandler {
     type Error = SshHandlerError;
 
+    async fn extended_data(
+        &mut self,
+        _channel: russh::ChannelId,
+        ext: u32,
+        data: &[u8],
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        // ext=1 is stderr (SSH_EXTENDED_DATA_STDERR).
+        if ext == 1 {
+            let text = String::from_utf8_lossy(data);
+            for line in text.lines() {
+                if !line.is_empty() {
+                    tracing::warn!("remote: {}", line);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn check_server_key(
         &mut self,
         server_public_key: &PublicKey,
