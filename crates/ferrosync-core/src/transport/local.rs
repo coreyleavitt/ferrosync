@@ -159,6 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)] // Uses Unix absolute paths
     fn test_local_transport_args_sender() {
         let t = LocalTransport::new(
             None,
@@ -176,6 +177,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // Uses Unix absolute paths
     fn test_local_transport_args_receiver() {
         let t = LocalTransport::new(
             None,
