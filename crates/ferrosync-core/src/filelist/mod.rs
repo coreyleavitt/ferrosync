@@ -12,4 +12,5 @@ pub mod entry;
 pub mod exchange;
 pub mod incremental;
 pub mod sort;
+pub mod walk;
 pub mod xmit;

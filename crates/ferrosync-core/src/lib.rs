@@ -10,6 +10,8 @@
 //!
 //! ```ignore
 //! use ferrosync_core::prelude::*;
+//! use ferrosync_core::transport::daemon::{DaemonTransport, DaemonTransportConfig};
+//! use ferrosync_core::engine::session::build_server_options;
 //!
 //! let options = TransferOptions::builder()
 //!     .recursive(true)
@@ -18,7 +20,13 @@
 //!     .dest("/dst".into())
 //!     .build();
 //!
-//! let transport = LocalTransport::new(None, true, &server_opts, path);
+//! let config = DaemonTransportConfig {
+//!     host: "server".into(),
+//!     module: "data".into(),
+//!     ..Default::default()
+//! };
+//! let server_opts = build_server_options(&options, true);
+//! let transport = DaemonTransport::new(config, true, &server_opts);
 //! let session = SyncSession::new(transport, options, fs, SyncDirection::Push);
 //! let result = session.run().await?;
 //! ```

@@ -53,7 +53,15 @@ impl TransferPool {
         let mut handles = Vec::with_capacity(tasks.len());
 
         for task in tasks {
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| {
+                    tracing::error!("semaphore closed unexpectedly in TransferPool");
+                })
+                .ok();
+            let Some(permit) = permit else { break };
             let handle = tokio::spawn(async move {
                 let result = task.await;
                 drop(permit);
@@ -204,11 +212,13 @@ where
         let mut handles = Vec::new();
 
         while let Some(task) = rx.recv().await {
-            let permit = consumer_sem
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore closed unexpectedly");
+            let permit = match consumer_sem.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::error!("semaphore closed unexpectedly in concurrent pipeline");
+                    break;
+                }
+            };
             let fn_clone = Arc::clone(&consumer_fn);
             let res_clone = Arc::clone(&consumer_results);
             let idx = task.index;

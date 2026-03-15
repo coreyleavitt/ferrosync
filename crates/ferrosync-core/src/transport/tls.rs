@@ -421,13 +421,37 @@ async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W) -> Resu
     Ok(())
 }
 
+/// Read a single line from the daemon (up to `\n`), enforcing
+/// `MAX_LINE_LENGTH` *during* the read to prevent unbounded allocation
+/// from a malicious or malfunctioning peer.
 async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<String> {
-    let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line).await.map_err(io_err)?;
-    if bytes_read == 0 {
-        return Err(TransportError::ConnectionFailed {
-            message: "daemon closed connection unexpectedly".to_string(),
-        });
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(io_err)?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Err(TransportError::ConnectionFailed {
+                    message: "daemon closed connection unexpectedly".to_string(),
+                });
+            }
+            break;
+        }
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            line.extend_from_slice(&available[..=newline_pos]);
+            let consumed = newline_pos + 1;
+            reader.consume(consumed);
+            break;
+        }
+        let len = available.len();
+        line.extend_from_slice(available);
+        reader.consume(len);
+        if line.len() > MAX_LINE_LENGTH {
+            return Err(TransportError::ConnectionFailed {
+                message: format!(
+                    "daemon sent line exceeding maximum length ({MAX_LINE_LENGTH} bytes)"
+                ),
+            });
+        }
     }
     if line.len() > MAX_LINE_LENGTH {
         return Err(TransportError::ConnectionFailed {
@@ -437,13 +461,14 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result
             ),
         });
     }
-    if line.ends_with('\n') {
-        line.pop();
+    let mut s = String::from_utf8_lossy(&line).into_owned();
+    if s.ends_with('\n') {
+        s.pop();
     }
-    if line.ends_with('\r') {
-        line.pop();
+    if s.ends_with('\r') {
+        s.pop();
     }
-    Ok(line)
+    Ok(s)
 }
 
 fn io_err(e: std::io::Error) -> TransportError {

@@ -18,8 +18,6 @@ use std::path::Path;
 
 use md5::{Digest, Md5};
 
-// TODO: wire up after Phase 0b -- integrate with crate::error types
-
 /// Authentication-specific errors.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {

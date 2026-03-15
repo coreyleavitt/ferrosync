@@ -28,7 +28,7 @@ use ferrosync_core::transport::tls::{TlsDaemonConfig, TlsDaemonTransport};
                   user@host:path    SSH transport\n  \
                   host::module/path Daemon transport (port 873)\n  \
                   rsync://host/module/path  Daemon URL\n  \
-                  /local/path       Local transport (spawns rsync --server)"
+                  /local/path       Local transfer (direct engine)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -808,7 +808,16 @@ async fn run_transfer(
     paths: Vec<String>,
     opts: TransferFlags,
 ) -> Result<(), ferrosync_core::FerrosyncError> {
-    let dest_str = paths.last().unwrap();
+    let dest_str = match paths.last() {
+        Some(p) => p,
+        None => {
+            return Err(ferrosync_core::FerrosyncError::Transport(
+                ferrosync_core::error::TransportError::ConnectionFailed {
+                    message: "no destination path provided".to_string(),
+                },
+            ));
+        }
+    };
     let source_str = &paths[0]; // TODO: support multiple sources
 
     let source = parse_path(source_str);

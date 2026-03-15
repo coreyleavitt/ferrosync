@@ -36,7 +36,7 @@ pub async fn send_file_delta<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let sums = sum::read_sums(sig_reader).await?;
 
     // Match blocks.
-    let ops = matcher::match_blocks(source_data, &sums, seed, checksum_type);
+    let ops = matcher::match_blocks(source_data, &sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, true);
 
     // Write file index.
     varint::write_int(token_writer, file_index).await?;
@@ -59,7 +59,7 @@ pub async fn send_file_delta_with_sums<W: AsyncWrite + Unpin>(
     seed: i32,
     checksum_type: ChecksumType,
 ) -> Result<()> {
-    let ops = matcher::match_blocks(source_data, sums, seed, checksum_type);
+    let ops = matcher::match_blocks(source_data, sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, true);
 
     varint::write_int(token_writer, file_index).await?;
 
@@ -77,7 +77,7 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
     compressor: &mut Compressor,
 ) -> Result<()> {
     let sums = sum::read_sums(sig_reader).await?;
-    let ops = matcher::match_blocks(source_data, &sums, seed, checksum_type);
+    let ops = matcher::match_blocks(source_data, &sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, true);
 
     varint::write_int(token_writer, file_index).await?;
 
@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn test_send_file_delta_new_file() {
         let source = b"brand new file contents";
-        let sums = sum::compute_signatures(b"", 0, ChecksumType::Md5);
+        let sums = sum::compute_signatures(b"", 0, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
         let seed = 42;
 
         let mut buf = Vec::new();
@@ -172,7 +172,7 @@ mod tests {
         let source = basis.clone();
         let seed = 99;
 
-        let sums = sum::compute_signatures(&basis, seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(&basis, seed, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
         let mut sig_buf = Vec::new();
         sum::write_sums(&mut sig_buf, &sums).await.unwrap();
 

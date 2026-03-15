@@ -152,6 +152,11 @@ pub(crate) struct MplexReader<R> {
     /// Remaining bytes of the current MSG_DATA payload.
     #[allow(dead_code)]
     data_remaining: u32,
+    /// Buffered excess bytes from a Data message that didn't fit in the
+    /// caller's buffer during `read_data`. Read from this before `self.inner`.
+    buffered_data: Option<Bytes>,
+    /// Offset into `buffered_data` for partial consumption.
+    buffered_offset: usize,
 }
 
 impl<R: AsyncRead + Unpin> MplexReader<R> {
@@ -159,6 +164,8 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
         Self {
             inner,
             data_remaining: 0,
+            buffered_data: None,
+            buffered_offset: 0,
         }
     }
 
@@ -245,12 +252,18 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
         F: FnMut(MplexMessage),
     {
         loop {
-            // If we have data remaining from a previous frame, read from it.
-            if self.data_remaining > 0 {
-                let to_read = buf.len().min(self.data_remaining as usize);
-                self.inner.read_exact(&mut buf[..to_read]).await?;
-                self.data_remaining -= to_read as u32;
-                return Ok(to_read);
+            // If we have buffered data from a previous partial read, serve from it first.
+            if let Some(ref data) = self.buffered_data {
+                let remaining = data.len() - self.buffered_offset;
+                let to_copy = buf.len().min(remaining);
+                buf[..to_copy]
+                    .copy_from_slice(&data[self.buffered_offset..self.buffered_offset + to_copy]);
+                self.buffered_offset += to_copy;
+                if self.buffered_offset >= data.len() {
+                    self.buffered_data = None;
+                    self.buffered_offset = 0;
+                }
+                return Ok(to_copy);
             }
 
             // Read next message.
@@ -259,9 +272,9 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
                     let to_copy = buf.len().min(data.len());
                     buf[..to_copy].copy_from_slice(&data[..to_copy]);
                     if data.len() > to_copy {
-                        // This shouldn't happen with read_message returning full
-                        // payloads, but handle it gracefully.
-                        self.data_remaining = (data.len() - to_copy) as u32;
+                        // Buffer excess bytes for subsequent read_data calls.
+                        self.buffered_data = Some(data);
+                        self.buffered_offset = to_copy;
                     }
                     return Ok(to_copy);
                 }
@@ -359,6 +372,61 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     pub async fn shutdown(&mut self) -> Result<()> {
         self.inner.shutdown().await?;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared demux task and control message handler
+// ---------------------------------------------------------------------------
+
+/// Background task that reads multiplexed frames from the wire and forwards
+/// MSG_DATA payloads to a pipe. Control messages are logged/handled separately.
+///
+/// This allows protocol code to read from the pipe as a plain `AsyncRead`
+/// stream, transparently demultiplexing data from control messages.
+pub(crate) async fn demux_task<R: AsyncRead + Unpin>(
+    reader: R,
+    mut pipe: tokio::io::DuplexStream,
+) {
+    let mut mplex = MplexReader::new(reader);
+
+    loop {
+        match mplex.read_message().await {
+            Ok(MplexMessage::Data(data)) => {
+                if AsyncWriteExt::write_all(&mut pipe, &data).await.is_err() {
+                    break;
+                }
+            }
+            Ok(msg) => {
+                handle_control_message(&msg);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "demux stream ended");
+                break;
+            }
+        }
+    }
+}
+
+/// Handle a control message from the multiplexed stream.
+pub(crate) fn handle_control_message(msg: &MplexMessage) {
+    match msg {
+        MplexMessage::Info(text) => {
+            tracing::info!(remote = %text.trim(), "remote info");
+        }
+        MplexMessage::Warning(text) => {
+            tracing::warn!(remote = %text.trim(), "remote warning");
+        }
+        MplexMessage::Error { code, text } => {
+            tracing::error!(code = ?code, remote = %text.trim(), "remote error");
+        }
+        MplexMessage::Log(text) => {
+            tracing::debug!(remote = %text.trim(), "remote log");
+        }
+        MplexMessage::Noop => {}
+        _ => {
+            tracing::trace!(msg = ?msg, "control message");
+        }
     }
 }
 
@@ -533,6 +601,33 @@ mod tests {
             MplexMessage::Info(t) => assert_eq!(t, "skip me"),
             other => panic!("expected Info, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_read_data_partial_buffer_preserves_excess() {
+        // Issue #58: when read_data's buffer is smaller than the Data payload,
+        // the excess bytes must be buffered and returned on the next call.
+        let mut buf = Vec::new();
+        let mut writer = MplexWriter::new(&mut buf);
+        writer.write_data(b"hello world!").await.unwrap();
+
+        let mut reader = MplexReader::new(Cursor::new(&buf));
+
+        // Read with a 5-byte buffer -- smaller than the 12-byte payload.
+        let mut small_buf = [0u8; 5];
+        let n = reader.read_data(&mut small_buf, |_| {}).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&small_buf[..n], b"hello");
+
+        // Second read should return the buffered excess bytes.
+        let n = reader.read_data(&mut small_buf, |_| {}).await.unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&small_buf[..n], b" worl");
+
+        // Third read returns the remaining 2 bytes.
+        let n = reader.read_data(&mut small_buf, |_| {}).await.unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(&small_buf[..n], b"d!");
     }
 
     #[tokio::test]

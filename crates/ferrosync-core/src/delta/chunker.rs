@@ -67,7 +67,9 @@ pub fn chunk_data(data: &[u8], strategy: &ChunkingStrategy) -> Vec<ChunkInfo> {
     match strategy {
         ChunkingStrategy::Fixed { block_size } => {
             let bs = *block_size;
-            assert!(bs > 0, "block_size must be positive");
+            if bs == 0 {
+                return Vec::new();
+            }
             let mut chunks = Vec::new();
             let mut offset = 0;
             while offset < data.len() {

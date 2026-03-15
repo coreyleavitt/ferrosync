@@ -206,8 +206,9 @@ impl ZstdCompressor {
         Ok(output)
     }
 
-    fn reset(&mut self) {
-        self.cctx.reinit().ok();
+    fn reset(&mut self) -> Result<()> {
+        self.cctx.reinit().map_err(ProtocolError::from)?;
+        Ok(())
     }
 }
 
@@ -244,8 +245,9 @@ impl ZstdDecompressor {
         Ok(output)
     }
 
-    fn reset(&mut self) {
-        self.dctx.reinit().ok();
+    fn reset(&mut self) -> Result<()> {
+        self.dctx.reinit().map_err(ProtocolError::from)?;
+        Ok(())
     }
 }
 
@@ -355,11 +357,14 @@ impl Compressor {
     }
 
     /// Reset the compressor for a new file (zlibx mode, or zstd reset).
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<()> {
         match &mut self.inner {
-            CompressorKind::Zlib(c) => c.reset(),
+            CompressorKind::Zlib(c) => {
+                c.reset();
+                Ok(())
+            }
             CompressorKind::Zstd(c) => c.reset(),
-            CompressorKind::Lz4(_) => {} // lz4 is stateless per block
+            CompressorKind::Lz4(_) => Ok(()), // lz4 is stateless per block
         }
     }
 }
@@ -423,11 +428,14 @@ impl Decompressor {
     }
 
     /// Reset the decompressor for a new file (zlibx mode, or zstd reset).
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<()> {
         match &mut self.inner {
-            DecompressorKind::Zlib(d) => d.reset(),
+            DecompressorKind::Zlib(d) => {
+                d.reset();
+                Ok(())
+            }
             DecompressorKind::Zstd(d) => d.reset(),
-            DecompressorKind::Lz4(_) => {} // lz4 is stateless per block
+            DecompressorKind::Lz4(_) => Ok(()), // lz4 is stateless per block
         }
     }
 }
@@ -499,8 +507,8 @@ mod tests {
         let decompressed = decompressor.decompress(&compressed, data.len()).unwrap();
         assert_eq!(decompressed, data);
 
-        compressor.reset();
-        decompressor.reset();
+        compressor.reset().unwrap();
+        decompressor.reset().unwrap();
 
         let data2 = b"different file data";
         let compressed2 = compressor.compress(data2).unwrap();
@@ -609,8 +617,8 @@ mod tests {
         let decompressed = decompressor.decompress(&compressed, data.len()).unwrap();
         assert_eq!(decompressed, data.as_slice());
 
-        compressor.reset();
-        decompressor.reset();
+        compressor.reset().unwrap();
+        decompressor.reset().unwrap();
 
         let data2 = b"data after reset";
         let compressed2 = compressor.compress(data2).unwrap();

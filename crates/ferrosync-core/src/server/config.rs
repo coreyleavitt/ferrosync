@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
-// TODO: wire up after Phase 0b -- use proper error types
 /// Config-specific error type.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

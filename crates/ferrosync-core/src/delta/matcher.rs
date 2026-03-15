@@ -29,11 +29,18 @@ pub enum MatchOp {
 ///
 /// Returns a sequence of `MatchOp` values representing the delta between
 /// the basis (described by `sums`) and the `source` data.
+///
+/// - `char_offset`: rolling checksum character offset (0 for protocol >= 30,
+///   31 for older protocols).
+/// - `proper_seed_order`: if true, seed is hashed before data in the strong
+///   checksum (protocol >= 30 with `CF_CHKSUM_SEED_FIX`).
 pub fn match_blocks(
     source: &[u8],
     sums: &SumStruct,
     seed: i32,
     checksum_type: ChecksumType,
+    char_offset: u32,
+    proper_seed_order: bool,
 ) -> Vec<MatchOp> {
     let mut ops = Vec::new();
 
@@ -48,7 +55,6 @@ pub fn match_blocks(
 
     let blength = sums.head.blength as usize;
     let s2length = sums.head.s2length as usize;
-    let char_offset = checksum::CHAR_OFFSET_V30;
 
     let hash_table = build_hash_table(&sums.sums);
     let mut rolling = RollingChecksum::new(char_offset);
@@ -74,7 +80,7 @@ pub fn match_blocks(
 
         if let Some(candidates) = hash_table.get(&digest) {
             let window = &source[pos..pos + blength];
-            let strong = checksum::checksum2(window, seed, checksum_type, true);
+            let strong = checksum::checksum2(window, seed, checksum_type, proper_seed_order);
             let strong_truncated = &strong[..s2length.min(strong.len())];
 
             for &idx in candidates {
@@ -164,13 +170,14 @@ pub fn apply_ops(basis: &[u8], ops: &[MatchOp], blength: usize, remainder: usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::checksum::CHAR_OFFSET_V30;
     use crate::delta::sum::compute_signatures;
 
     #[test]
     fn test_identical_files() {
         let data = vec![42u8; 5000];
-        let sums = compute_signatures(&data, 99, ChecksumType::Md5);
-        let ops = match_blocks(&data, &sums, 99, ChecksumType::Md5);
+        let sums = compute_signatures(&data, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = match_blocks(&data, &sums, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         // All blocks should match.
         let match_count = ops
@@ -200,8 +207,8 @@ mod tests {
     fn test_completely_different_files() {
         let basis = vec![0u8; 5000];
         let source = vec![0xFFu8; 5000];
-        let sums = compute_signatures(&basis, 99, ChecksumType::Md5);
-        let ops = match_blocks(&source, &sums, 99, ChecksumType::Md5);
+        let sums = compute_signatures(&basis, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = match_blocks(&source, &sums, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         // No blocks should match -- all literal.
         let match_count = ops
@@ -224,8 +231,8 @@ mod tests {
     #[test]
     fn test_apply_ops_identical() {
         let data = vec![42u8; 5000];
-        let sums = compute_signatures(&data, 99, ChecksumType::Md5);
-        let ops = match_blocks(&data, &sums, 99, ChecksumType::Md5);
+        let sums = compute_signatures(&data, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = match_blocks(&data, &sums, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         let reconstructed = apply_ops(
             &data,
@@ -248,8 +255,8 @@ mod tests {
         source[2500] = 0xFF;
         source[2501] = 0xFF;
 
-        let sums = compute_signatures(&basis, 42, ChecksumType::Md5);
-        let ops = match_blocks(&source, &sums, 42, ChecksumType::Md5);
+        let sums = compute_signatures(&basis, 42, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = match_blocks(&source, &sums, 42, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         let reconstructed = apply_ops(
             &basis,
@@ -263,15 +270,15 @@ mod tests {
     #[test]
     fn test_empty_source() {
         let basis = vec![0u8; 1000];
-        let sums = compute_signatures(&basis, 0, ChecksumType::Md5);
-        let ops = match_blocks(b"", &sums, 0, ChecksumType::Md5);
+        let sums = compute_signatures(&basis, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = match_blocks(b"", &sums, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         assert!(ops.is_empty());
     }
 
     #[test]
     fn test_empty_basis() {
-        let sums = compute_signatures(b"", 0, ChecksumType::Md5);
-        let ops = match_blocks(b"hello", &sums, 0, ChecksumType::Md5);
+        let sums = compute_signatures(b"", 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = match_blocks(b"hello", &sums, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         // Should be all literal.
         assert_eq!(ops.len(), 1);
@@ -281,9 +288,9 @@ mod tests {
     #[test]
     fn test_source_smaller_than_block() {
         let basis = vec![0u8; 5000];
-        let sums = compute_signatures(&basis, 0, ChecksumType::Md5);
+        let sums = compute_signatures(&basis, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         // Source is smaller than one block.
-        let ops = match_blocks(b"tiny", &sums, 0, ChecksumType::Md5);
+        let ops = match_blocks(b"tiny", &sums, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0], MatchOp::Data(b"tiny".to_vec()));
     }
@@ -302,7 +309,7 @@ mod tests {
         for i in 0..10 {
             basis.extend(vec![i as u8; 700]);
         }
-        let sums = compute_signatures(&basis, 55, ChecksumType::Md5);
+        let sums = compute_signatures(&basis, 55, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         // Source: first block + "INSERTED" + second block + rest.
         let mut source = Vec::new();
@@ -310,7 +317,7 @@ mod tests {
         source.extend(b"INSERTED");
         source.extend(&basis[700..]);
 
-        let ops = match_blocks(&source, &sums, 55, ChecksumType::Md5);
+        let ops = match_blocks(&source, &sums, 55, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         let reconstructed = apply_ops(
             &basis,
             &ops,

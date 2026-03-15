@@ -3,9 +3,8 @@
 //! The [`Transport`] trait abstracts how we connect to a remote rsync process.
 //! Implementations handle:
 //!
-//! - **Local:** Spawn `rsync --server` as a child process, pipe via stdin/stdout.
-//! - **SSH:** Spawn `ssh <host> rsync --server ...` (Phase 6).
-//! - **Daemon:** TCP connection to port 873 (Phase 6).
+//! - **SSH:** Spawn `ssh <host> rsync --server ...` for remote transfers.
+//! - **Daemon:** TCP connection to port 873 for rsync daemon protocol.
 
 pub mod daemon;
 pub mod noise;

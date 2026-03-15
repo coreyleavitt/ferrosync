@@ -19,7 +19,6 @@ use super::auth;
 use super::module::ModuleRegistry;
 use super::session::ServerSession;
 
-// TODO: wire up after Phase 0b -- use crate::error types
 /// Listener-specific error type.
 #[derive(Debug, thiserror::Error)]
 pub enum ListenerError {

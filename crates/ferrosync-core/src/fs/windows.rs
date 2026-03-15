@@ -4,6 +4,7 @@ use std::fs::{self, FileTimes, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::FsError;
@@ -29,6 +30,20 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 /// Windows file attribute: reparse point (symlinks, junctions).
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+/// Atomic counter for generating unique temp file names.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a unique temp file name to avoid collisions from concurrent writes.
+fn unique_tmp_name(suffix: &str) -> String {
+    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        ".ferrosync.{}.{}{}.tmp",
+        std::process::id(),
+        seq,
+        suffix
+    )
+}
 
 /// Standard Windows filesystem implementation.
 #[derive(Debug, Default)]
@@ -135,7 +150,7 @@ impl FileSystem for WindowsFileSystem {
 
     fn write_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
         let parent = path.parent().unwrap_or(Path::new("."));
-        let tmp_name = format!(".ferrosync.{}.tmp", std::process::id());
+        let tmp_name = unique_tmp_name("");
         let tmp_path = parent.join(&tmp_name);
 
         fs::write(&tmp_path, data).map_err(|e| Self::map_io_err(&tmp_path, e))?;
@@ -358,7 +373,7 @@ impl FileSystem for WindowsFileSystem {
         mode: Option<u32>,
     ) -> Result<Box<dyn std::io::Write + Send>> {
         let parent = path.parent().unwrap_or(Path::new("."));
-        let tmp_name = format!(".ferrosync.{}.stream.tmp", std::process::id());
+        let tmp_name = unique_tmp_name(".stream");
         let tmp_path = parent.join(&tmp_name);
         let dest_path = path.to_path_buf();
 

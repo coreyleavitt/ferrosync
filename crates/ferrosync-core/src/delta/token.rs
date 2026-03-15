@@ -188,7 +188,7 @@ impl CompressedTokenWriter {
     ) -> Result<()> {
         if self.last_token == -1 {
             // Initialization for new file.
-            self.compressor.reset();
+            self.compressor.reset()?;
             self.last_run_end = 0;
             self.run_start = token;
             self.flush_pending = false;
@@ -346,7 +346,7 @@ impl CompressedTokenReader {
         loop {
             match self.state {
                 CompressRecvState::Init => {
-                    self.decompressor.reset();
+                    self.decompressor.reset()?;
                     self.state = CompressRecvState::Idle;
                     self.rx_token = 0;
                 }
@@ -499,6 +499,12 @@ pub async fn send_eof_compressed<W: AsyncWrite + Unpin>(w: &mut W) -> Result<()>
 ///
 /// Uses rsync's compressed wire format with flag bytes.
 /// Works with all decompression backends (zlib, zstd, lz4).
+///
+/// **Note:** This simple API cannot correctly decode `TOKEN_REL` or
+/// `TOKENRUN_REL`/`TOKENRUN_LONG` tokens because they require stateful
+/// tracking of the last block index. If a relative or run token is
+/// encountered, this function returns an error. Use
+/// [`CompressedTokenReader`] for full support of all compressed token types.
 pub async fn recv_token_compressed<R: AsyncRead + Unpin>(
     r: &mut R,
     decompressor: &mut Decompressor,
@@ -536,22 +542,29 @@ pub async fn recv_token_compressed<R: AsyncRead + Unpin>(
     }
 
     // Block match token.
-    let block_index = if flag & TOKEN_REL != 0 {
-        // Relative token -- but for the simple API we treat as absolute
-        // (the stateful API is CompressedTokenReader).
-        // TOKEN_REL encodes: flag & 0x3F = relative offset, but without
-        // state tracking we read the raw index. For rsync interop, use
-        // CompressedTokenReader instead.
-        //
-        // For backward compat with the simple API, use TOKEN_LONG decoding.
-        // Note: the simple recv_token_compressed API doesn't support
-        // relative/run encoding -- use CompressedTokenReader for full support.
-        (flag & 0x3F) as i32
-    } else {
-        // TOKEN_LONG: read 4-byte absolute index.
-        varint::read_int(r).await?
-    };
+    if flag & TOKEN_REL != 0 {
+        // TOKEN_REL and TOKENRUN_REL encode a relative offset from the
+        // last block index. The simple stateless API cannot resolve these;
+        // callers must use CompressedTokenReader instead.
+        return Err(ProtocolError::Handshake {
+            message: "recv_token_compressed: TOKEN_REL requires stateful decoding; \
+                      use CompressedTokenReader instead"
+                .to_string(),
+        });
+    }
 
+    if flag == TOKENRUN_LONG {
+        // TOKENRUN_LONG encodes a run of consecutive block matches.
+        // The simple stateless API cannot track run state.
+        return Err(ProtocolError::Handshake {
+            message: "recv_token_compressed: TOKENRUN_LONG requires stateful decoding; \
+                      use CompressedTokenReader instead"
+                .to_string(),
+        });
+    }
+
+    // TOKEN_LONG: read absolute index.
+    let block_index = varint::read_int(r).await?;
     Ok(Token::BlockMatch(block_index))
 }
 
@@ -763,6 +776,22 @@ mod tests {
         assert_eq!(
             reader.recv_token(&mut cursor).await.unwrap(),
             Token::EndOfFile,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recv_token_compressed_rejects_token_rel() {
+        // Issue #60: the simple recv_token_compressed API must not silently
+        // return wrong indices for TOKEN_REL. It should return an error.
+        let mut buf = vec![TOKEN_REL + 5]; // TOKEN_REL with offset=5
+        buf.push(END_FLAG); // followed by EOF
+
+        let mut decompressor = Decompressor::new();
+        let mut cursor = Cursor::new(&buf);
+        let result = recv_token_compressed(&mut cursor, &mut decompressor).await;
+        assert!(
+            result.is_err(),
+            "TOKEN_REL should error in simple API, got: {result:?}"
         );
     }
 

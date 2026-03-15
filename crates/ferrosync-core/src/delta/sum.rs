@@ -89,7 +89,18 @@ pub fn compute_s2length(file_len: i64, blength: i32) -> i32 {
 }
 
 /// Compute block signatures for a file.
-pub fn compute_signatures(data: &[u8], seed: i32, checksum_type: ChecksumType) -> SumStruct {
+///
+/// - `char_offset`: rolling checksum character offset (0 for protocol >= 30,
+///   31 for older protocols).
+/// - `proper_seed_order`: if true, seed is hashed before data in the strong
+///   checksum (protocol >= 30 with `CF_CHKSUM_SEED_FIX`).
+pub fn compute_signatures(
+    data: &[u8],
+    seed: i32,
+    checksum_type: ChecksumType,
+    char_offset: u32,
+    proper_seed_order: bool,
+) -> SumStruct {
     if data.is_empty() {
         return SumStruct {
             head: SumHead::default(),
@@ -100,7 +111,6 @@ pub fn compute_signatures(data: &[u8], seed: i32, checksum_type: ChecksumType) -
     let file_len = data.len() as i64;
     let blength = compute_block_length(file_len);
     let s2length = compute_s2length(file_len, blength);
-    let char_offset = checksum::CHAR_OFFSET_V30;
 
     let mut sums = Vec::new();
     let mut offset = 0usize;
@@ -109,7 +119,7 @@ pub fn compute_signatures(data: &[u8], seed: i32, checksum_type: ChecksumType) -
         let block = &data[offset..end];
 
         let sum1 = checksum::checksum1(block, char_offset);
-        let strong = checksum::checksum2(block, seed, checksum_type, true);
+        let strong = checksum::checksum2(block, seed, checksum_type, proper_seed_order);
         let sum2 = strong[..s2length as usize].to_vec();
 
         sums.push(SumEntry {
@@ -148,6 +158,8 @@ pub fn compute_signatures_cdc(
     seed: i32,
     checksum_type: ChecksumType,
     strategy: &ChunkingStrategy,
+    char_offset: u32,
+    proper_seed_order: bool,
 ) -> SumStruct {
     if data.is_empty() {
         return SumStruct {
@@ -168,14 +180,13 @@ pub fn compute_signatures_cdc(
 
     let file_len = data.len() as i64;
     let s2length = compute_s2length(file_len, blength);
-    let char_offset = checksum::CHAR_OFFSET_V30;
 
     let mut sums = Vec::with_capacity(chunks.len());
     for chunk in &chunks {
         let block = &data[chunk.offset..chunk.offset + chunk.length];
 
         let sum1 = checksum::checksum1(block, char_offset);
-        let strong = checksum::checksum2(block, seed, checksum_type, true);
+        let strong = checksum::checksum2(block, seed, checksum_type, proper_seed_order);
         let sum2 = strong[..s2length as usize].to_vec();
 
         let block_len = if is_cdc {
@@ -375,6 +386,7 @@ pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
 mod tests {
     use super::super::chunker::ChunkingStrategy;
     use super::*;
+    use crate::delta::checksum::CHAR_OFFSET_V30;
     use std::io::Cursor;
 
     #[test]
@@ -405,7 +417,7 @@ mod tests {
 
     #[test]
     fn test_compute_signatures_empty() {
-        let sums = compute_signatures(b"", 0, ChecksumType::Md5);
+        let sums = compute_signatures(b"", 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         assert_eq!(sums.head.count, 0);
         assert!(sums.sums.is_empty());
     }
@@ -413,7 +425,7 @@ mod tests {
     #[test]
     fn test_compute_signatures_basic() {
         let data = vec![0u8; 2000];
-        let sums = compute_signatures(&data, 42, ChecksumType::Md5);
+        let sums = compute_signatures(&data, 42, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         assert!(sums.head.count > 0);
         assert_eq!(sums.sums.len(), sums.head.count as usize);
         for entry in &sums.sums {
@@ -441,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn test_sums_roundtrip() {
         let data = vec![42u8; 5000];
-        let sums = compute_signatures(&data, 99, ChecksumType::Md5);
+        let sums = compute_signatures(&data, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         let mut buf = Vec::new();
         write_sums(&mut buf, &sums).await.unwrap();
@@ -478,13 +490,13 @@ mod tests {
         // CDC with Fixed strategy should produce the same results as
         // compute_signatures (except block_len is None in both cases).
         let data = vec![0u8; 5000];
-        let original = compute_signatures(&data, 42, ChecksumType::Md5);
+        let original = compute_signatures(&data, 42, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         let blength = compute_block_length(data.len() as i64);
         let strategy = ChunkingStrategy::Fixed {
             block_size: blength as usize,
         };
-        let cdc = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy);
+        let cdc = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
 
         assert_eq!(cdc.head, original.head);
         assert_eq!(cdc.sums.len(), original.sums.len());
@@ -499,7 +511,7 @@ mod tests {
     fn test_compute_signatures_cdc_variable_blocks() {
         let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let strategy = ChunkingStrategy::default_cdc();
-        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy);
+        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
 
         assert!(sums.head.count > 0);
         assert_eq!(sums.sums.len(), sums.head.count as usize);
@@ -518,7 +530,7 @@ mod tests {
     #[test]
     fn test_compute_signatures_cdc_empty() {
         let strategy = ChunkingStrategy::default_cdc();
-        let sums = compute_signatures_cdc(b"", 0, ChecksumType::Md5, &strategy);
+        let sums = compute_signatures_cdc(b"", 0, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
         assert_eq!(sums.head.count, 0);
         assert!(sums.sums.is_empty());
     }
@@ -527,7 +539,7 @@ mod tests {
     async fn test_cdc_sums_roundtrip() {
         let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let strategy = ChunkingStrategy::default_cdc();
-        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy);
+        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
 
         let mut buf = Vec::new();
         write_sums_cdc(&mut buf, &sums).await.unwrap();
@@ -548,7 +560,7 @@ mod tests {
     async fn test_fixed_sums_roundtrip_no_block_len() {
         // Fixed-block sums should round-trip without per-block lengths.
         let data = vec![42u8; 5000];
-        let sums = compute_signatures(&data, 99, ChecksumType::Md5);
+        let sums = compute_signatures(&data, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
 
         let mut buf = Vec::new();
         write_sums(&mut buf, &sums).await.unwrap();
@@ -567,7 +579,7 @@ mod tests {
         // When using Fixed strategy (rsync compat), block_len should be None.
         let data = vec![0u8; 10_000];
         let strategy = ChunkingStrategy::Fixed { block_size: 700 };
-        let sums = compute_signatures_cdc(&data, 0, ChecksumType::Md5, &strategy);
+        let sums = compute_signatures_cdc(&data, 0, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
 
         for entry in &sums.sums {
             assert_eq!(
