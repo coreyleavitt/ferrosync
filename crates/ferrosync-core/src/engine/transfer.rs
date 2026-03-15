@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::delta::checksum;
 use crate::error::FsError;
-use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT, S_IFREG};
+use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
 use crate::filter::FilterRuleList;
 use crate::fs::{DirEntry, FileSystem, STREAMING_THRESHOLD};
 use crate::options::{DeleteMode, TransferOptions};
@@ -299,7 +299,8 @@ async fn execute_transfer_impl(
         // Checksum mode: compare file-level checksums.
         if options.checksum_mode() {
             if let Ok(dest_data) = fs.read_file(&dest_path) {
-                let src_sum = checksum::file_checksum(&item.source_data, seed, checksum_type);
+                let src_data = fs.read_file(&item.source_path)?;
+                let src_sum = checksum::file_checksum(&src_data, seed, checksum_type);
                 let dst_sum = checksum::file_checksum(&dest_data, seed, checksum_type);
                 if src_sum == dst_sum {
                     stats.files_skipped += 1;
@@ -346,8 +347,9 @@ async fn execute_transfer_impl(
         // --append: if dest exists and source is longer, only transfer the tail.
         if options.append() && !basis_data.is_empty() {
             let dest_len = basis_data.len();
-            if item.source_data.len() > dest_len {
-                let append_data = &item.source_data[dest_len..];
+            let source_data = fs.read_file(&item.source_path)?;
+            if source_data.len() > dest_len {
+                let append_data = &source_data[dest_len..];
                 let mode = if options.preserve_perms() {
                     Some(item.entry.mode & 0o7777)
                 } else {
@@ -379,13 +381,16 @@ async fn execute_transfer_impl(
             }
         }
 
+        // Read the source file on-demand for the transfer.
+        let source_data = fs.read_file(&item.source_path)?;
+
         // Transfer via delta pipeline.
         let result_data = if options.whole_file() || basis_data.is_empty() {
-            // Whole-file mode or no basis: just copy the data.
-            item.source_data.clone()
+            // Whole-file mode or no basis: use the data directly.
+            source_data
         } else if options.compress() {
             pipeline::transfer_file_compressed(
-                &item.source_data,
+                &source_data,
                 &basis_data,
                 seed,
                 checksum_type,
@@ -394,7 +399,7 @@ async fn execute_transfer_impl(
             .await
             .map_err(crate::FerrosyncError::Protocol)?
         } else {
-            pipeline::transfer_file(&item.source_data, &basis_data, seed, checksum_type)
+            pipeline::transfer_file(&source_data, &basis_data, seed, checksum_type)
                 .await
                 .map_err(crate::FerrosyncError::Protocol)?
         };
@@ -660,7 +665,7 @@ async fn execute_transfer_streaming_impl(
 struct FileListItem {
     index: i32,
     entry: FileEntry,
-    source_data: Vec<u8>,
+    source_path: PathBuf,
 }
 
 /// Build a file list from one or more source paths.
@@ -705,12 +710,6 @@ fn build_file_list(
                 collect_directory(fs, source, &[], &mut items, &mut index, filters, root_dev)?;
             }
         } else {
-            let source_data = if meta.mode & S_IFMT == S_IFREG {
-                fs.read_file(source)?
-            } else {
-                Vec::new()
-            };
-
             let mut entry = meta.to_file_entry(name);
             if meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == s_iflnk() {
                 entry.link_target = fs.read_link(source).unwrap_or_default();
@@ -719,7 +718,7 @@ fn build_file_list(
             items.push(FileListItem {
                 index,
                 entry,
-                source_data,
+                source_path: source.to_path_buf(),
             });
             index += 1;
         }
@@ -761,7 +760,7 @@ fn collect_directory(
     items.push(FileListItem {
         index: *index,
         entry: dir_meta.to_file_entry(dir_name),
-        source_data: Vec::new(),
+        source_path: dir_path.to_path_buf(),
     });
     *index += 1;
 
@@ -798,12 +797,6 @@ fn collect_directory(
                 root_dev,
             )?;
         } else {
-            let source_data = if dir_entry.metadata.mode & S_IFMT == S_IFREG {
-                fs.read_file(&child_path)?
-            } else {
-                Vec::new()
-            };
-
             let mut entry = dir_entry.metadata.to_file_entry(child_name);
             if dir_entry.metadata.mode & S_IFMT == entry::WIRE_S_IFLNK
                 || dir_entry.metadata.mode & S_IFMT == s_iflnk()
@@ -814,7 +807,7 @@ fn collect_directory(
             items.push(FileListItem {
                 index: *index,
                 entry,
-                source_data,
+                source_path: child_path,
             });
             *index += 1;
         }
@@ -869,16 +862,10 @@ fn build_file_list_from_file(
             Err(_) => continue, // skip missing files
         };
 
-        let source_data = if meta.mode & entry::S_IFMT == entry::S_IFREG {
-            fs.read_file(&full_path)?
-        } else {
-            Vec::new()
-        };
-
         items.push(FileListItem {
             index,
             entry: meta.to_file_entry(name),
-            source_data,
+            source_path: full_path,
         });
         index += 1;
     }

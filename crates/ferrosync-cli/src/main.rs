@@ -590,12 +590,33 @@ async fn run_sync(
     match remote {
         RemotePath::Local(remote_path) => {
             // Local-to-local: use the transfer engine directly, no subprocess.
+            let verbose = flags.verbose;
             let (source, dest) = match direction {
                 SyncDirection::Push => (local_path, remote_path),
                 SyncDirection::Pull => (remote_path, local_path),
             };
             let opts = flags.into_transfer_options(source, dest);
-            let mut progress = ferrosync_core::engine::progress::ProgressTracker::new();
+            let mut progress = if verbose > 0 {
+                ferrosync_core::engine::progress::ProgressTracker::with_callback(Box::new(
+                    move |event| {
+                        use ferrosync_core::engine::progress::ProgressEvent;
+                        match event {
+                            ProgressEvent::FileStart { name, .. } => {
+                                eprintln!("{}", name.display());
+                            }
+                            ProgressEvent::FileDeleted { name } => {
+                                eprintln!("*deleting   {}", name.display());
+                            }
+                            ProgressEvent::FileItemized { name, changes, .. } => {
+                                eprintln!("{} {}", changes, name.display());
+                            }
+                            _ => {}
+                        }
+                    },
+                ))
+            } else {
+                ferrosync_core::engine::progress::ProgressTracker::new()
+            };
             let seed = 0; // No wire handshake, use deterministic seed.
             let checksum_type = ferrosync_core::protocol::handshake::ChecksumType::Blake3;
             let result = ferrosync_core::engine::transfer::execute_transfer(
