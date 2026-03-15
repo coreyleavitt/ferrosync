@@ -1134,7 +1134,7 @@ fn delete_extraneous_in_dir(
     Ok(deleted)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::delta::chunker::ChunkingStrategy;
