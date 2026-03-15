@@ -14,15 +14,15 @@ use std::path::PathBuf;
 
 use tokio::io::AsyncRead;
 
-use crate::delta::checksum;
-use crate::delta::sum;
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
-use crate::engine::receiver;
-use crate::error::{FsError, ProtocolError};
+use crate::engine::wire_transfer::{
+    self, LocalFileOps, LocalFileReader,
+};
+use crate::error::FsError;
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
-use crate::fs::{FileSystem, STREAMING_THRESHOLD};
+use crate::fs::FileSystem;
 use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
 use crate::protocol::multiplex::MplexWriter;
@@ -149,6 +149,86 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
     }
 
     s
+}
+
+/// Parse the condensed option string from `rsync --server` arguments.
+///
+/// This is the inverse of [`build_server_options`]. The server uses it to
+/// reconstruct a [`TransferOptions`] from the flags the client sent. The
+/// `module_path` is used as the dest (for receive) or source (for send).
+pub fn parse_server_args(args: &[String], module_path: std::path::PathBuf, am_sender: bool) -> TransferOptions {
+    let mut builder = TransferOptions::builder();
+
+    // Find the condensed option string (starts with `-`, not `--`).
+    let mut condensed = "";
+    let mut long_opts: Vec<&str> = Vec::new();
+    for arg in args {
+        if arg == "--server" || arg == "--sender" || arg == "." {
+            continue;
+        }
+        if arg.starts_with("--") {
+            long_opts.push(arg);
+        } else if arg.starts_with('-') && condensed.is_empty() {
+            condensed = arg;
+        }
+    }
+
+    // Parse single-char flags (everything before 'e' which starts the
+    // capability string).
+    let flags_part = if let Some(pos) = condensed.find('e') {
+        &condensed[1..pos]
+    } else {
+        &condensed[1..]
+    };
+
+    for ch in flags_part.chars() {
+        match ch {
+            'l' => { builder = builder.preserve_links(true); }
+            'o' => { builder = builder.preserve_owner(true); }
+            'g' => { builder = builder.preserve_group(true); }
+            'D' => { builder = builder.preserve_devices(true).preserve_specials(true); }
+            't' => { builder = builder.preserve_times(true); }
+            'p' => { builder = builder.preserve_perms(true); }
+            'r' => { builder = builder.recursive(true); }
+            'z' => { builder = builder.compress(true); }
+            'c' => { builder = builder.checksum_mode(true); }
+            'u' => { builder = builder.update(true); }
+            'n' => { builder = builder.dry_run(true); }
+            'W' => { builder = builder.whole_file(true); }
+            'x' => { builder = builder.one_file_system(true); }
+            'S' => { builder = builder.sparse(true); }
+            'v' => {
+                // Verbosity is cumulative but we just set it once here.
+                // Multiple v's are handled by the Verbosity enum already
+                // being set.
+                builder = builder.verbosity(crate::options::Verbosity::Verbose);
+            }
+            _ => {}
+        }
+    }
+
+    // Parse long-form options.
+    for opt in &long_opts {
+        match opt.as_ref() {
+            "--inplace" => { builder = builder.inplace(true); }
+            "--numeric-ids" => { builder = builder.numeric_ids(true); }
+            "--append" => { builder = builder.append(true); }
+            "--delete-before" => { builder = builder.delete(DeleteMode::Before); }
+            "--delete-during" => { builder = builder.delete(DeleteMode::During); }
+            "--delete-after" => { builder = builder.delete(DeleteMode::After); }
+            "--delete-excluded" => { builder = builder.delete(DeleteMode::Excluded); }
+            _ => {}
+        }
+    }
+
+    // Set source/dest based on direction.
+    if am_sender {
+        builder = builder.source(module_path);
+    } else {
+        builder = builder.dest(module_path);
+    }
+
+    builder.build()
 }
 
 // ---------------------------------------------------------------------------
@@ -278,8 +358,6 @@ async fn run_push(
     let mut stats = TransferStats::new();
     stats.start();
 
-    let seed = protocol.seed;
-    let checksum_type = protocol.checksum;
     let proto_ver = protocol.version;
 
     // Both sides enable MUX after handshake (proto >= 30).
@@ -287,15 +365,7 @@ async fn run_push(
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
     let mut mplex_out = MplexWriter::new(writer);
 
-    // 1. Send filter list (exclude/include/filter rules).
-    //
-    // rsync's recv_filter_list() only reads the filter list when:
-    //   !local_server && (am_sender || receiver_wants_list)
-    // On the server side for push, am_sender=false (server is receiver).
-    // receiver_wants_list is true only when delete_mode or prune_empty_dirs
-    // is active. If the server won't read the filter list, sending it
-    // would poison the file list data stream -- the server would interpret
-    // our filter terminator bytes as file list entries (or end-of-list).
+    // 1. Send filter list (only when delete mode is active).
     let receiver_wants_list = options.delete() != DeleteMode::None;
     if receiver_wants_list {
         let filter_data = collect_filter_list(options)?;
@@ -311,8 +381,6 @@ async fn run_push(
 
     // 2. Build and send file list.
     let mut entries = build_source_entries(fs, options)?;
-    // Sort entries in rsync canonical order so NDX mapping matches what the
-    // receiver sees after decoding and sorting the file list.
     crate::filelist::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
     let total_bytes: i64 = entries.iter().map(|e| e.len).sum();
@@ -332,294 +400,27 @@ async fn run_push(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
-    // Compute NDX -> entry index mapping.
-    // With inc_recurse (proto >= 30 AND recursive), ndx_start = 1; otherwise 0.
-    let ndx_start: i32 = if protocol.incremental_flist && proto_ver >= 30 && options.recursive() {
-        1
-    } else {
-        0
-    };
-    let ndx_to_entry: std::collections::HashMap<i32, usize> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, _)| (ndx_start + i as i32, i))
-        .collect();
+    // 3. Sender loop via wire_transfer.
+    let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, options.recursive());
+    let file_reader = LocalFileReader::new(fs, options.source());
 
-    // 3. Sender loop: read NDX from generator, send delta data.
-    let mut gen_ndx_state = crate::protocol::varint::NdxState::default();
-    let mut send_ndx_state = crate::protocol::varint::NdxState::default();
-    // rsync's sender.c: max_phase = protocol_version >= 29 ? 2 : 1
-    let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
-    let mut phase: u32 = 0;
-
-    loop {
-        let ndx = crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-
-        if ndx == crate::protocol::varint::NDX_DONE {
-            phase += 1;
-            if phase > max_phase {
-                break;
-            }
-            // Respond with NDX_DONE (phase transition).
-            let mut done_buf = Vec::new();
-            crate::protocol::varint::write_ndx(
-                &mut done_buf,
-                crate::protocol::varint::NDX_DONE,
-                &mut send_ndx_state,
-                proto_ver,
-            )
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-            mplex_out
-                .write_data(&done_buf)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-            mplex_out
-                .flush()
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-            continue;
-        }
-
-        // NDX_FLIST_EOF (-2) or NDX_DEL_STATS (-3): generator signals from
-        // incremental flist or delete stats. Ignore in non-incremental mode.
-        if ndx < -1 {
-            continue;
-        }
-
-        // Read iflags from generator (proto >= 29).
-        let mut iflags: u16 = 0;
-        if proto_ver >= 29 {
-            use tokio::io::AsyncReadExt;
-            let mut iflags_buf = [0u8; 2];
-            demux_read
-                .read_exact(&mut iflags_buf)
-                .await
-                .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
-            iflags = u16::from_le_bytes(iflags_buf);
-
-            // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
-            if iflags & 0x0800 != 0 {
-                let mut bt = [0u8; 1];
-                demux_read
-                    .read_exact(&mut bt)
-                    .await
-                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
-            }
-            // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
-            if iflags & 0x1000 != 0 {
-                let name_len = crate::protocol::varint::read_varint(&mut demux_read)
-                    .await
-                    .map_err(crate::FerrosyncError::Protocol)?;
-                if name_len > 0x10000 {
-                    return Err(crate::FerrosyncError::Protocol(
-                        crate::error::ProtocolError::WireValueOutOfRange {
-                            field: "xname_len",
-                            value: name_len as i64,
-                            max: 0x10000,
-                        },
-                    ));
-                }
-                let mut name_buf = vec![0u8; name_len as usize];
-                use tokio::io::AsyncReadExt;
-                demux_read
-                    .read_exact(&mut name_buf)
-                    .await
-                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
-            }
-        }
-
-        // Look up the entry for this NDX.
-        let entry_idx = match ndx_to_entry.get(&ndx) {
-            Some(&idx) => idx,
-            None => {
-                tracing::warn!(ndx, "generator requested unknown NDX, skipping");
-                continue;
-            }
-        };
-        let entry = &entries[entry_idx];
-
-        // Non-regular files (directories, symlinks, etc.) don't have file data.
-        // The generator handles them locally; the sender just skips them.
-        if entry.mode & S_IFMT != crate::filelist::entry::S_IFREG {
-            continue;
-        }
-
-        // Read block signatures from generator (only for regular files).
-        let sums = sum::read_sums(&mut demux_read)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-
-        progress.emit(ProgressEvent::FileStart {
-            index: ndx,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            size: entry.len,
-        });
-
-        // Read local source data.
-        let source_data = read_source_file(fs, entry, options)?;
-
-        // Match blocks and compute delta.
-        let ops = crate::delta::matcher::match_blocks(
-            &source_data,
-            &sums,
-            seed,
-            checksum_type,
-            checksum::CHAR_OFFSET_V30,
-            protocol.proper_seed_order,
-        );
-
-        // Build sender response: NDX + iflags + sum_head + tokens + checksum.
-        let mut resp_buf = Vec::new();
-
-        // NDX + iflags.
-        crate::protocol::varint::write_ndx(&mut resp_buf, ndx, &mut send_ndx_state, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        if proto_ver >= 29 {
-            crate::protocol::varint::write_shortint(&mut resp_buf, iflags)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-        }
-
-        // sum_head: echo back the generator's sum head. For new files
-        // (count=0), rsync's sender writes all zeros (NULL sum).
-        let resp_sum_head = if sums.head.count == 0 {
-            sum::SumHead {
-                count: 0,
-                blength: 0,
-                s2length: 0,
-                remainder: 0,
-            }
-        } else {
-            sum::SumHead {
-                count: sums.head.count,
-                blength: sums.head.blength,
-                s2length: sums.head.s2length,
-                remainder: sums.head.remainder,
-            }
-        };
-        sum::write_sum_head(&mut resp_buf, &resp_sum_head)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-
-        // Delta tokens.
-        let mut literal_bytes = 0u64;
-        let mut matched_bytes = 0u64;
-        for op in &ops {
-            match op {
-                crate::delta::matcher::MatchOp::Data(data) => {
-                    crate::delta::token::send_data(&mut resp_buf, data)
-                        .await
-                        .map_err(crate::FerrosyncError::Protocol)?;
-                    literal_bytes += data.len() as u64;
-                }
-                crate::delta::matcher::MatchOp::BlockMatch(block_idx) => {
-                    crate::delta::token::send_block_match(&mut resp_buf, *block_idx)
-                        .await
-                        .map_err(crate::FerrosyncError::Protocol)?;
-                    if sums.head.blength > 0 {
-                        matched_bytes += sums.head.blength as u64;
-                    }
-                }
-            }
-        }
-        crate::delta::token::send_eof(&mut resp_buf)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-
-        // File-level checksum.
-        let file_sum = checksum::file_checksum(&source_data, seed, checksum_type);
-        resp_buf.extend_from_slice(&file_sum);
-
-        // Send the complete response as a MUX DATA frame.
-        mplex_out
-            .write_data(&resp_buf)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .flush()
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-
-        stats.files_transferred += 1;
-        stats.total_size += entry.len as u64;
-        stats.literal_data += literal_bytes;
-        stats.matched_data += matched_bytes;
-        stats.bytes_sent += literal_bytes;
-
-        progress.emit(ProgressEvent::FileComplete {
-            index: ndx,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            literal_bytes,
-            matched_bytes,
-        });
-    }
-
-    // 4. Post-loop: write final NDX_DONE (sender.c line 462).
-    let mut done_buf = Vec::new();
-    crate::protocol::varint::write_ndx(
-        &mut done_buf,
-        crate::protocol::varint::NDX_DONE,
-        &mut send_ndx_state,
-        proto_ver,
+    wire_transfer::sender_loop(
+        &mut demux_read,
+        &mut mplex_out,
+        &entries,
+        &ndx_map,
+        &file_reader,
+        protocol,
+        &mut stats,
+        progress,
     )
-    .await
-    .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .write_data(&done_buf)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .flush()
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+    .await?;
 
-    // 5. Write transfer stats (sender writes, receiver reads).
-    // 5 varlong30 values: total_read, total_written, total_size,
-    // flist_buildtime, flist_xfertime.
-    let mut stats_buf = Vec::new();
-    crate::protocol::varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    crate::protocol::varint::write_varlong30(&mut stats_buf, stats.bytes_sent as i64, 3, proto_ver)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    crate::protocol::varint::write_varlong30(&mut stats_buf, stats.total_size as i64, 3, proto_ver)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    if proto_ver >= 29 {
-        crate::protocol::varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        crate::protocol::varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-    }
-    mplex_out
-        .write_data(&stats_buf)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .flush()
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+    // 4. Write transfer stats.
+    wire_transfer::write_stats(&mut mplex_out, &stats, proto_ver).await?;
 
-    // 6. Read final NDX_DONE from generator (matches rsync's read_final_goodbye).
-    if proto_ver >= 24 {
-        let _ =
-            crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await;
-
-        // Proto >= 31: sender reads an additional NDX_DONE from the generator
-        // after the goodbye exchange (rsync's read_final_goodbye extra round).
-        if proto_ver >= 31 {
-            let _ =
-                crate::protocol::varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver)
-                    .await;
-        }
-    }
+    // 5. Goodbye exchange.
+    wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
 
     let _ = demux_handle.await;
 
@@ -643,21 +444,13 @@ async fn run_pull(
     let mut stats = TransferStats::new();
     stats.start();
 
-    // rsync 3.2+ (proto 31+) enables multiplexed I/O immediately after
-    // the handshake, both for reading and writing. For protocol >= 30,
-    // need_messages_from_generator is set, so rsync expects MUX-framed
-    // input from us too.
+    let proto_ver = protocol.version;
+
     let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
-
-    // All output to the remote must be MUX-framed.
     let mut mplex_out = MplexWriter::new(writer);
 
-    // Filter list: for local transport with pull (sender mode on server),
-    // rsync enables MUX input before reading filter list. The filter list
-    // bytes get consumed as MUX DATA by the sender's MUX layer (effectively
-    // as NDX_DONE markers during the phase exchange). This is how real rsync
-    // behaves for local transfers.
+    // Send filter list.
     let filter_data = collect_filter_list(options)?;
     mplex_out
         .write_data(&filter_data)
@@ -668,7 +461,7 @@ async fn run_pull(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
-    // Receive file list from remote (through demuxed pipe).
+    // Receive file list from remote.
     let received_flist = exchange::recv_file_list(&mut demux_read, protocol, options)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
@@ -685,348 +478,72 @@ async fn run_pull(
         path: PathBuf::from("<no destination>"),
     })?;
 
-    let seed = protocol.seed;
-    let checksum_type = protocol.checksum;
-    let proto_ver = protocol.version;
-    let mut gen_ndx_state = crate::protocol::varint::NdxState::default();
-    let mut recv_ndx_state = crate::protocol::varint::NdxState::default();
-
-    // Create directories first.
+    // Validate paths before passing to receiver loop.
     for entry in &entries {
-        if !entry.is_dir() {
-            continue;
-        }
         let name_str = String::from_utf8_lossy(&entry.name);
-        let dest_path = sanitize_path(&dest, &name_str)?;
-        if !options.dry_run() {
-            let mode = if options.preserve_perms() {
-                entry.mode & 0o7777
-            } else {
-                0o755
-            };
-            fs.mkdir(&dest_path, mode)?;
-        }
-        stats.directories_created += 1;
+        sanitize_path(&dest, &name_str)?;
     }
 
-    // Per-file receiver loop.
-    for (idx, entry) in entries.iter().enumerate() {
-        if !entry.is_file() {
-            continue;
-        }
-
-        let name_str = String::from_utf8_lossy(&entry.name);
-        let dest_path = sanitize_path(&dest, &name_str)?;
-
-        progress.emit(ProgressEvent::FileStart {
-            index: idx as i32,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            size: entry.len,
-        });
-
-        // Create parent directories.
-        if let Some(parent) = dest_path.parent() {
-            if !fs.lexists(parent) {
-                fs.mkdir(parent, 0o755)?;
+    // Handle dry-run: just count files, don't do wire protocol.
+    if options.dry_run() {
+        for (idx, entry) in entries.iter().enumerate() {
+            if entry.is_dir() {
+                stats.directories_created += 1;
+            } else if entry.is_file() {
+                stats.files_transferred += 1;
+                stats.total_size += entry.len as u64;
+                progress.emit(ProgressEvent::FileComplete {
+                    index: idx as i32,
+                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    literal_bytes: entry.len as u64,
+                    matched_bytes: 0,
+                });
             }
         }
-
-        if options.dry_run() {
-            stats.files_transferred += 1;
-            stats.total_size += entry.len as u64;
-            progress.emit(ProgressEvent::FileComplete {
-                index: idx as i32,
-                name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                literal_bytes: entry.len as u64,
-                matched_bytes: 0,
-            });
-            continue;
-        }
-
-        // Quick check: skip files that are already up-to-date (same size + mtime).
-        // This matches rsync's generator behavior (quick_check_ok).
-        // Only skip when preserve_times is set (so mtime was previously synced)
-        // and not in checksum mode (which always verifies).
-        // Quick check: skip files that are already up-to-date.
-        // Matches rsync's cmp_time which compares seconds only.
-        if options.preserve_times() && !options.checksum_mode() {
-            if let Ok(dest_meta) = fs.lstat(&dest_path) {
-                if dest_meta.len == entry.len && dest_meta.mtime == entry.mtime {
-                    // Same size + same mtime (seconds) = already synced, skip.
-                    // This only works because our receiver sets mtime after writing.
-                    // Files that happen to have the same mtime but different content
-                    // (unlikely in practice) will be caught by checksum mode.
-                    continue;
-                }
-            }
-        }
-
-        // Read existing basis file (if any).
-        let basis_data = fs.read_file(&dest_path).unwrap_or_default();
-
-        // Send generator output to remote (through MUX framing).
-        // Wire format: NDX + iflags(2) + sum_head + block sigs.
-        let file_ndx = entry_ndx[idx];
-        let mut sig_buf = Vec::new();
-        crate::protocol::varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, proto_ver)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        // iflags: ITEM_TRANSFER (1<<15) signals that this file needs data transfer.
-        if proto_ver >= 29 {
-            const ITEM_TRANSFER: u16 = 1 << 15;
-            crate::protocol::varint::write_shortint(&mut sig_buf, ITEM_TRANSFER)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-        }
-        let sigs = sum::compute_signatures(
-            &basis_data,
-            seed,
-            checksum_type,
-            checksum::CHAR_OFFSET_V30,
-            protocol.proper_seed_order,
-        );
-        sum::write_sums(&mut sig_buf, &sigs)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .write_data(&sig_buf)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .flush()
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-
-        // Read sender's response for this file.
-        // Wire format: NDX(file_ndx) + iflags(2 bytes) + sum_head(16 bytes) + tokens + checksum
-
-        // 1. Read file NDX from sender.
-        let _file_ndx =
-            crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-
-        // 2. Read iflags (protocol >= 29).
-        if proto_ver >= 29 {
-            use tokio::io::AsyncReadExt;
-            let mut iflags_buf = [0u8; 2];
-            demux_read
-                .read_exact(&mut iflags_buf)
-                .await
-                .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
-            let iflags = u16::from_le_bytes(iflags_buf);
-
-            // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
-            if iflags & 0x0800 != 0 {
-                let mut bt = [0u8; 1];
-                demux_read
-                    .read_exact(&mut bt)
-                    .await
-                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
-            }
-            // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
-            if iflags & 0x1000 != 0 {
-                let name_len = crate::protocol::varint::read_varint(&mut demux_read)
-                    .await
-                    .map_err(crate::FerrosyncError::Protocol)?;
-                if name_len > 0x10000 {
-                    return Err(crate::FerrosyncError::Protocol(
-                        crate::error::ProtocolError::WireValueOutOfRange {
-                            field: "xname_len",
-                            value: name_len as i64,
-                            max: 0x10000,
-                        },
-                    ));
-                }
-                let mut name_buf = vec![0u8; name_len as usize];
-                demux_read
-                    .read_exact(&mut name_buf)
-                    .await
-                    .map_err(|e| crate::FerrosyncError::Protocol(ProtocolError::from(e)))?;
-            }
-        }
-
-        // 3. Read sum_head from sender (count, blength, s2length, remainder).
-        let sum_head = sum::read_sum_head(&mut demux_read)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        let blength = if sum_head.blength > 0 {
-            sum_head.blength as usize
-        } else {
-            700
-        };
-
-        // 4. Read tokens + file checksum via receiver module.
-        let result_data =
-            receiver::recv_file_delta(&mut demux_read, &basis_data, blength, seed, checksum_type)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-
-        let literal_bytes = result_data.len() as u64;
-
-        // Write reconstructed file.
-        let mode = if options.preserve_perms() {
-            Some(entry.mode & 0o7777)
-        } else {
-            None
-        };
-        if result_data.len() as i64 >= STREAMING_THRESHOLD {
-            use std::io::Write;
-            let mut writer = fs.write_file_stream(&dest_path, mode)?;
-            writer.write_all(&result_data).map_err(|e| {
-                crate::FerrosyncError::Fs(FsError::Io {
-                    path: dest_path.clone(),
-                    source: std::sync::Arc::new(e),
-                })
-            })?;
-            writer.flush().map_err(|e| {
-                crate::FerrosyncError::Fs(FsError::Io {
-                    path: dest_path.clone(),
-                    source: std::sync::Arc::new(e),
-                })
-            })?;
-            drop(writer);
-        } else {
-            fs.write_file(&dest_path, &result_data, mode)?;
-        }
-
-        // Set metadata.
-        if options.preserve_times() {
-            if let Err(e) = fs.set_mtime(&dest_path, entry.mtime, entry.mtime_nsec) {
-                tracing::warn!(path = %dest_path.display(), error = %e, "failed to set mtime");
-            }
-        }
-        #[cfg(unix)]
-        if options.preserve_owner() {
-            if let Err(e) = fs.set_owner(&dest_path, entry.uid, entry.gid) {
-                tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
-            }
-        }
-
-        stats.files_transferred += 1;
-        stats.total_size += entry.len as u64;
-        stats.literal_data += literal_bytes;
-        stats.bytes_received += literal_bytes;
-
-        progress.emit(ProgressEvent::FileComplete {
-            index: idx as i32,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            literal_bytes,
-            matched_bytes: 0,
-        });
-    }
-
-    // Handle symlinks.
-    for entry in &entries {
-        if entry.is_symlink() && options.preserve_links() {
-            let name_str = String::from_utf8_lossy(&entry.name);
-            let dest_path = sanitize_path(&dest, &name_str)?;
-            if !options.dry_run() && !entry.link_target.is_empty() {
-                let _ = fs.create_symlink(&entry.link_target, &dest_path);
-            }
-            stats.symlinks += 1;
-        }
-    }
-
-    // Multi-phase NDX_DONE exchange.
-    // rsync's sender loop expects (max_phase + 1) NDX_DONE messages for phase
-    // transitions. With inc_recurse, the sender also needs (num_flists - 1)
-    // extra NDX_DONE rounds for flist cleanup (freeing each sub-flist except
-    // the last, which gets freed alongside the first phase transition).
-    // Total rounds = flist_cleanup + (max_phase + 1).
-    // rsync's sender.c: max_phase = protocol_version >= 29 ? 2 : 1
-    let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
-    let flist_cleanup_rounds: u32 = if protocol.incremental_flist && protocol.version >= 30 {
-        (received_flist.num_flists as u32).saturating_sub(1)
     } else {
-        0
-    };
-    let total_ndx_rounds = flist_cleanup_rounds + max_phase + 1;
+        // Receiver loop via wire_transfer.
+        let file_ops = LocalFileOps::new(fs, &dest, options);
 
-    for _round in 0..total_ndx_rounds {
-        let mut done_buf = Vec::new();
-        crate::protocol::varint::write_ndx(
-            &mut done_buf,
-            crate::protocol::varint::NDX_DONE,
-            &mut gen_ndx_state,
-            proto_ver,
+        wire_transfer::receiver_loop(
+            &mut demux_read,
+            &mut mplex_out,
+            &entries,
+            &entry_ndx,
+            &file_ops,
+            protocol,
+            &mut stats,
+            progress,
         )
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .write_data(&done_buf)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .flush()
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
+        .await?;
 
-        // Read sender's NDX_DONE response.
-        let resp =
-            crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-        if resp != crate::protocol::varint::NDX_DONE {
-            tracing::warn!(
-                ndx = resp,
-                "expected NDX_DONE from sender during phase exchange"
-            );
+        // Handle symlinks (after file transfers).
+        for entry in &entries {
+            if entry.is_symlink() && options.preserve_links() {
+                let name_str = String::from_utf8_lossy(&entry.name);
+                let dest_path = dest.join(name_str.as_ref());
+                if !entry.link_target.is_empty() {
+                    let _ = fs.create_symlink(&entry.link_target, &dest_path);
+                }
+                stats.symlinks += 1;
+            }
         }
     }
 
-    // Read transfer stats from the sender.
-    let _total_read = crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    let _total_written = crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    let _total_size = crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    if proto_ver >= 29 {
-        let _flist_buildtime =
-            crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-        let _flist_xfertime =
-            crate::protocol::varint::read_varlong30(&mut demux_read, 3, proto_ver)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-    }
+    // Phase exchange.
+    wire_transfer::receiver_phase_exchange(
+        &mut demux_read,
+        &mut mplex_out,
+        proto_ver,
+        received_flist.num_flists,
+        protocol.incremental_flist,
+    )
+    .await?;
 
-    // Final goodbye exchange (proto >= 24).
-    // Best-effort: rsync may close the connection before we finish,
-    // which is fine -- the transfer already succeeded at this point.
-    if proto_ver >= 24 {
-        // Helper: write NDX_DONE, ignoring errors (rsync may have exited).
-        async fn send_done(
-            out: &mut MplexWriter<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>,
-            st: &mut crate::protocol::varint::NdxState,
-            pv: u8,
-        ) {
-            let mut buf = Vec::new();
-            let _ = crate::protocol::varint::write_ndx(
-                &mut buf,
-                crate::protocol::varint::NDX_DONE,
-                st,
-                pv,
-            )
-            .await;
-            let _ = out.write_data(&buf).await;
-            let _ = out.flush().await;
-        }
+    // Read transfer stats.
+    wire_transfer::read_stats(&mut demux_read, proto_ver).await?;
 
-        send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
-        let _ = crate::protocol::varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver)
-            .await;
-        send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
-
-        if proto_ver >= 31 {
-            send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
-        }
-    }
+    // Goodbye exchange.
+    wire_transfer::receiver_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
 
     let _ = demux_handle.await;
 
@@ -1145,28 +662,6 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
     }
 
     Ok(entries)
-}
-
-/// Read source file data for a given file entry.
-fn read_source_file(
-    fs: &dyn FileSystem,
-    entry: &FileEntry,
-    options: &TransferOptions,
-) -> Result<Vec<u8>> {
-    let name_str = String::from_utf8_lossy(&entry.name);
-    for source in options.source() {
-        let path = if options.source().len() == 1
-            && fs.lstat(source).is_ok_and(|m| m.mode & S_IFMT == S_IFDIR)
-        {
-            source.join(name_str.as_ref())
-        } else {
-            source.clone()
-        };
-        if let Ok(data) = fs.read_file(&path) {
-            return Ok(data);
-        }
-    }
-    Ok(Vec::new())
 }
 
 // Re-export the shared demux_task for use within this module.

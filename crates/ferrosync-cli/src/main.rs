@@ -584,39 +584,19 @@ async fn run_sync(
     let use_tls = flags.tls || flags.transport == "tls";
     let use_quic = flags.transport == "quic";
     let insecure = flags.insecure;
+    let verbose = flags.verbose;
 
     let fs = create_filesystem();
 
     match remote {
         RemotePath::Local(remote_path) => {
             // Local-to-local: use the transfer engine directly, no subprocess.
-            let verbose = flags.verbose;
             let (source, dest) = match direction {
                 SyncDirection::Push => (local_path, remote_path),
                 SyncDirection::Pull => (remote_path, local_path),
             };
             let opts = flags.into_transfer_options(source, dest);
-            let mut progress = if verbose > 0 {
-                ferrosync_core::engine::progress::ProgressTracker::with_callback(Box::new(
-                    move |event| {
-                        use ferrosync_core::engine::progress::ProgressEvent;
-                        match event {
-                            ProgressEvent::FileStart { name, .. } => {
-                                eprintln!("{}", name.display());
-                            }
-                            ProgressEvent::FileDeleted { name } => {
-                                eprintln!("*deleting   {}", name.display());
-                            }
-                            ProgressEvent::FileItemized { name, changes, .. } => {
-                                eprintln!("{} {}", changes, name.display());
-                            }
-                            _ => {}
-                        }
-                    },
-                ))
-            } else {
-                ferrosync_core::engine::progress::ProgressTracker::new()
-            };
+            let mut progress = build_progress_tracker(verbose);
             let seed = 0; // No wire handshake, use deterministic seed.
             let checksum_type = ferrosync_core::protocol::handshake::ChecksumType::Blake3;
             let result = ferrosync_core::engine::transfer::execute_transfer(
@@ -660,8 +640,7 @@ async fn run_sync(
 
             let remote_p = std::path::Path::new(&remote_path);
             let transport = SshTransport::new(ssh_config, am_sender, &server_opts, remote_p);
-            let session = SyncSession::new(transport, opts, fs, direction);
-            let result = session.run().await?;
+            let result = run_remote_session(transport, opts, fs, direction, verbose).await?;
             if show_stats {
                 print_stats(&result.stats);
             }
@@ -680,7 +659,7 @@ async fn run_sync(
             let server_opts = build_server_options(&opts, direction == SyncDirection::Push);
             let am_sender = direction == SyncDirection::Push;
 
-            if use_quic {
+            let result = if use_quic {
                 let config = QuicConfig {
                     host,
                     port,
@@ -688,12 +667,7 @@ async fn run_sync(
                     danger_accept_invalid_certs: insecure,
                     ..Default::default()
                 };
-                let transport = QuicTransport::new(config);
-                let session = SyncSession::new(transport, opts, fs, direction);
-                let result = session.run().await?;
-                if show_stats {
-                    print_stats(&result.stats);
-                }
+                run_remote_session(QuicTransport::new(config), opts, fs, direction, verbose).await?
             } else if use_tls {
                 let config = TlsDaemonConfig {
                     host,
@@ -703,12 +677,7 @@ async fn run_sync(
                     danger_accept_invalid_certs: insecure,
                     ..Default::default()
                 };
-                let transport = TlsDaemonTransport::new(config, am_sender, &server_opts);
-                let session = SyncSession::new(transport, opts, fs, direction);
-                let result = session.run().await?;
-                if show_stats {
-                    print_stats(&result.stats);
-                }
+                run_remote_session(TlsDaemonTransport::new(config, am_sender, &server_opts), opts, fs, direction, verbose).await?
             } else {
                 let config = DaemonTransportConfig {
                     host,
@@ -717,17 +686,58 @@ async fn run_sync(
                     path: remote_path,
                     ..Default::default()
                 };
-                let transport = DaemonTransport::new(config, am_sender, &server_opts);
-                let session = SyncSession::new(transport, opts, fs, direction);
-                let result = session.run().await?;
-                if show_stats {
-                    print_stats(&result.stats);
-                }
+                run_remote_session(DaemonTransport::new(config, am_sender, &server_opts), opts, fs, direction, verbose).await?
+            };
+            if show_stats {
+                print_stats(&result.stats);
             }
         }
     }
 
     Ok(())
+}
+
+/// Run a remote sync session with any transport.
+async fn run_remote_session<T: ferrosync_core::transport::Transport + 'static>(
+    transport: T,
+    opts: ferrosync_core::options::TransferOptions,
+    fs: Box<dyn ferrosync_core::fs::FileSystem>,
+    direction: SyncDirection,
+    verbose: u8,
+) -> Result<ferrosync_core::engine::transfer::TransferResult, ferrosync_core::FerrosyncError> {
+    SyncSession::new(transport, opts, fs, direction)
+        .with_progress(build_progress_tracker(verbose))
+        .run()
+        .await
+}
+
+/// Build a progress tracker based on verbosity level.
+///
+/// When verbose > 0, the tracker prints file names and change details to
+/// stderr. Otherwise a no-op tracker is returned. This is called once per
+/// transfer and passed to both local and remote transfer paths.
+fn build_progress_tracker(verbose: u8) -> ferrosync_core::engine::progress::ProgressTracker {
+    if verbose > 0 {
+        ferrosync_core::engine::progress::ProgressTracker::with_callback(Box::new(
+            move |event| {
+                use ferrosync_core::engine::progress::ProgressEvent;
+                match event {
+                    ProgressEvent::FileStart { name, .. } => {
+                        eprintln!("{}", name.display());
+                    }
+                    ProgressEvent::FileDeleted { name } => {
+                        eprintln!("*deleting   {}", name.display());
+                    }
+                    ProgressEvent::FileItemized { name, changes, .. } => {
+                        eprintln!("{} {}", changes, name.display());
+                    }
+                    _ => {}
+                }
+            },
+        ))
+    } else {
+        ferrosync_core::engine::progress::ProgressTracker::new()
+    }
 }
 
 /// Create the platform-appropriate filesystem implementation.
