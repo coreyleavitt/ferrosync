@@ -182,6 +182,13 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
         let payload_len = raw & MAX_PAYLOAD;
         let tag_byte = (raw >> 24) as u8;
 
+        tracing::trace!(
+            tag = tag_byte,
+            payload_len,
+            hdr_hex = format!("{:02x} {:02x} {:02x} {:02x}", hdr[0], hdr[1], hdr[2], hdr[3]),
+            "mplex: read_message header"
+        );
+
         if tag_byte < MPLEX_BASE {
             return Err(ProtocolError::InvalidMplexTag {
                 tag: tag_byte as u32,
@@ -334,6 +341,11 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
 
     /// Write a MSG_DATA payload, splitting into chunks if necessary.
     pub async fn write_data(&mut self, data: &[u8]) -> Result<()> {
+        tracing::trace!(
+            total_len = data.len(),
+            chunks = (data.len() + DATA_CHUNK_SIZE - 1) / DATA_CHUNK_SIZE,
+            "mplex: write_data"
+        );
         for chunk in data.chunks(DATA_CHUNK_SIZE) {
             self.write_message(MsgCode::Data, chunk).await?;
         }

@@ -1,0 +1,7 @@
+Test-only SSH key pair for Docker-based SSH interop tests.
+
+These keys are NOT used for any production purpose. They exist solely to allow
+the ferrosync-dev container to authenticate with the rsync-ssh-target container
+during integration testing.
+
+Do NOT use these keys for anything other than local test infrastructure.
