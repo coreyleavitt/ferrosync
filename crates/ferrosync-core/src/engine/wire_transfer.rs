@@ -709,10 +709,14 @@ pub async fn read_stats<R: AsyncRead + Unpin + Send>(
 
 /// Sender goodbye exchange (proto >= 24).
 ///
-/// Reads goodbye NDX_DONEs from the receiver.
+/// C ref: read_final_goodbye (main.c:875-905)
+///
+/// For proto >= 31, the receiver sends an NDX_DONE, the sender must
+/// acknowledge with its own NDX_DONE, then read one more NDX_DONE
+/// (error-exit sync). For proto 24-30, just read the final NDX_DONE.
 pub async fn sender_goodbye<R, W>(
     demux_read: &mut R,
-    _mplex_out: &mut MplexWriter<W>,
+    mplex_out: &mut MplexWriter<W>,
     proto_ver: u8,
 ) -> Result<()>
 where
@@ -720,10 +724,21 @@ where
     W: AsyncWrite + Unpin + Send,
 {
     if proto_ver >= 24 {
-        let mut state = varint::NdxState::default();
-        let _ = varint::read_ndx(demux_read, &mut state, proto_ver).await;
+        let mut read_state = varint::NdxState::default();
+        let mut write_state = varint::NdxState::default();
+
         if proto_ver >= 31 {
-            let _ = varint::read_ndx(demux_read, &mut state, proto_ver).await;
+            // Read first goodbye NDX_DONE from receiver.
+            let _ = varint::read_ndx(demux_read, &mut read_state, proto_ver).await;
+
+            // Acknowledge with our own NDX_DONE.
+            write_goodbye_done(mplex_out, &mut write_state, proto_ver).await;
+
+            // Read error-exit sync NDX_DONE.
+            let _ = varint::read_ndx(demux_read, &mut read_state, proto_ver).await;
+        } else {
+            // Proto 24-30: just read the final NDX_DONE.
+            let _ = varint::read_ndx(demux_read, &mut read_state, proto_ver).await;
         }
     }
     Ok(())
