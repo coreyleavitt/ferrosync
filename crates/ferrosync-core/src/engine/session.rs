@@ -482,10 +482,11 @@ async fn run_push(
     )
     .await?;
 
-    // 4. Write transfer stats.
-    wire_transfer::write_stats(&mut mplex_out, &stats, proto_ver).await?;
+    // C ref: handle_stats (main.c:325) -- client sender does NOT write stats.
+    // Stats are only written by the server sender (am_server && am_sender).
+    // For push (client is sender, am_server=false), handle_stats(-1) is a no-op.
 
-    // 5. Goodbye exchange.
+    // Goodbye exchange.
     wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
 
     let _ = demux_handle.await;

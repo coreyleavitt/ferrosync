@@ -362,8 +362,9 @@ impl ServerSession {
         )
         .await?;
 
-        // Read transfer stats.
-        wire_transfer::read_stats(&mut demux_read, proto_ver).await?;
+        // C ref: handle_stats (main.c:325) -- server receiver does NOT
+        // read/write stats. Stats are only exchanged when the server is
+        // the sender (am_server && am_sender, i.e., pull mode).
 
         // Goodbye exchange.
         wire_transfer::server_receiver_goodbye(&mut mplex_out, proto_ver).await?;
