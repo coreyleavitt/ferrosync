@@ -51,8 +51,11 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo test -p ferrosync-core --test rsync_compat
 
-      - name: Run E2E tests (Unix only)
+      - name: Run rsync interop tests (Unix only)
         if: runner.os != 'Windows'
+        run: cargo test -p ferrosync-core --test rsync_interop
+
+      - name: Run E2E tests
         run: cargo test -p ferrosync-core --test e2e
 
       - name: Run doc tests
