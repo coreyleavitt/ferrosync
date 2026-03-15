@@ -496,7 +496,14 @@ mod tests {
         let strategy = ChunkingStrategy::Fixed {
             block_size: blength as usize,
         };
-        let cdc = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
+        let cdc = compute_signatures_cdc(
+            &data,
+            42,
+            ChecksumType::Md5,
+            &strategy,
+            CHAR_OFFSET_V30,
+            true,
+        );
 
         assert_eq!(cdc.head, original.head);
         assert_eq!(cdc.sums.len(), original.sums.len());
@@ -511,7 +518,14 @@ mod tests {
     fn test_compute_signatures_cdc_variable_blocks() {
         let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let strategy = ChunkingStrategy::default_cdc();
-        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
+        let sums = compute_signatures_cdc(
+            &data,
+            42,
+            ChecksumType::Md5,
+            &strategy,
+            CHAR_OFFSET_V30,
+            true,
+        );
 
         assert!(sums.head.count > 0);
         assert_eq!(sums.sums.len(), sums.head.count as usize);
@@ -530,7 +544,8 @@ mod tests {
     #[test]
     fn test_compute_signatures_cdc_empty() {
         let strategy = ChunkingStrategy::default_cdc();
-        let sums = compute_signatures_cdc(b"", 0, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
+        let sums =
+            compute_signatures_cdc(b"", 0, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
         assert_eq!(sums.head.count, 0);
         assert!(sums.sums.is_empty());
     }
@@ -539,7 +554,14 @@ mod tests {
     async fn test_cdc_sums_roundtrip() {
         let data: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
         let strategy = ChunkingStrategy::default_cdc();
-        let sums = compute_signatures_cdc(&data, 42, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
+        let sums = compute_signatures_cdc(
+            &data,
+            42,
+            ChecksumType::Md5,
+            &strategy,
+            CHAR_OFFSET_V30,
+            true,
+        );
 
         let mut buf = Vec::new();
         write_sums_cdc(&mut buf, &sums).await.unwrap();
@@ -579,7 +601,14 @@ mod tests {
         // When using Fixed strategy (rsync compat), block_len should be None.
         let data = vec![0u8; 10_000];
         let strategy = ChunkingStrategy::Fixed { block_size: 700 };
-        let sums = compute_signatures_cdc(&data, 0, ChecksumType::Md5, &strategy, CHAR_OFFSET_V30, true);
+        let sums = compute_signatures_cdc(
+            &data,
+            0,
+            ChecksumType::Md5,
+            &strategy,
+            CHAR_OFFSET_V30,
+            true,
+        );
 
         for entry in &sums.sums {
             assert_eq!(

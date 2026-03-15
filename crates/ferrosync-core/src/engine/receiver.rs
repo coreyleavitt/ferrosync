@@ -53,12 +53,12 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     } else {
         0
     };
-    let remainder =
-        if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
-            basis_data.len() % blength
-        } else {
-            blength
-        };
+    #[allow(clippy::manual_is_multiple_of)]
+    let remainder = if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
+        basis_data.len() % blength
+    } else {
+        blength
+    };
 
     // Read tokens.
     loop {
@@ -123,12 +123,12 @@ pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
     } else {
         0
     };
-    let remainder =
-        if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
-            basis_data.len() % blength
-        } else {
-            blength
-        };
+    #[allow(clippy::manual_is_multiple_of)]
+    let remainder = if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
+        basis_data.len() % blength
+    } else {
+        blength
+    };
 
     loop {
         match token::recv_token_compressed(r, decompressor).await? {
@@ -192,7 +192,13 @@ mod tests {
     async fn test_recv_new_file() {
         let source = b"hello world, this is new data!";
         let seed = 42;
-        let sums = sum::compute_signatures(b"", seed, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
+        let sums = sum::compute_signatures(
+            b"",
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
 
         // Sender writes: file_index + tokens + checksum.
         let mut buf = Vec::new();
@@ -221,7 +227,13 @@ mod tests {
     async fn test_recv_identical_file() {
         let data = vec![0xABu8; 3000];
         let seed = 99;
-        let sums = sum::compute_signatures(&data, seed, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
+        let sums = sum::compute_signatures(
+            &data,
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
 
         let mut buf = Vec::new();
         sender::send_file_delta_with_sums(&mut buf, 0, &data, &sums, seed, ChecksumType::Md5)
@@ -255,7 +267,13 @@ mod tests {
         source[2501] = 0xFF;
 
         let seed = 7;
-        let sums = sum::compute_signatures(&basis, seed, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
+        let sums = sum::compute_signatures(
+            &basis,
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
 
         let mut buf = Vec::new();
         sender::send_file_delta_with_sums(&mut buf, 3, &source, &sums, seed, ChecksumType::Md5)

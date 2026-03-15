@@ -97,7 +97,13 @@ pub async fn transfer_file(
         }
 
         // Compute block length from basis (receiver already knows the params).
-        let sums = sum::compute_signatures(&recv_basis, recv_seed, recv_ct, checksum::CHAR_OFFSET_V30, true);
+        let sums = sum::compute_signatures(
+            &recv_basis,
+            recv_seed,
+            recv_ct,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
         let blength = if sums.head.blength > 0 {
             sums.head.blength as usize
         } else {
@@ -198,7 +204,13 @@ pub async fn transfer_file_compressed(
         }
 
         // Compute block length from basis (receiver already knows the params).
-        let sums = sum::compute_signatures(&recv_basis, recv_seed, recv_ct, checksum::CHAR_OFFSET_V30, true);
+        let sums = sum::compute_signatures(
+            &recv_basis,
+            recv_seed,
+            recv_ct,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
         let blength = if sums.head.blength > 0 {
             sums.head.blength as usize
         } else {

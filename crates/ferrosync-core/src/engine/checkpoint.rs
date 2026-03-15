@@ -194,7 +194,8 @@ impl CheckpointFile {
         if pos + 4 > data.len() {
             return Err(err());
         }
-        let path_len = u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| err())?) as usize;
+        let path_len =
+            u32::from_le_bytes(data[pos..pos + 4].try_into().map_err(|_| err())?) as usize;
         pos += 4;
         if pos + path_len > data.len() {
             return Err(err());
@@ -215,7 +216,8 @@ impl CheckpointFile {
         if pos + 8 > data.len() {
             return Err(err());
         }
-        let block_size = u64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| err())?) as usize;
+        let block_size =
+            u64::from_le_bytes(data[pos..pos + 8].try_into().map_err(|_| err())?) as usize;
         pos += 8;
 
         // checksum_seed

@@ -328,8 +328,6 @@ async fn run_push(
         .map(|(i, _)| (ndx_start + i as i32, i))
         .collect();
 
-
-
     // 3. Sender loop: read NDX from generator, send delta data.
     let mut gen_ndx_state = crate::protocol::varint::NdxState::default();
     let mut send_ndx_state = crate::protocol::varint::NdxState::default();
@@ -447,7 +445,14 @@ async fn run_push(
         let source_data = read_source_file(fs, entry, options)?;
 
         // Match blocks and compute delta.
-        let ops = crate::delta::matcher::match_blocks(&source_data, &sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
+        let ops = crate::delta::matcher::match_blocks(
+            &source_data,
+            &sums,
+            seed,
+            checksum_type,
+            checksum::CHAR_OFFSET_V30,
+            protocol.proper_seed_order,
+        );
 
         // Build sender response: NDX + iflags + sum_head + tokens + checksum.
         let mut resp_buf = Vec::new();
@@ -756,7 +761,13 @@ async fn run_pull(
                 .await
                 .map_err(crate::FerrosyncError::Protocol)?;
         }
-        let sigs = sum::compute_signatures(&basis_data, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
+        let sigs = sum::compute_signatures(
+            &basis_data,
+            seed,
+            checksum_type,
+            checksum::CHAR_OFFSET_V30,
+            protocol.proper_seed_order,
+        );
         sum::write_sums(&mut sig_buf, &sigs)
             .await
             .map_err(crate::FerrosyncError::Protocol)?;
@@ -1101,7 +1112,11 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
 
         if meta.mode & S_IFMT == S_IFDIR && options.recursive() {
             crate::filelist::walk::collect_directory_entries(
-                fs, source, &[], &mut entries, &filters,
+                fs,
+                source,
+                &[],
+                &mut entries,
+                &filters,
             )?;
         } else {
             let mut entry = meta.to_file_entry(name);

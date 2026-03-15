@@ -384,10 +384,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
 ///
 /// This allows protocol code to read from the pipe as a plain `AsyncRead`
 /// stream, transparently demultiplexing data from control messages.
-pub(crate) async fn demux_task<R: AsyncRead + Unpin>(
-    reader: R,
-    mut pipe: tokio::io::DuplexStream,
-) {
+pub(crate) async fn demux_task<R: AsyncRead + Unpin>(reader: R, mut pipe: tokio::io::DuplexStream) {
     let mut mplex = MplexReader::new(reader);
 
     loop {

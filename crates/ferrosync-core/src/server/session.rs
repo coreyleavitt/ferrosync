@@ -350,7 +350,14 @@ impl ServerSession {
             let source_data = read_module_file(fs, &self.module.path, entry)?;
 
             // Match blocks and compute delta.
-            let ops = matcher::match_blocks(&source_data, &sums, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
+            let ops = matcher::match_blocks(
+                &source_data,
+                &sums,
+                seed,
+                checksum_type,
+                checksum::CHAR_OFFSET_V30,
+                protocol.proper_seed_order,
+            );
 
             // Build sender response: NDX + iflags + sum_head + tokens + checksum.
             let mut resp_buf = Vec::new();
@@ -554,7 +561,13 @@ impl ServerSession {
                 const ITEM_TRANSFER: u16 = 1 << 15;
                 varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
             }
-            let sigs = sum::compute_signatures(&basis_data, seed, checksum_type, checksum::CHAR_OFFSET_V30, protocol.proper_seed_order);
+            let sigs = sum::compute_signatures(
+                &basis_data,
+                seed,
+                checksum_type,
+                checksum::CHAR_OFFSET_V30,
+                protocol.proper_seed_order,
+            );
             sum::write_sums(&mut sig_buf, &sigs).await?;
             mplex_out.write_data(&sig_buf).await?;
             mplex_out.flush().await?;
