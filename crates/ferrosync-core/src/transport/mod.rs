@@ -8,7 +8,6 @@
 //! - **Daemon:** TCP connection to port 873 (Phase 6).
 
 pub mod daemon;
-pub mod local;
 pub mod noise;
 pub mod quic;
 pub mod ssh;
