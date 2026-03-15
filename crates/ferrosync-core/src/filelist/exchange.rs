@@ -558,10 +558,13 @@ mod tests {
             .entries;
 
         assert_eq!(received.len(), 3);
+        // With rsync's canonical sort (proto >= 29), files sort before dirs:
+        // alpha.txt, gamma.txt, beta (dir).
         assert_eq!(received[0].name, b"alpha.txt");
         assert_eq!(received[0].len, 100);
-        assert_eq!(received[2].name, b"gamma.txt");
-        assert_eq!(received[2].len, 200);
+        assert_eq!(received[1].name, b"gamma.txt");
+        assert_eq!(received[1].len, 200);
+        assert_eq!(received[2].name, b"beta");
     }
 
     #[tokio::test]
