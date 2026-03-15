@@ -313,6 +313,10 @@ impl ServerSession {
         let demux_handle = tokio::spawn(demux_task(reader, demux_write));
         let mut mplex_out = MplexWriter::new(writer);
 
+        // Read and discard the client's filter list.
+        // The client always sends it for non-local connections.
+        read_and_discard_filter_list(&mut demux_read).await?;
+
         // Receive file list from client sender.
         let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts)
             .await
