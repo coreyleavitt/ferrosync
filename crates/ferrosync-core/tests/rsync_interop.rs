@@ -92,10 +92,6 @@ impl RsyncServerTransport {
 }
 
 impl Transport for RsyncServerTransport {
-    fn is_remote(&self) -> bool {
-        false // Local subprocess: rsync sets local_server=1
-    }
-
     fn connect(
         self: Box<Self>,
     ) -> std::pin::Pin<
@@ -600,4 +596,138 @@ async fn test_interop_pull_archive_mode() {
 
     let content = std::fs::read(dst.join("archive.txt")).unwrap();
     assert_eq!(content, b"archive mode pull\n");
+}
+
+// ---------------------------------------------------------------------------
+// SSH-simulated tests (is_remote=true)
+//
+// These use new_remote() to simulate the SSH protocol path where the filter
+// list is ALWAYS sent (matching rsync --server with local_server=0).
+//
+// IMPORTANT: A local rsync subprocess has local_server=1, which means it
+// conditionally reads the filter list. When is_remote=true, we send the
+// filter list, but the local subprocess may NOT read it -- causing desync.
+// These tests verify our wire format matches what rsync expects over SSH.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_interop_ssh_push_single_file() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("hello.txt"), "ssh push test\n").unwrap();
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        session.run(),
+    ).await;
+
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            panic!("ssh push failed: {e}");
+        }
+        Err(_) => panic!("ssh push timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("hello.txt")).unwrap();
+    assert_eq!(content, b"ssh push test\n");
+}
+
+#[tokio::test]
+async fn test_interop_ssh_push_archive_mode() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("archive.txt"), "ssh archive push\n").unwrap();
+
+    let opts = TransferOptions::builder()
+        .archive()
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        session.run(),
+    ).await;
+
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            panic!("ssh archive push failed: {e}");
+        }
+        Err(_) => panic!("ssh archive push timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("archive.txt")).unwrap();
+    assert_eq!(content, b"ssh archive push\n");
+}
+
+#[tokio::test]
+async fn test_interop_ssh_pull_single_file() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("hello.txt"), "ssh pull test\n").unwrap();
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        session.run(),
+    ).await;
+
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("ssh pull failed: {e}"),
+        Err(_) => panic!("ssh pull timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("hello.txt")).unwrap();
+    assert_eq!(content, b"ssh pull test\n");
 }
