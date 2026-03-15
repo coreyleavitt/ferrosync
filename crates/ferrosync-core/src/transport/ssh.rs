@@ -154,15 +154,16 @@ impl SshTransport {
 
         if self.config.rsync_path == "ferrosync" {
             // Auto-detect: try ferrosync first, fall back to rsync.
+            // Use exec to replace the shell process so stdin/stdout pipe directly.
             format!(
-                "command -v ferrosync >/dev/null 2>&1 && ferrosync serve {args_str} || rsync --server {args_str}"
+                "command -v ferrosync >/dev/null 2>&1 && exec ferrosync serve {args_str} || exec rsync --server {args_str}"
             )
         } else if Self::is_rsync_path(&self.config.rsync_path) {
             // Explicit rsync path: use --server protocol.
             format!("{} --server {args_str}", escape(&self.config.rsync_path))
         } else {
-            // Custom ferrosync path: use serve subcommand.
-            format!("{} serve {args_str}", escape(&self.config.rsync_path))
+            // Custom path: use --server protocol (assume rsync-compatible).
+            format!("{} --server {args_str}", escape(&self.config.rsync_path))
         }
     }
 
@@ -506,9 +507,9 @@ mod tests {
         );
         let cmd = transport.remote_command();
         // Auto-detect: tries ferrosync first, falls back to rsync.
-        assert!(cmd.starts_with("command -v ferrosync"));
-        assert!(cmd.contains("ferrosync serve"));
-        assert!(cmd.contains("|| rsync --server"));
+        assert!(cmd.contains("command -v ferrosync"));
+        assert!(cmd.contains("exec ferrosync serve"));
+        assert!(cmd.contains("|| exec rsync --server"));
         assert!(cmd.contains("/data/backup"));
         assert!(!cmd.contains("--sender"));
     }
@@ -526,9 +527,9 @@ mod tests {
             Path::new("/data/source"),
         );
         let cmd = transport.remote_command();
-        assert!(cmd.starts_with("command -v ferrosync"));
-        assert!(cmd.contains("ferrosync serve --sender"));
-        assert!(cmd.contains("|| rsync --server --sender"));
+        assert!(cmd.contains("command -v ferrosync"));
+        assert!(cmd.contains("exec ferrosync serve --sender"));
+        assert!(cmd.contains("exec rsync --server --sender"));
         assert!(cmd.contains("/data/source"));
     }
 
