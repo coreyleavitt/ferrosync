@@ -393,7 +393,7 @@ async fn send_id_list<W: AsyncWrite + Unpin>(
             // for uid 0 (e.g., "root"). The recv side reads varint30(0) to exit
             // the loop, then reads one more recv_user_name(f, 0).
             varint::write_varint30(w, 0, opts.protocol_version).await?;
-            let id0_name = uid_names.get(&0).map(|n| *n).unwrap_or(b"root");
+            let id0_name = uid_names.get(&0).copied().unwrap_or(b"root");
             let name_len = id0_name.len().min(255) as u8;
             varint::write_byte(w, name_len).await?;
             w.write_all(&id0_name[..name_len as usize]).await?;
@@ -421,7 +421,7 @@ async fn send_id_list<W: AsyncWrite + Unpin>(
         }
         if opts.xmit_id0_names {
             varint::write_varint30(w, 0, opts.protocol_version).await?;
-            let id0_name = gid_names.get(&0).map(|n| *n).unwrap_or(b"root");
+            let id0_name = gid_names.get(&0).copied().unwrap_or(b"root");
             let name_len = id0_name.len().min(255) as u8;
             varint::write_byte(w, name_len).await?;
             w.write_all(&id0_name[..name_len as usize]).await?;
