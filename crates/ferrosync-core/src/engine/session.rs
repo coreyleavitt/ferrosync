@@ -356,7 +356,7 @@ impl<T: Transport> SyncSession<T> {
 /// 8. Goodbye exchange
 async fn run_push(
     reader: Box<dyn AsyncRead + Unpin + Send>,
-    writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    mut writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     protocol: &NegotiatedProtocol,
     options: &TransferOptions,
     fs: &dyn FileSystem,
@@ -368,35 +368,20 @@ async fn run_push(
 
     let proto_ver = protocol.version;
 
-    // Both sides enable MUX after handshake (proto >= 30).
-    let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
-    let demux_handle = tokio::spawn(demux_task(reader, demux_write));
-    let mut mplex_out = MplexWriter::new(writer);
-
-    // 1. Send filter list.
+    // MUX I/O timing depends on the connection type:
     //
-    // rsync's recv_filter_list() behavior depends on local_server:
-    // - Remote (SSH/daemon): ALWAYS reads filter list from sender
-    // - Local (subprocess):  Only reads when delete_mode or prune_empty_dirs
+    // Local subprocess (rsync --server via pipe): rsync enables MUX I/O
+    // immediately after handshake. Filter list, file list, and sender loop
+    // are all MUX-framed.
     //
-    // We must match this exactly: sending when rsync won't read causes the
-    // terminator bytes to be consumed by the file list parser (empty flist).
-    // Not sending when rsync will read causes a deadlock (rsync waits for
-    // filter data while we send file list bytes).
+    // Remote (SSH/daemon): rsync's receiver reads filter list and file list
+    // as raw data BEFORE enabling io_start_multiplex_in. Only the sender
+    // loop (delta transfer) is MUX-framed.
+    //
+    // Filter list: rsync always reads it for remote connections, but only
+    // when delete_mode is active for local subprocess connections.
     let send_filter_list = remote || options.delete() != DeleteMode::None;
-    if send_filter_list {
-        let filter_data = collect_filter_list(options)?;
-        mplex_out
-            .write_data(&filter_data)
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .flush()
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-    }
 
-    // 2. Build and send file list.
     let mut entries = build_source_entries(fs, options)?;
     crate::filelist::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
@@ -408,14 +393,47 @@ async fn run_push(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
-    mplex_out
-        .write_data(&flist_buf)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .flush()
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+    // Enable MUX and send data in the appropriate order.
+    let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
+    let demux_handle = tokio::spawn(demux_task(reader, demux_write));
+
+    if remote {
+        // Remote: send filter list + file list as raw, then start MUX.
+        use tokio::io::AsyncWriteExt;
+        if send_filter_list {
+            let filter_data = collect_filter_list(options)?;
+            writer.write_all(&filter_data).await.map_err(|e| {
+                crate::FerrosyncError::Protocol(crate::error::ProtocolError::from(e))
+            })?;
+        }
+        writer.write_all(&flist_buf).await.map_err(|e| {
+            crate::FerrosyncError::Protocol(crate::error::ProtocolError::from(e))
+        })?;
+        writer.flush().await.map_err(|e| {
+            crate::FerrosyncError::Protocol(crate::error::ProtocolError::from(e))
+        })?;
+    }
+
+    let mut mplex_out = MplexWriter::new(writer);
+
+    if !remote {
+        // Local subprocess: everything is MUX-framed from the start.
+        if send_filter_list {
+            let filter_data = collect_filter_list(options)?;
+            mplex_out
+                .write_data(&filter_data)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
+        }
+        mplex_out
+            .write_data(&flist_buf)
+            .await
+            .map_err(crate::FerrosyncError::Protocol)?;
+        mplex_out
+            .flush()
+            .await
+            .map_err(crate::FerrosyncError::Protocol)?;
+    }
 
     // 3. Sender loop via wire_transfer.
     let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, options.recursive());
