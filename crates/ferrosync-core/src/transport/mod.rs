@@ -30,6 +30,20 @@ pub struct TransportStreams {
     pub(crate) background_task: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl TransportStreams {
+    /// Create a new TransportStreams with no background task.
+    pub fn new(
+        reader: Box<dyn AsyncRead + Unpin + Send>,
+        writer: Box<dyn AsyncWrite + Unpin + Send>,
+    ) -> Self {
+        Self {
+            reader,
+            writer,
+            background_task: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for TransportStreams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TransportStreams").finish_non_exhaustive()
