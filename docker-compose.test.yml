@@ -1,0 +1,20 @@
+services:
+  ferrosync-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ".:/workspace"
+    depends_on:
+      rsync-ssh-target:
+        condition: service_started
+    environment:
+      - FERROSYNC_SSH_TEST=1
+      - FERROSYNC_SSH_HOST=rsync-ssh-target
+      - CARGO_TARGET_DIR=/tmp/ferrosync-target
+    working_dir: /workspace
+
+  rsync-ssh-target:
+    build:
+      context: .
+      dockerfile: Dockerfile.rsync-ssh

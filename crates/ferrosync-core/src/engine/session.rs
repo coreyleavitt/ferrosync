@@ -15,9 +15,7 @@ use std::path::PathBuf;
 use tokio::io::AsyncRead;
 
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
-use crate::engine::wire_transfer::{
-    self, LocalFileOps, LocalFileReader,
-};
+use crate::engine::wire_transfer::{self, LocalFileOps, LocalFileReader};
 use crate::error::FsError;
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
@@ -30,6 +28,18 @@ use crate::stats::TransferStats;
 use crate::transport::Transport;
 
 use super::transfer::TransferResult;
+
+/// Format first N bytes of a buffer as hex for trace logging.
+fn hex_preview(data: &[u8], max_bytes: usize) -> String {
+    let slice = &data[..data.len().min(max_bytes)];
+    let hex: Vec<String> = slice.iter().map(|b| format!("{b:02x}")).collect();
+    let suffix = if data.len() > max_bytes {
+        format!("... ({} total)", data.len())
+    } else {
+        String::new()
+    };
+    format!("{}{}", hex.join(" "), suffix)
+}
 
 type Result<T> = std::result::Result<T, crate::FerrosyncError>;
 
@@ -255,10 +265,6 @@ pub struct SyncSession<T: Transport> {
     fs: Box<dyn FileSystem>,
     direction: SyncDirection,
     progress: ProgressTracker,
-    /// Whether the remote always expects a filter list (matches rsync's
-    /// `!local_server` behavior). True for SSH/daemon/QUIC/TLS, false
-    /// for local subprocess pipes used in interop tests.
-    remote: bool,
 }
 
 impl<T: Transport> SyncSession<T> {
@@ -269,14 +275,12 @@ impl<T: Transport> SyncSession<T> {
         fs: Box<dyn FileSystem>,
         direction: SyncDirection,
     ) -> Self {
-        let remote = transport.is_remote();
         Self {
             transport,
             options,
             fs,
             direction,
             progress: ProgressTracker::new(),
-            remote,
         }
     }
 
@@ -297,7 +301,6 @@ impl<T: Transport> SyncSession<T> {
             fs,
             direction,
             mut progress,
-            remote,
         } = self;
 
         // 1. Connect transport.
@@ -332,7 +335,7 @@ impl<T: Transport> SyncSession<T> {
         let _streams_guard = streams;
 
         if am_sender {
-            run_push(reader, writer, &protocol, &options, &*fs, &mut progress, remote).await
+            run_push(reader, writer, &protocol, &options, &*fs, &mut progress).await
         } else {
             run_pull(reader, writer, &protocol, &options, &*fs, &mut progress).await
         }
@@ -345,15 +348,22 @@ impl<T: Transport> SyncSession<T> {
 
 /// Push local files to remote (we are sender).
 ///
-/// Protocol flow (proto >= 30):
-/// 1. Both sides enable MUX after handshake
-/// 2. We send filter list (MUX DATA)
-/// 3. We send file list (MUX DATA)
-/// 4. Remote generator sends NDX + iflags + block sigs for each file
-/// 5. We match blocks, send NDX + iflags + sum_head + delta tokens + checksum
-/// 6. Phase exchange: read NDX_DONE from generator, respond with NDX_DONE
-/// 7. Write stats (5 varlong30)
-/// 8. Goodbye exchange
+/// Protocol flow traced from rsync 3.1.3 C source (main.c:1146, client_run):
+///
+/// 1. io_start_multiplex_out (main.c:1146) -- both sides enable MUX after handshake
+/// 2. io_start_multiplex_in  (main.c:1148)
+/// 3. send_filter_list       (exclude.c:1377) -- CONDITIONAL, see below
+/// 4. send_file_list         (flist.c)
+/// 5. io_flush               (io.c)
+/// 6. send_files             (sender.c) -- sender loop
+/// 7. write stats            (main.c)
+/// 8. goodbye exchange       (io.c)
+///
+/// Filter list condition (exclude.c:1377-1411):
+///   For SSH push without --delete (and no --prune-empty-dirs, no inc_recurse
+///   extra), neither side sends nor reads the filter list. The condition on
+///   the sender side is: `delete_mode || prune_empty_dirs || inc_recurse_extra`.
+///   We simplify to `delete_mode != None` since we don't support prune/inc_extra.
 async fn run_push(
     reader: Box<dyn AsyncRead + Unpin + Send>,
     writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
@@ -361,7 +371,6 @@ async fn run_push(
     options: &TransferOptions,
     fs: &dyn FileSystem,
     progress: &mut ProgressTracker,
-    remote: bool,
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
     stats.start();
@@ -369,17 +378,23 @@ async fn run_push(
     let proto_ver = protocol.version;
 
     // Both sides enable MUX after handshake (proto >= 30).
+    // C ref: io_start_multiplex_out (main.c:1146)
     let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
     let mut mplex_out = MplexWriter::new(writer);
 
-    // 1. Send filter list (MUX-framed).
+    // Send filter list (MUX-framed) -- CONDITIONAL.
     //
-    // rsync always reads the filter list for remote (SSH/daemon) connections.
-    // For local subprocess, only when delete_mode is active.
-    let send_filter_list = remote || options.delete() != DeleteMode::None;
+    // C ref: exclude.c:1377-1411 (send_filter_list / recv_filter_list)
+    // The filter list is only exchanged when delete_mode is active (or
+    // prune_empty_dirs / inc_recurse_extra, which we don't support).
+    // For a simple push without --delete, neither side sends nor reads it.
+    // This matches rsync's local_server AND remote behavior for proto >= 30.
+    let send_filter_list = options.delete() != DeleteMode::None;
+    tracing::debug!(send_filter_list, delete_mode = ?options.delete(), "push: filter list decision");
     if send_filter_list {
         let filter_data = collect_filter_list(options)?;
+        tracing::trace!(len = filter_data.len(), "push: sending filter list");
         mplex_out
             .write_data(&filter_data)
             .await
@@ -390,7 +405,8 @@ async fn run_push(
             .map_err(crate::FerrosyncError::Protocol)?;
     }
 
-    // 2. Build and send file list (MUX-framed).
+    // Build and send file list (MUX-framed).
+    // C ref: send_file_list (flist.c), called from main.c:1153
     let mut entries = build_source_entries(fs, options)?;
     crate::filelist::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
@@ -402,6 +418,13 @@ async fn run_push(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
+    tracing::debug!(
+        entries = entries.len(),
+        flist_bytes = flist_buf.len(),
+        "push: sending file list"
+    );
+    tracing::trace!(flist_hex = %hex_preview(&flist_buf, 64), "push: flist wire data");
+
     mplex_out
         .write_data(&flist_buf)
         .await
@@ -411,7 +434,8 @@ async fn run_push(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
-    // 3. Sender loop via wire_transfer.
+    // Sender loop via wire_transfer.
+    // C ref: send_files (sender.c), called from main.c:1157
     let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, options.recursive());
     let file_reader = LocalFileReader::new(fs, options.source());
 
@@ -444,6 +468,21 @@ async fn run_push(
 // ---------------------------------------------------------------------------
 
 /// Pull remote files to local (we are receiver).
+///
+/// Protocol flow traced from rsync 3.1.3 C source (main.c:985, client_run):
+///
+/// 1. io_start_multiplex_in  (main.c:985)  -- enable MUX for reading
+/// 2. send_filter_list       (exclude.c)   -- ALWAYS sent for pull (sender reads it)
+/// 3. recv_file_list         (flist.c)     -- receive file list from sender
+/// 4. io_start_multiplex_out (main.c:1003) -- enable MUX for writing AFTER recv
+/// 5. do_recv                (receiver.c)  -- generator + receiver loop
+/// 6. phase exchange         (io.c)
+/// 7. read stats             (main.c)
+/// 8. goodbye exchange       (io.c)
+///
+/// Filter list: For pull, rsync's sender side always calls recv_filter_list()
+/// (exclude.c:1377 -- the `am_sender` path reads unconditionally). We must
+/// always send it.
 async fn run_pull(
     reader: Box<dyn AsyncRead + Unpin + Send>,
     writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
@@ -461,12 +500,10 @@ async fn run_pull(
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
     let mut mplex_out = MplexWriter::new(writer);
 
-    // Send filter list.
-    //
-    // For pull, rsync's sender-side recv_filter_list() always reads the
-    // filter list regardless of local_server (the condition is different
-    // from the receiver side). We must always send it.
+    // Send filter list -- always for pull.
+    // C ref: exclude.c:1377 -- sender's recv_filter_list() always reads.
     let filter_data = collect_filter_list(options)?;
+    tracing::debug!(len = filter_data.len(), "pull: sending filter list");
     mplex_out
         .write_data(&filter_data)
         .await
@@ -477,6 +514,7 @@ async fn run_pull(
         .map_err(crate::FerrosyncError::Protocol)?;
 
     // Receive file list from remote.
+    // C ref: recv_file_list (flist.c), called from main.c:992
     let received_flist = exchange::recv_file_list(&mut demux_read, protocol, options)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;

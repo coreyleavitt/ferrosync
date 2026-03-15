@@ -225,6 +225,10 @@ impl ServerSession {
         let mut mplex_out = MplexWriter::new(writer);
 
         // Read and discard filter list from client.
+        // C ref: recv_filter_list (exclude.c:1377) -- server receiver side.
+        // For daemon protocol, always read filter list. For SSH --server,
+        // the filter list is conditional on delete_mode, but our daemon
+        // always sends it. This matches rsync daemon behavior.
         read_and_discard_filter_list(&mut demux_read).await?;
 
         // Build file list from module path.
@@ -313,8 +317,15 @@ impl ServerSession {
         let demux_handle = tokio::spawn(demux_task(reader, demux_write));
         let mut mplex_out = MplexWriter::new(writer);
 
-        // Read and discard the client's filter list.
-        read_and_discard_filter_list(&mut demux_read).await?;
+        // Read and discard the client's filter list -- CONDITIONAL.
+        // C ref: exclude.c:1377-1411 (recv_filter_list)
+        // The client sender only sends the filter list when delete_mode is active.
+        // We must match that condition to avoid reading file list data as filter list.
+        let expect_filter_list = opts.delete() != crate::options::DeleteMode::None;
+        tracing::debug!(expect_filter_list, delete_mode = ?opts.delete(), "server receive: filter list decision");
+        if expect_filter_list {
+            read_and_discard_filter_list(&mut demux_read).await?;
+        }
 
         // Receive file list from client sender.
         let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts)

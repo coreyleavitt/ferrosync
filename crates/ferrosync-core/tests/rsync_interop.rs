@@ -18,14 +18,42 @@ use ferrosync_core::fs::unix::UnixFileSystem;
 use ferrosync_core::options::TransferOptions;
 use ferrosync_core::transport::{Transport, TransportStreams};
 
+/// Locate a usable rsync binary.
+///
+/// Prefers `RSYNC_BIN` env var, then `/tmp/rsync-3.4.1/rsync` (vanilla build
+/// for systems with a vendor-patched rsync), then `rsync` from PATH.
+fn rsync_binary() -> Option<String> {
+    if let Ok(bin) = std::env::var("RSYNC_BIN") {
+        if std::process::Command::new(&bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some(bin);
+        }
+    }
+
+    // Prefer vanilla build over potentially vendor-patched system rsync.
+    for candidate in &["/tmp/rsync-3.4.1/rsync", "rsync"] {
+        if std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
 /// Check if rsync is available. Skip tests if not.
 fn rsync_available() -> bool {
-    std::process::Command::new("rsync")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
+    rsync_binary().is_some()
 }
 
 macro_rules! skip_if_no_rsync {
@@ -40,6 +68,7 @@ macro_rules! skip_if_no_rsync {
 /// Test-only transport that spawns rsync --server as a subprocess.
 /// This exists ONLY in test code for interop testing.
 struct RsyncServerTransport {
+    rsync_bin: String,
     args: Vec<String>,
     cwd: std::path::PathBuf,
 }
@@ -55,6 +84,7 @@ impl RsyncServerTransport {
         args.push(".".to_string());
 
         Self {
+            rsync_bin: rsync_binary().unwrap_or_else(|| "rsync".to_string()),
             args,
             cwd: cwd.to_path_buf(),
         }
@@ -62,17 +92,13 @@ impl RsyncServerTransport {
 }
 
 impl Transport for RsyncServerTransport {
-    fn is_remote(&self) -> bool {
-        false // Local subprocess: rsync sets local_server=1
-    }
-
     fn connect(
         self: Box<Self>,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<TransportStreams, TransportError>> + Send>,
     > {
         Box::pin(async move {
-            let mut child = Command::new("rsync")
+            let mut child = Command::new(&self.rsync_bin)
                 .args(&self.args)
                 .current_dir(&self.cwd)
                 .stdin(Stdio::piped())
@@ -347,4 +373,148 @@ async fn test_interop_pull_empty_file() {
 
     let content = std::fs::read(dst.join("empty.txt")).unwrap();
     assert!(content.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// File list codec validation (Phase 4)
+//
+// These tests verify our flist wire encoding is correctly parsed by real rsync
+// by checking that file metadata (name, size, mode, mtime) survives a push.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_interop_flist_preserves_mtime() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("timed.txt"), "check mtime\n").unwrap();
+
+    // Set a specific mtime to verify it's preserved through the wire encoding.
+    let known_time = filetime::FileTime::from_unix_time(1700000000, 0);
+    filetime::set_file_mtime(src.join("timed.txt"), known_time).unwrap();
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+    session.run().await.unwrap();
+
+    let content = std::fs::read(dst.join("timed.txt")).unwrap();
+    assert_eq!(content, b"check mtime\n");
+
+    // Verify rsync set the mtime correctly.
+    let meta = std::fs::metadata(dst.join("timed.txt")).unwrap();
+    let actual_mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(actual_mtime, 1700000000, "mtime should be preserved through flist encoding");
+}
+
+#[tokio::test]
+async fn test_interop_flist_preserves_permissions() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("script.sh"), "#!/bin/sh\necho hi\n").unwrap();
+    // Set executable permission.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            src.join("script.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .preserve_perms(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+    session.run().await.unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dst.join("script.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "permissions should be preserved through flist encoding");
+    }
+}
+
+#[tokio::test]
+async fn test_interop_flist_multiple_files_sorted() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create files with names that test prefix compression in the codec.
+    let files = vec![
+        ("alpha.txt", "aaa"),
+        ("alpha_test.txt", "bbb"), // shares "alpha" prefix
+        ("beta.txt", "ccc"),
+        ("beta_long_name.txt", "ddd"),
+    ];
+
+    for (name, content) in &files {
+        std::fs::write(src.join(name), content).unwrap();
+    }
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+    session.run().await.unwrap();
+
+    // Verify all files arrived with correct content.
+    for (name, content) in &files {
+        let actual = std::fs::read(dst.join(name)).unwrap();
+        assert_eq!(
+            actual,
+            content.as_bytes(),
+            "file {name} content mismatch after flist push"
+        );
+    }
 }
