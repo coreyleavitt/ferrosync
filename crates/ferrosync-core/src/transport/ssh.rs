@@ -1,9 +1,10 @@
 //! Native SSH transport using `russh`.
 //!
-//! Connects to a remote host over SSH, executes `rsync --server ...`, and
-//! returns async read/write streams for the rsync protocol exchange. This
-//! avoids shelling out to the system `ssh` binary, eliminating pipe overhead,
-//! command injection risk, and platform dependency.
+//! Connects to a remote host over SSH and executes a remote command to start
+//! the rsync wire protocol. By default, auto-detects ferrosync on the remote
+//! and falls back to stock rsync if not found. This avoids shelling out to
+//! the system `ssh` binary, eliminating pipe overhead, command injection risk,
+//! and platform dependency.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,7 +57,7 @@ impl Default for SshTransportConfig {
             user: String::new(),
             identity_files: Vec::new(),
             known_hosts_policy: KnownHostsPolicy::Strict,
-            rsync_path: "rsync".to_string(),
+            rsync_path: "ferrosync".to_string(),
             connect_timeout: Duration::from_secs(30),
         }
     }
@@ -76,11 +77,11 @@ impl SshTransportConfig {
     }
 }
 
-/// Native SSH transport for connecting to a remote rsync process.
+/// Native SSH transport using pure-Rust `russh`.
 ///
-/// Uses `russh` for a pure-Rust, tokio-native SSH connection. The remote
-/// side sees a normal SSH session executing `rsync --server ...`, so this
-/// is fully compatible with stock rsync servers.
+/// By default, tries `ferrosync serve` on the remote and falls back to
+/// `rsync --server` if ferrosync is not installed. Set `rsync_path` to
+/// override (e.g., "rsync" to force stock rsync, or a custom path).
 pub struct SshTransport {
     config: SshTransportConfig,
     /// Arguments for `rsync --server`.
@@ -95,7 +96,9 @@ impl SshTransport {
     /// - `options`: the server-mode option string (e.g., "-logDtprze.iLsfxCIvu").
     /// - `path`: the remote source or destination path.
     pub fn new(config: SshTransportConfig, am_sender: bool, options: &str, path: &Path) -> Self {
-        let mut args = vec!["--server".to_string()];
+        // Store protocol args without the binary/subcommand prefix.
+        // remote_command() will prepend the appropriate prefix based on config.
+        let mut args = Vec::new();
         if !am_sender {
             args.push("--sender".to_string());
         }
@@ -106,27 +109,61 @@ impl SshTransport {
         Self { config, args }
     }
 
+    /// Returns true if the configured remote binary is rsync (not ferrosync).
+    fn is_rsync_path(path: &str) -> bool {
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        basename == "rsync"
+    }
+
     /// Build the remote command string.
+    ///
+    /// When the configured binary is "ferrosync" (default), generates a
+    /// shell command that tries ferrosync first and falls back to rsync:
+    ///
+    /// ```sh
+    /// command -v ferrosync >/dev/null 2>&1 && ferrosync serve ARGS || rsync --server ARGS
+    /// ```
+    ///
+    /// This way ferrosync-to-ferrosync transfers happen automatically when
+    /// the remote has ferrosync installed, with zero-latency fallback to
+    /// stock rsync otherwise. `command -v` is POSIX and effectively free.
+    ///
+    /// When the configured binary is explicitly set to something else
+    /// (e.g., "rsync" or "/usr/local/bin/rsync"), it's used directly
+    /// without fallback.
     fn remote_command(&self) -> String {
-        let mut parts = vec![self.config.rsync_path.clone()];
-        parts.extend(self.args.iter().cloned());
-        // Shell-escape arguments that contain spaces or special chars.
-        parts
+        let escape = |arg: &str| -> String {
+            if arg.contains(' ')
+                || arg.contains('\'')
+                || arg.contains('"')
+                || arg.contains('\\')
+                || arg.contains('$')
+            {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            } else {
+                arg.to_string()
+            }
+        };
+
+        let args_str: String = self
+            .args
             .iter()
-            .map(|arg| {
-                if arg.contains(' ')
-                    || arg.contains('\'')
-                    || arg.contains('"')
-                    || arg.contains('\\')
-                    || arg.contains('$')
-                {
-                    format!("'{}'", arg.replace('\'', "'\\''"))
-                } else {
-                    arg.clone()
-                }
-            })
+            .map(|a| escape(a))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" ");
+
+        if self.config.rsync_path == "ferrosync" {
+            // Auto-detect: try ferrosync first, fall back to rsync.
+            format!(
+                "command -v ferrosync >/dev/null 2>&1 && ferrosync serve {args_str} || rsync --server {args_str}"
+            )
+        } else if Self::is_rsync_path(&self.config.rsync_path) {
+            // Explicit rsync path: use --server protocol.
+            format!("{} --server {args_str}", escape(&self.config.rsync_path))
+        } else {
+            // Custom ferrosync path: use serve subcommand.
+            format!("{} serve {args_str}", escape(&self.config.rsync_path))
+        }
     }
 
     /// Try to authenticate with a private key file.
@@ -441,7 +478,7 @@ mod tests {
     fn test_ssh_transport_config_defaults() {
         let config = SshTransportConfig::default();
         assert_eq!(config.port, 22);
-        assert_eq!(config.rsync_path, "rsync");
+        assert_eq!(config.rsync_path, "ferrosync");
         assert_eq!(config.connect_timeout, Duration::from_secs(30));
         assert_eq!(config.known_hosts_policy, KnownHostsPolicy::Strict);
         assert!(config.identity_files.is_empty());
@@ -456,7 +493,47 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_command_construction_sender() {
+    fn test_remote_command_auto_detect_sender() {
+        let config = SshTransportConfig {
+            host: "example.com".to_string(),
+            ..Default::default()
+        };
+        let transport = SshTransport::new(
+            config,
+            true, // we are sender, remote is receiver
+            "-logDtprze.iLsfxCIvu",
+            Path::new("/data/backup"),
+        );
+        let cmd = transport.remote_command();
+        // Auto-detect: tries ferrosync first, falls back to rsync.
+        assert!(cmd.starts_with("command -v ferrosync"));
+        assert!(cmd.contains("ferrosync serve"));
+        assert!(cmd.contains("|| rsync --server"));
+        assert!(cmd.contains("/data/backup"));
+        assert!(!cmd.contains("--sender"));
+    }
+
+    #[test]
+    fn test_remote_command_auto_detect_receiver() {
+        let config = SshTransportConfig {
+            host: "example.com".to_string(),
+            ..Default::default()
+        };
+        let transport = SshTransport::new(
+            config,
+            false, // we are receiver, remote is sender
+            "-logDtprze.iLsfxCIvu",
+            Path::new("/data/source"),
+        );
+        let cmd = transport.remote_command();
+        assert!(cmd.starts_with("command -v ferrosync"));
+        assert!(cmd.contains("ferrosync serve --sender"));
+        assert!(cmd.contains("|| rsync --server --sender"));
+        assert!(cmd.contains("/data/source"));
+    }
+
+    #[test]
+    fn test_remote_command_rsync_fallback_sender() {
         let config = SshTransportConfig {
             host: "example.com".to_string(),
             rsync_path: "rsync".to_string(),
@@ -474,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_command_construction_receiver() {
+    fn test_remote_command_rsync_fallback_receiver() {
         let config = SshTransportConfig {
             host: "example.com".to_string(),
             rsync_path: "/usr/local/bin/rsync".to_string(),
@@ -499,6 +576,16 @@ mod tests {
         let transport = SshTransport::new(config, true, "-r", Path::new("/path with spaces/dir"));
         let cmd = transport.remote_command();
         assert!(cmd.contains("'/path with spaces/dir'"));
+    }
+
+    #[test]
+    fn test_is_rsync_path() {
+        assert!(SshTransport::is_rsync_path("rsync"));
+        assert!(SshTransport::is_rsync_path("/usr/bin/rsync"));
+        assert!(SshTransport::is_rsync_path("/usr/local/bin/rsync"));
+        assert!(!SshTransport::is_rsync_path("ferrosync"));
+        assert!(!SshTransport::is_rsync_path("/usr/bin/ferrosync"));
+        assert!(!SshTransport::is_rsync_path("frsync"));
     }
 
     fn generate_test_key() -> keys::PrivateKey {
