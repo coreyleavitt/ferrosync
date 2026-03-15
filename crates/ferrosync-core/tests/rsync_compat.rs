@@ -12,7 +12,6 @@ use std::path::Path;
 use ferrosync_core::engine::progress::ProgressTracker;
 use ferrosync_core::engine::transfer::execute_transfer;
 use ferrosync_core::fs::unix::UnixFileSystem;
-use ferrosync_core::fs::FileSystem;
 use ferrosync_core::options::TransferOptions;
 use ferrosync_core::protocol::handshake::ChecksumType;
 

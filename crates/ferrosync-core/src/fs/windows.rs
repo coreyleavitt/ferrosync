@@ -37,12 +37,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Generate a unique temp file name to avoid collisions from concurrent writes.
 fn unique_tmp_name(suffix: &str) -> String {
     let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(
-        ".ferrosync.{}.{}{}.tmp",
-        std::process::id(),
-        seq,
-        suffix
-    )
+    format!(".ferrosync.{}.{}{}.tmp", std::process::id(), seq, suffix)
 }
 
 /// Standard Windows filesystem implementation.

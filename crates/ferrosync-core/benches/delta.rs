@@ -4,7 +4,7 @@
 //! for various file sizes and similarity levels.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use ferrosync_core::delta::{matcher, sum};
+use ferrosync_core::delta::{checksum, matcher, sum};
 use ferrosync_core::protocol::handshake::ChecksumType;
 
 fn generate_data(size: usize) -> Vec<u8> {
@@ -51,7 +51,7 @@ fn bench_compute_signatures(c: &mut Criterion) {
 
         for &(name, alg) in &algorithms {
             group.bench_with_input(BenchmarkId::new(name, size), &data, |b, data| {
-                b.iter(|| sum::compute_signatures(data, 42, alg));
+                b.iter(|| sum::compute_signatures(data, 42, alg, checksum::CHAR_OFFSET_V30, true));
             });
         }
     }
@@ -66,11 +66,26 @@ fn bench_match_blocks(c: &mut Criterion) {
 
     for &size in sizes {
         let data = generate_data(size);
-        let sums = sum::compute_signatures(&data, 42, ChecksumType::Md5);
+        let sums = sum::compute_signatures(
+            &data,
+            42,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
         group.throughput(Throughput::Bytes(size as u64));
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &data, |b, data| {
-            b.iter(|| matcher::match_blocks(data, &sums, 42, ChecksumType::Md5));
+            b.iter(|| {
+                matcher::match_blocks(
+                    data,
+                    &sums,
+                    42,
+                    ChecksumType::Md5,
+                    checksum::CHAR_OFFSET_V30,
+                    true,
+                )
+            });
         });
     }
 
@@ -81,11 +96,26 @@ fn bench_match_blocks(c: &mut Criterion) {
     for &size in sizes {
         let basis = generate_data(size);
         let source = generate_modified(&basis, 10);
-        let sums = sum::compute_signatures(&basis, 42, ChecksumType::Md5);
+        let sums = sum::compute_signatures(
+            &basis,
+            42,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
         group.throughput(Throughput::Bytes(size as u64));
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &source, |b, source| {
-            b.iter(|| matcher::match_blocks(source, &sums, 42, ChecksumType::Md5));
+            b.iter(|| {
+                matcher::match_blocks(
+                    source,
+                    &sums,
+                    42,
+                    ChecksumType::Md5,
+                    checksum::CHAR_OFFSET_V30,
+                    true,
+                )
+            });
         });
     }
 
@@ -96,11 +126,26 @@ fn bench_match_blocks(c: &mut Criterion) {
     for &size in sizes {
         let basis = generate_data(size);
         let source = vec![0xFFu8; size];
-        let sums = sum::compute_signatures(&basis, 42, ChecksumType::Md5);
+        let sums = sum::compute_signatures(
+            &basis,
+            42,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
         group.throughput(Throughput::Bytes(size as u64));
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &source, |b, source| {
-            b.iter(|| matcher::match_blocks(source, &sums, 42, ChecksumType::Md5));
+            b.iter(|| {
+                matcher::match_blocks(
+                    source,
+                    &sums,
+                    42,
+                    ChecksumType::Md5,
+                    checksum::CHAR_OFFSET_V30,
+                    true,
+                )
+            });
         });
     }
 
@@ -115,8 +160,21 @@ fn bench_apply_ops(c: &mut Criterion) {
     for &size in sizes {
         let basis = generate_data(size);
         let source = generate_modified(&basis, 10);
-        let sums = sum::compute_signatures(&basis, 42, ChecksumType::Md5);
-        let ops = matcher::match_blocks(&source, &sums, 42, ChecksumType::Md5);
+        let sums = sum::compute_signatures(
+            &basis,
+            42,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
+        let ops = matcher::match_blocks(
+            &source,
+            &sums,
+            42,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
         let blength = sums.head.blength as usize;
         let remainder = sums.head.remainder as usize;
 

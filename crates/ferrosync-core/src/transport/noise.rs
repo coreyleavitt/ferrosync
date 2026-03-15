@@ -139,7 +139,11 @@ enum NoiseReadState {
     /// Partially read the 2-byte length prefix.
     ReadingLen { buf: [u8; 2], pos: usize },
     /// Partially read the encrypted message body.
-    ReadingBody { len: usize, buf: Vec<u8>, pos: usize },
+    ReadingBody {
+        len: usize,
+        buf: Vec<u8>,
+        pos: usize,
+    },
     /// Delivering decrypted plaintext to the caller.
     Delivering { plaintext: Vec<u8>, pos: usize },
 }
@@ -147,7 +151,7 @@ enum NoiseReadState {
 /// State machine for writing framed Noise messages.
 ///
 /// If the underlying TCP write is partial, the encrypted frame (length prefix
-/// + ciphertext) must be retained and retried on the next `poll_write` call.
+/// and ciphertext) must be retained and retried on the next `poll_write` call.
 /// Without this, a partial write would lose the encrypted frame while the
 /// Noise nonce has already advanced, corrupting the stream.
 enum NoiseWriteState {
@@ -571,19 +575,16 @@ fn io_err(e: std::io::Error) -> TransportError {
 /// Returns `(private_key, public_key)` as 32-byte vectors, or an error
 /// if keypair generation fails.
 pub fn generate_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
-    let builder = Builder::new(
-        "Noise_XX_25519_ChaChaPoly_BLAKE2s"
-            .parse()
-            .map_err(|e| TransportError::ConnectionFailed {
-                message: format!("invalid Noise protocol name: {e}"),
-            })?,
-    );
-    let keypair =
-        builder
-            .generate_keypair()
-            .map_err(|e| TransportError::ConnectionFailed {
-                message: format!("Noise keypair generation failed: {e}"),
-            })?;
+    let builder = Builder::new("Noise_XX_25519_ChaChaPoly_BLAKE2s".parse().map_err(|e| {
+        TransportError::ConnectionFailed {
+            message: format!("invalid Noise protocol name: {e}"),
+        }
+    })?);
+    let keypair = builder
+        .generate_keypair()
+        .map_err(|e| TransportError::ConnectionFailed {
+            message: format!("Noise keypair generation failed: {e}"),
+        })?;
     Ok((keypair.private, keypair.public))
 }
 

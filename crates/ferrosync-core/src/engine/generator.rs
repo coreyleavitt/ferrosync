@@ -28,7 +28,13 @@ pub async fn send_file_signatures<W: AsyncWrite + Unpin>(
     varint::write_int(w, file_index).await?;
 
     // Compute and send signatures.
-    let sums = sum::compute_signatures(basis_data, seed, checksum_type, checksum::CHAR_OFFSET_V30, true);
+    let sums = sum::compute_signatures(
+        basis_data,
+        seed,
+        checksum_type,
+        checksum::CHAR_OFFSET_V30,
+        true,
+    );
     sum::write_sums(w, &sums).await?;
 
     Ok(())

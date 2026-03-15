@@ -599,7 +599,11 @@ async fn run_sync(
             let seed = 0; // No wire handshake, use deterministic seed.
             let checksum_type = ferrosync_core::protocol::handshake::ChecksumType::Blake3;
             let result = ferrosync_core::engine::transfer::execute_transfer(
-                &*fs, &opts, seed, checksum_type, &mut progress,
+                &*fs,
+                &opts,
+                seed,
+                checksum_type,
+                &mut progress,
             )
             .await?;
             if show_stats {
