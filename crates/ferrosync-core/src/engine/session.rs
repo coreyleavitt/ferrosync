@@ -209,7 +209,7 @@ pub fn parse_server_args(args: &[String], module_path: std::path::PathBuf, am_se
 
     // Parse long-form options.
     for opt in &long_opts {
-        match opt.as_ref() {
+        match *opt {
             "--inplace" => { builder = builder.inplace(true); }
             "--numeric-ids" => { builder = builder.numeric_ids(true); }
             "--append" => { builder = builder.append(true); }

@@ -306,6 +306,7 @@ impl FileOps for ModuleFileOps<'_> {
 /// and send delta data.
 ///
 /// Used by both client push (run_push) and server send (handle_send_impl).
+#[allow(clippy::too_many_arguments)]
 pub async fn sender_loop<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
@@ -511,6 +512,7 @@ where
 /// data, and reconstruct files.
 ///
 /// Used by both client pull (run_pull) and server receive (handle_receive_impl).
+#[allow(clippy::too_many_arguments)]
 pub async fn receiver_loop<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
