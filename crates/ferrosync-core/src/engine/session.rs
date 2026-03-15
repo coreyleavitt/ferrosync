@@ -403,7 +403,7 @@ async fn run_push(
     tracing::debug!(send_filter_list, delete_mode = ?options.delete(), "push: filter list decision");
     if send_filter_list {
         let filter_data = collect_filter_list(options)?;
-        tracing::trace!(len = filter_data.len(), "push: sending filter list");
+        tracing::debug!(len = filter_data.len(), hex = %hex_preview(&filter_data, 64), "push: sending filter list");
         mplex_out
             .write_data(&filter_data)
             .await
@@ -418,6 +418,18 @@ async fn run_push(
     // C ref: send_file_list (flist.c), called from main.c:1153
     let mut entries = build_source_entries(fs, options)?;
     crate::filelist::sort::canonical_sort(&mut entries);
+    for (i, e) in entries.iter().enumerate() {
+        tracing::debug!(
+            idx = i,
+            name = %String::from_utf8_lossy(&e.name),
+            len = e.len,
+            mode = format!("{:#o}", e.mode),
+            mtime = e.mtime,
+            uid = e.uid,
+            gid = e.gid,
+            "push: file entry"
+        );
+    }
     stats.total_files = entries.len() as u64;
     let total_bytes: i64 = entries.iter().map(|e| e.len).sum();
     progress.set_totals(stats.total_files, total_bytes as u64);
@@ -432,7 +444,19 @@ async fn run_push(
         flist_bytes = flist_buf.len(),
         "push: sending file list"
     );
-    tracing::trace!(flist_hex = %hex_preview(&flist_buf, 64), "push: flist wire data");
+    // Dump the full flist buffer at debug level so we can compare with rsync.
+    tracing::debug!(flist_hex = %hex_preview(&flist_buf, 256), "push: flist wire bytes");
+
+    // Log the MUX-framed bytes that will be sent on the wire.
+    {
+        let tag: u32 = (7u32 << 24) | (flist_buf.len() as u32);
+        let mut mux_frame = tag.to_le_bytes().to_vec();
+        mux_frame.extend_from_slice(&flist_buf);
+        tracing::debug!(
+            mux_hex = %hex_preview(&mux_frame, 256),
+            "push: MUX-framed flist (first frame)"
+        );
+    }
 
     mplex_out
         .write_data(&flist_buf)
