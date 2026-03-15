@@ -22,168 +22,232 @@ pub fn canonical_sort(entries: &mut [FileEntry]) {
 ///
 /// This matches rsync's `f_name_cmp` for protocol >= 29.
 pub fn f_name_cmp(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
-    // State machine for walking through the virtual path.
-    // A file's virtual path is: dirname + "/" + basename + (if dir: "/")
+    // This is a faithful port of rsync's f_name_cmp from flist.c.
+    //
+    // Each entry's virtual path is walked as a sequence of characters:
+    //   dirname + "/" + basename + (if dir: "/")
+    //
+    // The comparison uses a "type" (t_PATH vs t_ITEM) that dynamically
+    // changes as we transition through path components. t_PATH entries
+    // sort after t_ITEM entries, which ensures directories sort after
+    // files at each level.
+
     #[derive(Clone, Copy, PartialEq)]
-    enum Segment {
-        Dir,   // Walking through dirname
-        Slash, // Implicit "/" between dirname and basename
-        Base,  // Walking through basename
-        Trail, // Implicit trailing "/" for directories
-        Done,  // Past the end
+    enum State {
+        Dir,      // Walking through dirname bytes
+        Slash,    // The "/" between dirname and basename
+        Base,     // Walking through basename bytes
+        Trailing, // The implicit trailing "/" for directories
+        Done,     // Past the end
     }
 
-    struct PathWalker<'a> {
-        dirname: Option<&'a [u8]>,
+    /// Whether this entry is a "path" type (directory being descended into).
+    #[derive(Clone, Copy, PartialEq)]
+    enum FncType {
+        Path, // Directories (with subdirectories or dirname)
+        Item, // Regular files, "." root dir
+    }
+
+    struct Walker<'a> {
         basename: &'a [u8],
+        dirname: Option<&'a [u8]>,
         is_dir: bool,
-        segment: Segment,
+        state: State,
+        fnc_type: FncType,
         pos: usize,
     }
 
-    impl<'a> PathWalker<'a> {
+    impl<'a> Walker<'a> {
         fn new(entry: &'a FileEntry) -> Self {
             let dirname = entry.dirname();
             let basename = entry.basename();
             let is_dir = (entry.mode & S_IFMT) == S_IFDIR;
 
-            // Special case: dirname is None and basename is "." (root dir).
-            let segment = if let Some(d) = dirname {
-                if d.is_empty() {
-                    Segment::Slash
+            if let Some(d) = dirname {
+                // Has dirname -> start walking dirname, type = PATH
+                let (state, pos) = if d.is_empty() {
+                    (State::Slash, 0)
                 } else {
-                    Segment::Dir
+                    (State::Dir, 0)
+                };
+                Walker {
+                    basename,
+                    dirname,
+                    is_dir,
+                    state,
+                    fnc_type: FncType::Path,
+                    pos,
                 }
-            } else if is_dir && basename == b"." {
-                // Root directory "." -- treat as trailing.
-                Segment::Trail
             } else {
-                Segment::Base
-            };
-
-            Self {
-                dirname,
-                basename,
-                is_dir,
-                segment,
-                pos: 0,
+                // No dirname
+                let fnc_type = if is_dir { FncType::Path } else { FncType::Item };
+                if is_dir && basename == b"." {
+                    // Special: "." root dir is t_ITEM, starts at trailing
+                    Walker {
+                        basename,
+                        dirname: None,
+                        is_dir,
+                        state: State::Trailing,
+                        fnc_type: FncType::Item,
+                        pos: 0,
+                    }
+                } else {
+                    Walker {
+                        basename,
+                        dirname: None,
+                        is_dir,
+                        state: State::Base,
+                        fnc_type,
+                        pos: 0,
+                    }
+                }
             }
         }
 
-        /// Get the current byte, or None if at end.
-        fn current(&self) -> Option<u8> {
-            match self.segment {
-                Segment::Dir => {
-                    let d = self.dirname.unwrap();
-                    if self.pos < d.len() {
-                        Some(d[self.pos])
-                    } else {
-                        None // Should advance to Slash.
-                    }
-                }
-                Segment::Slash => Some(b'/'),
-                Segment::Base => {
-                    if self.pos < self.basename.len() {
-                        Some(self.basename[self.pos])
-                    } else {
-                        None // Should advance to Trail or Done.
-                    }
-                }
-                Segment::Trail => Some(b'/'),
-                Segment::Done => None,
-            }
-        }
-
-        /// Whether the current position is within a "path" segment (dirname)
-        /// vs an "item" segment (basename). This affects directory-vs-file
-        /// ordering: path segments (directories being descended into) sort
-        /// after item segments.
-        fn is_path_segment(&self) -> bool {
-            matches!(self.segment, Segment::Dir | Segment::Slash)
-        }
-
-        /// Advance to the next byte.
-        fn advance(&mut self) {
-            match self.segment {
-                Segment::Dir => {
-                    self.pos += 1;
-                    let d = self.dirname.unwrap();
-                    if self.pos >= d.len() {
-                        self.segment = Segment::Slash;
-                        self.pos = 0;
-                    }
-                }
-                Segment::Slash => {
-                    self.segment = Segment::Base;
-                    self.pos = 0;
-                }
-                Segment::Base => {
-                    self.pos += 1;
-                    if self.pos >= self.basename.len() {
-                        if self.is_dir {
-                            self.segment = Segment::Trail;
-                        } else {
-                            self.segment = Segment::Done;
+        /// Get current character, advancing state when at end of segment.
+        /// Returns None only when truly done.
+        fn current_char(&mut self) -> Option<u8> {
+            loop {
+                match self.state {
+                    State::Dir => {
+                        let d = self.dirname.unwrap();
+                        if self.pos < d.len() {
+                            return Some(d[self.pos]);
                         }
+                        // End of dirname -> transition to slash
+                        self.state = State::Slash;
                         self.pos = 0;
                     }
+                    State::Slash => {
+                        return Some(b'/');
+                    }
+                    State::Base => {
+                        if self.pos < self.basename.len() {
+                            return Some(self.basename[self.pos]);
+                        }
+                        // End of basename -> transition to trailing (dir) or done
+                        self.state = State::Trailing;
+                        if self.fnc_type == FncType::Path {
+                            // Directory: emit trailing "/"
+                            return Some(b'/');
+                        }
+                        // File: fall through to trailing -> done
+                        self.fnc_type = FncType::Item;
+                    }
+                    State::Trailing => {
+                        self.fnc_type = FncType::Item;
+                        self.state = State::Done;
+                        return None;
+                    }
+                    State::Done => {
+                        return None;
+                    }
                 }
-                Segment::Trail => {
-                    self.segment = Segment::Done;
+            }
+        }
+
+        /// Advance past the current character.
+        fn advance(&mut self) {
+            match self.state {
+                State::Dir => {
+                    self.pos += 1;
+                }
+                State::Slash => {
+                    // After the slash, update type based on whether entry is dir.
+                    self.fnc_type = if self.is_dir {
+                        FncType::Path
+                    } else {
+                        FncType::Item
+                    };
+                    // Special case: basename is "." for a dir
+                    if self.fnc_type == FncType::Path
+                        && self.basename.len() == 1
+                        && self.basename[0] == b'.'
+                    {
+                        self.fnc_type = FncType::Item;
+                        self.state = State::Trailing;
+                    } else {
+                        self.state = State::Base;
+                    }
                     self.pos = 0;
                 }
-                Segment::Done => {}
+                State::Base => {
+                    self.pos += 1;
+                }
+                State::Trailing => {
+                    self.fnc_type = FncType::Item;
+                    self.state = State::Done;
+                    self.pos = 0;
+                }
+                State::Done => {}
             }
         }
     }
 
-    let mut wa = PathWalker::new(a);
-    let mut wb = PathWalker::new(b);
+    let mut wa = Walker::new(a);
+    let mut wb = Walker::new(b);
+
+    // Initial type check (matches rsync lines 3264-3265)
+    if wa.fnc_type != wb.fnc_type {
+        return if wa.fnc_type == FncType::Path {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Less
+        };
+    }
 
     loop {
-        let ca = wa.current();
-        let cb = wb.current();
+        let ca = wa.current_char();
+        let cb = wb.current_char();
 
         match (ca, cb) {
             (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (Some(a_byte), Some(b_byte)) => {
-                // When we hit a '/' boundary, check if types differ.
-                if a_byte == b'/' && b_byte == b'/' {
-                    // Both at a separator -- check if the segments following
-                    // are of different types (path vs item).
-                    wa.advance();
-                    wb.advance();
+            (None, Some(_)) => {
+                // a is done but b continues
+                // After a's state transition, check type mismatch
+                if wa.fnc_type != wb.fnc_type {
+                    return if wa.fnc_type == FncType::Path {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    };
+                }
+                return std::cmp::Ordering::Less;
+            }
+            (Some(_), None) => {
+                // b is done but a continues
+                if wa.fnc_type != wb.fnc_type {
+                    return if wa.fnc_type == FncType::Path {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Less
+                    };
+                }
+                return std::cmp::Ordering::Greater;
+            }
+            (Some(ac), Some(bc)) => {
+                if ac != bc {
+                    return ac.cmp(&bc);
+                }
+                wa.advance();
+                wb.advance();
 
-                    let a_is_path = wa.is_path_segment();
-                    let b_is_path = wb.is_path_segment();
-                    if a_is_path != b_is_path {
-                        // Path (directory being descended) sorts after item.
-                        return if a_is_path {
+                // After advancing past a shared character, check if types
+                // have diverged (e.g., one transitioned from slash to path
+                // and the other to item).
+                if wa.fnc_type != wb.fnc_type {
+                    // Only apply type comparison if at least one side has
+                    // more characters remaining.
+                    let a_has_more = wa.current_char().is_some();
+                    let b_has_more = wb.current_char().is_some();
+                    if a_has_more || b_has_more {
+                        return if wa.fnc_type == FncType::Path {
                             std::cmp::Ordering::Greater
                         } else {
                             std::cmp::Ordering::Less
                         };
                     }
-                    continue;
                 }
-
-                if a_byte != b_byte {
-                    // At a component boundary, directories sort after files.
-                    if a_byte == b'/' {
-                        // a has a separator here, b doesn't.
-                        // If a is descending into a subdir, it sorts after.
-                        return std::cmp::Ordering::Less;
-                    }
-                    if b_byte == b'/' {
-                        return std::cmp::Ordering::Greater;
-                    }
-                    return a_byte.cmp(&b_byte);
-                }
-
-                wa.advance();
-                wb.advance();
             }
         }
     }
@@ -227,12 +291,11 @@ mod tests {
             file_entry(b"zzz.txt", false),
         ];
         canonical_sort(&mut entries);
-        // Files should sort before directories at the same level.
+        // Files (t_ITEM) sort before directories (t_PATH) at root level,
+        // matching rsync's f_name_cmp behavior.
         assert_eq!(entries[0].name, b"aaa.txt");
-        // subdir (directory, treated as "subdir/") sorts after "subdir" but
-        // before "zzz.txt" because 's' < 'z'.
-        assert_eq!(entries[1].name, b"subdir");
-        assert_eq!(entries[2].name, b"zzz.txt");
+        assert_eq!(entries[1].name, b"zzz.txt");
+        assert_eq!(entries[2].name, b"subdir");
     }
 
     #[test]
@@ -244,9 +307,13 @@ mod tests {
             file_entry(b"src", true),
         ];
         canonical_sort(&mut entries);
+        // README.md (root-level file, t_ITEM) sorts first,
+        // then src/ (root-level dir, t_PATH),
+        // then src/* entries (also t_PATH with dirname).
         assert_eq!(entries[0].name, b"README.md");
-        // "src" (dir) sorts based on its content position.
-        // The exact order depends on the path walker logic.
+        assert_eq!(entries[1].name, b"src");
+        assert_eq!(entries[2].name, b"src/lib.rs");
+        assert_eq!(entries[3].name, b"src/main.rs");
     }
 
     #[test]
@@ -258,16 +325,16 @@ mod tests {
 
     #[test]
     fn test_dir_trailing_slash_effect() {
-        // A directory "abc" should sort as "abc/" which comes after "abcd" but
-        // before "abd".
+        // Root-level directories (t_PATH) sort after root-level files (t_ITEM)
+        // in rsync's f_name_cmp for proto >= 29.
         let dir = file_entry(b"abc", true);
         let file_abcd = file_entry(b"abcd", false);
         let file_abd = file_entry(b"abd", false);
 
-        // "abc/" vs "abcd": at position 3, '/' < 'd'
-        assert_eq!(f_name_cmp(&dir, &file_abcd), std::cmp::Ordering::Less);
-        // "abc/" vs "abd": at position 2, 'c' < 'd'
-        assert_eq!(f_name_cmp(&dir, &file_abd), std::cmp::Ordering::Less);
+        // "abc" (dir, t_PATH) vs "abcd" (file, t_ITEM): dir sorts after file
+        assert_eq!(f_name_cmp(&dir, &file_abcd), std::cmp::Ordering::Greater);
+        // "abc" (dir, t_PATH) vs "abd" (file, t_ITEM): dir sorts after file
+        assert_eq!(f_name_cmp(&dir, &file_abd), std::cmp::Ordering::Greater);
     }
 
     #[test]
@@ -281,18 +348,9 @@ mod tests {
         ];
         canonical_sort(&mut entries);
 
-        // Expected: files at root level, then dirs, with nested files after
-        // their parent directory.
+        // Root-level files (t_ITEM) sort before root-level dirs (t_PATH).
+        // Within the same type, normal alphabetical comparison applies.
         let names: Vec<&[u8]> = entries.iter().map(|e| e.name.as_slice()).collect();
-        // "a" (dir) sorts as "a/" -- between regular files alphabetically.
-        // Files in "a/" should come after "a" directory.
-        assert!(
-            names.iter().position(|n| *n == b"a").unwrap()
-                < names.iter().position(|n| *n == b"a/a").unwrap()
-        );
-        assert!(
-            names.iter().position(|n| *n == b"a").unwrap()
-                < names.iter().position(|n| *n == b"a/b").unwrap()
-        );
+        assert_eq!(names, vec![&b"m"[..], b"z", b"a", b"a/a", b"a/b"]);
     }
 }

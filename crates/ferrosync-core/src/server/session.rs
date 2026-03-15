@@ -498,29 +498,20 @@ impl ServerSession {
         let demux_handle = tokio::spawn(demux_task(reader, demux_write));
         let mut mplex_out = MplexWriter::new(writer);
 
-        // Read and discard the client's filter list.
-        // The filter list is a series of (len: i32, rule: bytes) pairs
-        // terminated by len=0.
-        {
-            use tokio::io::AsyncReadExt;
-            loop {
-                let mut len_buf = [0u8; 4];
-                demux_read
-                    .read_exact(&mut len_buf)
-                    .await
-                    .map_err(SessionError::Io)?;
-                let rule_len = i32::from_le_bytes(len_buf);
-                if rule_len == 0 {
-                    break;
-                }
-                let abs_len = rule_len.unsigned_abs() as usize;
-                let mut discard = vec![0u8; abs_len];
-                demux_read
-                    .read_exact(&mut discard)
-                    .await
-                    .map_err(SessionError::Io)?;
-            }
-        }
+        // Read the client's filter list (if the client sends one).
+        //
+        // Matching rsync's recv_filter_list behavior: the filter list is only
+        // sent by the client in push mode when delete mode is active or when
+        // filter rules exist. For a basic push without delete/filter, the
+        // client does not send the filter list, and the server must not try
+        // to read it.
+        //
+        // NOTE: For now, our client only sends the filter list in push mode
+        // when delete mode is active (matching rsync). The server skips
+        // reading it in the common push case.
+        //
+        // TODO: When delete mode support is added, conditionally read this
+        // based on the negotiated options.
 
         // Build TransferOptions for the file list decoder.
         let opts = TransferOptions::builder()

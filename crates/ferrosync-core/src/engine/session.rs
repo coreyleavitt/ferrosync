@@ -289,20 +289,27 @@ async fn run_push(
 
     // 1. Send filter list (exclude/include/filter rules).
     //
-    // rsync's receiver reads the filter list before the file list.
-    // Even if there are no rules, we must send the terminator (4 zero bytes).
-    let filter_data = collect_filter_list(options)?;
-    mplex_out
-        .write_data(&filter_data)
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .flush()
-        .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+    // rsync's recv_filter_list() only reads the filter list when:
+    //   !local_server && (am_sender || receiver_wants_list)
+    // On the server side for push, am_sender=false (server is receiver).
+    // receiver_wants_list is true only when delete_mode or prune_empty_dirs
+    // is active. If the server won't read the filter list, sending it
+    // would poison the file list data stream -- the server would interpret
+    // our filter terminator bytes as file list entries (or end-of-list).
+    let receiver_wants_list = options.delete() != DeleteMode::None;
+    if receiver_wants_list {
+        let filter_data = collect_filter_list(options)?;
+        mplex_out
+            .write_data(&filter_data)
+            .await
+            .map_err(crate::FerrosyncError::Protocol)?;
+        mplex_out
+            .flush()
+            .await
+            .map_err(crate::FerrosyncError::Protocol)?;
+    }
 
     // 2. Build and send file list.
-    // DEBUG: print entries before send
     let mut entries = build_source_entries(fs, options)?;
     // Sort entries in rsync canonical order so NDX mapping matches what the
     // receiver sees after decoding and sorting the file list.
