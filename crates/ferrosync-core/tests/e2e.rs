@@ -2,9 +2,6 @@
 //!
 //! These tests spin up a ferrosync daemon server on a random port, then
 //! connect a ferrosync client to it and verify full transfer correctness.
-//!
-//! Requires Unix (server uses UnixFileSystem).
-#![cfg(unix)]
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -13,8 +10,19 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncSession};
-use ferrosync_core::fs::unix::UnixFileSystem;
 use ferrosync_core::options::TransferOptions;
+
+/// Create a platform-appropriate FileSystem instance.
+fn new_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
+    #[cfg(unix)]
+    {
+        Box::new(ferrosync_core::fs::unix::UnixFileSystem::new())
+    }
+    #[cfg(windows)]
+    {
+        Box::new(ferrosync_core::fs::windows::WindowsFileSystem::new())
+    }
+}
 use ferrosync_core::server::listener::{DaemonListener, ListenerConfig};
 use ferrosync_core::server::module::{AccessControl, Module, ModuleAuth, ModuleRegistry};
 use ferrosync_core::transport::daemon::{DaemonTransport, DaemonTransportConfig};
@@ -98,7 +106,7 @@ async fn ferrosync_client_pull_inner(
 
     // am_sender=false means we are pulling (server is the sender).
     let transport = DaemonTransport::new(config, false, &server_opts);
-    let fs = Box::new(UnixFileSystem::new());
+    let fs = new_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
     session.run().await?;
     Ok(())
@@ -157,7 +165,7 @@ async fn ferrosync_client_push_inner(
 
     // am_sender=true means we are pushing (we are the sender).
     let transport = DaemonTransport::new(config, true, &server_opts);
-    let fs = Box::new(UnixFileSystem::new());
+    let fs = new_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
     session.run().await?;
     Ok(())
@@ -364,4 +372,100 @@ async fn test_e2e_empty_module() {
     // Client directory should exist but have no files (only the "." dir entry).
     let entries: Vec<_> = std::fs::read_dir(client_dir.path()).unwrap().collect();
     assert_eq!(entries.len(), 0, "empty module should transfer no files");
+}
+
+// ---------------------------------------------------------------------------
+// Archive mode tests (-a = -rlptgoD)
+//
+// These exercise uid/gid name list exchange and preserve_owner/group flags
+// that the basic tests above don't cover.
+// ---------------------------------------------------------------------------
+
+/// Push with archive mode to exercise uid/gid name list encoding.
+#[tokio::test]
+async fn test_e2e_push_archive_mode() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+
+    let content = b"archive mode push test";
+    std::fs::write(client_dir.path().join("archive.txt"), content).unwrap();
+
+    let (addr, shutdown) = start_test_server(server_dir.path(), false).await;
+
+    // Build archive-mode options.
+    let opts = TransferOptions::builder()
+        .archive()
+        .source(client_dir.path().to_path_buf())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+
+    let config = DaemonTransportConfig {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        module: "test".to_string(),
+        path: ".".to_string(),
+        user: None,
+        password: None,
+        connect_timeout: std::time::Duration::from_secs(5),
+    };
+
+    let transport = DaemonTransport::new(config, true, &server_opts);
+    let fs = new_filesystem();
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("archive push failed: {e}"),
+        Err(_) => panic!("archive push timed out after 15s"),
+    }
+
+    let _ = shutdown.send(true);
+
+    let pushed = std::fs::read(server_dir.path().join("archive.txt")).unwrap();
+    assert_eq!(pushed, content);
+}
+
+/// Pull with archive mode to exercise uid/gid name list decoding.
+#[tokio::test]
+async fn test_e2e_pull_archive_mode() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+
+    let content = b"archive mode pull test";
+    std::fs::write(server_dir.path().join("archive.txt"), content).unwrap();
+
+    let (addr, shutdown) = start_test_server(server_dir.path(), true).await;
+
+    let opts = TransferOptions::builder()
+        .archive()
+        .dest(client_dir.path().to_path_buf())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+
+    let config = DaemonTransportConfig {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        module: "test".to_string(),
+        path: ".".to_string(),
+        user: None,
+        password: None,
+        connect_timeout: std::time::Duration::from_secs(5),
+    };
+
+    let transport = DaemonTransport::new(config, false, &server_opts);
+    let fs = new_filesystem();
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("archive pull failed: {e}"),
+        Err(_) => panic!("archive pull timed out after 15s"),
+    }
+
+    let _ = shutdown.send(true);
+
+    let pulled = std::fs::read(client_dir.path().join("archive.txt")).unwrap();
+    assert_eq!(pulled, content);
 }
