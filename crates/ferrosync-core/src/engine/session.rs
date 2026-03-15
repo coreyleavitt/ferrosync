@@ -255,6 +255,10 @@ pub struct SyncSession<T: Transport> {
     fs: Box<dyn FileSystem>,
     direction: SyncDirection,
     progress: ProgressTracker,
+    /// Whether the remote always expects a filter list (matches rsync's
+    /// `!local_server` behavior). True for SSH/daemon/QUIC/TLS, false
+    /// for local subprocess pipes used in interop tests.
+    remote: bool,
 }
 
 impl<T: Transport> SyncSession<T> {
@@ -265,12 +269,14 @@ impl<T: Transport> SyncSession<T> {
         fs: Box<dyn FileSystem>,
         direction: SyncDirection,
     ) -> Self {
+        let remote = transport.is_remote();
         Self {
             transport,
             options,
             fs,
             direction,
             progress: ProgressTracker::new(),
+            remote,
         }
     }
 
@@ -291,6 +297,7 @@ impl<T: Transport> SyncSession<T> {
             fs,
             direction,
             mut progress,
+            remote,
         } = self;
 
         // 1. Connect transport.
@@ -325,7 +332,7 @@ impl<T: Transport> SyncSession<T> {
         let _streams_guard = streams;
 
         if am_sender {
-            run_push(reader, writer, &protocol, &options, &*fs, &mut progress).await
+            run_push(reader, writer, &protocol, &options, &*fs, &mut progress, remote).await
         } else {
             run_pull(reader, writer, &protocol, &options, &*fs, &mut progress).await
         }
@@ -354,6 +361,7 @@ async fn run_push(
     options: &TransferOptions,
     fs: &dyn FileSystem,
     progress: &mut ProgressTracker,
+    remote: bool,
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
     stats.start();
@@ -365,9 +373,18 @@ async fn run_push(
     let demux_handle = tokio::spawn(demux_task(reader, demux_write));
     let mut mplex_out = MplexWriter::new(writer);
 
-    // 1. Send filter list (only when delete mode is active).
-    let receiver_wants_list = options.delete() != DeleteMode::None;
-    if receiver_wants_list {
+    // 1. Send filter list.
+    //
+    // rsync's recv_filter_list() behavior depends on local_server:
+    // - Remote (SSH/daemon): ALWAYS reads filter list from sender
+    // - Local (subprocess):  Only reads when delete_mode or prune_empty_dirs
+    //
+    // We must match this exactly: sending when rsync won't read causes the
+    // terminator bytes to be consumed by the file list parser (empty flist).
+    // Not sending when rsync will read causes a deadlock (rsync waits for
+    // filter data while we send file list bytes).
+    let send_filter_list = remote || options.delete() != DeleteMode::None;
+    if send_filter_list {
         let filter_data = collect_filter_list(options)?;
         mplex_out
             .write_data(&filter_data)
@@ -451,6 +468,10 @@ async fn run_pull(
     let mut mplex_out = MplexWriter::new(writer);
 
     // Send filter list.
+    //
+    // For pull, rsync's sender-side recv_filter_list() always reads the
+    // filter list regardless of local_server (the condition is different
+    // from the receiver side). We must always send it.
     let filter_data = collect_filter_list(options)?;
     mplex_out
         .write_data(&filter_data)

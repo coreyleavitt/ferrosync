@@ -62,6 +62,10 @@ impl RsyncServerTransport {
 }
 
 impl Transport for RsyncServerTransport {
+    fn is_remote(&self) -> bool {
+        false // Local subprocess: rsync sets local_server=1
+    }
+
     fn connect(
         self: Box<Self>,
     ) -> std::pin::Pin<

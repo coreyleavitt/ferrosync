@@ -70,4 +70,17 @@ impl Drop for TransportStreams {
 pub trait Transport: Send {
     /// Establish the connection and return read/write streams.
     fn connect(self: Box<Self>) -> Pin<Box<dyn Future<Output = Result<TransportStreams>> + Send>>;
+
+    /// Whether this is a remote (non-local) connection.
+    ///
+    /// Matches rsync's `local_server` concept (inverted). Remote connections
+    /// require the sender to always send the filter list, even without
+    /// `--delete`. Local subprocess pipes (used in interop tests) only send
+    /// the filter list when delete mode is active.
+    ///
+    /// Defaults to `true` since all production transports (SSH, daemon, QUIC,
+    /// TLS) are remote.
+    fn is_remote(&self) -> bool {
+        true
+    }
 }
