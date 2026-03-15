@@ -265,6 +265,9 @@ pub struct SyncSession<T: Transport> {
     fs: Box<dyn FileSystem>,
     direction: SyncDirection,
     progress: ProgressTracker,
+    /// Whether the remote always expects a filter list. Maps to rsync's
+    /// `!local_server`. True for SSH/daemon, false for local subprocess.
+    remote: bool,
 }
 
 impl<T: Transport> SyncSession<T> {
@@ -275,12 +278,14 @@ impl<T: Transport> SyncSession<T> {
         fs: Box<dyn FileSystem>,
         direction: SyncDirection,
     ) -> Self {
+        let remote = transport.is_remote();
         Self {
             transport,
             options,
             fs,
             direction,
             progress: ProgressTracker::new(),
+            remote,
         }
     }
 
@@ -301,6 +306,7 @@ impl<T: Transport> SyncSession<T> {
             fs,
             direction,
             mut progress,
+            remote,
         } = self;
 
         // 1. Connect transport.
@@ -335,7 +341,7 @@ impl<T: Transport> SyncSession<T> {
         let _streams_guard = streams;
 
         if am_sender {
-            run_push(reader, writer, &protocol, &options, &*fs, &mut progress).await
+            run_push(reader, writer, &protocol, &options, &*fs, &mut progress, remote).await
         } else {
             run_pull(reader, writer, &protocol, &options, &*fs, &mut progress).await
         }
@@ -371,6 +377,7 @@ async fn run_push(
     options: &TransferOptions,
     fs: &dyn FileSystem,
     progress: &mut ProgressTracker,
+    remote: bool,
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
     stats.start();
@@ -386,11 +393,13 @@ async fn run_push(
     // Send filter list (MUX-framed) -- CONDITIONAL.
     //
     // C ref: exclude.c:1377-1411 (send_filter_list / recv_filter_list)
-    // The filter list is only exchanged when delete_mode is active (or
-    // prune_empty_dirs / inc_recurse_extra, which we don't support).
-    // For a simple push without --delete, neither side sends nor reads it.
-    // This matches rsync's local_server AND remote behavior for proto >= 30.
-    let send_filter_list = options.delete() != DeleteMode::None;
+    //
+    // rsync's recv_filter_list behavior depends on local_server:
+    // - local_server=0 (SSH/daemon, remote=true): ALWAYS reads filter list
+    // - local_server=1 (local subprocess, remote=false): only reads with --delete
+    //
+    // We must match: send the filter list when remote OR when delete is active.
+    let send_filter_list = remote || options.delete() != DeleteMode::None;
     tracing::debug!(send_filter_list, delete_mode = ?options.delete(), "push: filter list decision");
     if send_filter_list {
         let filter_data = collect_filter_list(options)?;

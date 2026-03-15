@@ -47,6 +47,9 @@ pub struct FileListOptions {
     pub always_checksum: bool,
     /// Length of the file-level checksum (typically 16 for MD4/MD5).
     pub checksum_len: usize,
+    /// Whether to send/expect uid 0/gid 0 name entries after the id list
+    /// terminator (compat_flags & ID0_NAMES).
+    pub xmit_id0_names: bool,
 }
 
 impl Default for FileListOptions {
@@ -62,6 +65,7 @@ impl Default for FileListOptions {
             preserve_hard_links: false,
             always_checksum: false,
             checksum_len: 16,
+            xmit_id0_names: true,
         }
     }
 }
@@ -86,6 +90,9 @@ impl FileListOptions {
             preserve_hard_links: false,
             always_checksum: opts.checksum_mode(),
             checksum_len: proto.checksum.digest_len(),
+            xmit_id0_names: proto.compat_flags
+                & crate::protocol::handshake::compat_flags::ID0_NAMES
+                != 0,
         }
     }
 }
