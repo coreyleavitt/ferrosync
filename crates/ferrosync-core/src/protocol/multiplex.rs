@@ -343,7 +343,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     pub async fn write_data(&mut self, data: &[u8]) -> Result<()> {
         tracing::trace!(
             total_len = data.len(),
-            chunks = (data.len() + DATA_CHUNK_SIZE - 1) / DATA_CHUNK_SIZE,
+            chunks = data.len().div_ceil(DATA_CHUNK_SIZE),
             "mplex: write_data"
         );
         for chunk in data.chunks(DATA_CHUNK_SIZE) {
