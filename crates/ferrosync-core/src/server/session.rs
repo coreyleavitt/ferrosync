@@ -286,7 +286,7 @@ impl ServerSession {
     /// from the client sender.
     async fn handle_receive_impl<R, W>(
         module: &Module,
-        mut reader: R,
+        reader: R,
         writer: W,
         protocol: &NegotiatedProtocol,
         fs: &dyn FileSystem,
@@ -308,22 +308,20 @@ impl ServerSession {
 
         let proto_ver = protocol.version;
 
-        // Read filter list and file list as RAW data (before MUX is enabled).
-        // The client sends these before enabling multiplexed output, matching
-        // rsync's protocol where recv_filter_list and recv_file_list happen
-        // before io_start_multiplex_in.
-        read_and_discard_filter_list(&mut reader).await?;
+        // Enable multiplexing.
+        let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
+        let demux_handle = tokio::spawn(demux_task(reader, demux_write));
+        let mut mplex_out = MplexWriter::new(writer);
 
-        let received_flist = exchange::recv_file_list(&mut reader, protocol, opts)
+        // Read and discard the client's filter list.
+        read_and_discard_filter_list(&mut demux_read).await?;
+
+        // Receive file list from client sender.
+        let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts)
             .await
             .map_err(|e| SessionError::Protocol {
                 message: e.to_string(),
             })?;
-
-        // NOW enable multiplexing for the delta transfer phase.
-        let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
-        let demux_handle = tokio::spawn(demux_task(reader, demux_write));
-        let mut mplex_out = MplexWriter::new(writer);
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
 
