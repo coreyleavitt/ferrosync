@@ -12,17 +12,17 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::module::Module;
-use crate::delta::{checksum, matcher, sum, token};
-use crate::engine::receiver;
+use crate::engine::progress::ProgressTracker;
+use crate::engine::wire_transfer::{self, ModuleFileOps, ModuleFileReader};
 use crate::error::{FsError, ProtocolError};
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT, S_IFREG};
+use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
 use crate::options::TransferOptions;
 use crate::protocol::handshake::{self, NegotiatedProtocol};
 use crate::protocol::multiplex::MplexWriter;
-use crate::protocol::varint;
+use crate::stats::TransferStats;
 
 /// Server-side session error type.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +61,14 @@ impl From<crate::FerrosyncError> for SessionError {
     }
 }
 
+impl From<wire_transfer::WireError> for SessionError {
+    fn from(e: wire_transfer::WireError) -> Self {
+        SessionError::Protocol {
+            message: e.to_string(),
+        }
+    }
+}
+
 /// The direction of the transfer from the server's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferDirection {
@@ -74,7 +82,6 @@ pub enum TransferDirection {
 ///
 /// Created after the daemon handshake completes. Manages the binary
 /// protocol exchange for a single module access.
-#[derive(Debug)]
 pub struct ServerSession {
     /// The module being served.
     module: Module,
@@ -84,6 +91,8 @@ pub struct ServerSession {
     peer_addr: SocketAddr,
     /// Transfer direction (determined from args).
     direction: TransferDirection,
+    /// Progress tracker for transfer events.
+    progress: ProgressTracker,
 }
 
 impl ServerSession {
@@ -106,7 +115,14 @@ impl ServerSession {
             args,
             peer_addr,
             direction,
+            progress: ProgressTracker::new(),
         }
+    }
+
+    /// Set a custom progress tracker.
+    pub fn with_progress(mut self, progress: ProgressTracker) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Run the server session on the given stream.
@@ -130,23 +146,16 @@ impl ServerSession {
 
         let (mut reader, mut writer) = tokio::io::split(stream);
 
+        // Parse client args into TransferOptions.
+        let am_sender = self.direction == TransferDirection::Send;
+        let opts = crate::engine::session::parse_server_args(
+            &self.args,
+            self.module.path.clone(),
+            am_sender,
+        );
+
         // Parse client capability string from args (the `-e.xxx` part).
         let client_info = extract_client_info(&self.args);
-
-        // Determine if compression is requested (look for `z` in args).
-        let use_compress = self
-            .args
-            .iter()
-            .any(|a| a.contains('z') && a.starts_with('-') && !a.starts_with("--"));
-
-        // Determine if recursive is requested.
-        let is_recursive = self
-            .args
-            .iter()
-            .any(|a| a.contains('r') && a.starts_with('-') && !a.starts_with("--"));
-
-        // Server-side: am_sender is true when server is sending (client is pulling).
-        let am_sender = self.direction == TransferDirection::Send;
 
         // Perform the binary handshake.
         let protocol = handshake::server_handshake(
@@ -154,7 +163,7 @@ impl ServerSession {
             &mut writer,
             &client_info,
             am_sender,
-            use_compress,
+            opts.compress(),
         )
         .await?;
 
@@ -172,14 +181,20 @@ impl ServerSession {
         #[cfg(windows)]
         let fs = crate::fs::windows::WindowsFileSystem::new();
 
+        let mut progress = self.progress;
+
         match self.direction {
             TransferDirection::Send => {
-                self.handle_send_impl(reader, writer, &protocol, &fs, is_recursive)
-                    .await
+                Self::handle_send_impl(
+                    &self.module, reader, writer, &protocol, &fs, &opts, &mut progress,
+                )
+                .await
             }
             TransferDirection::Receive => {
-                self.handle_receive_impl(reader, writer, &protocol, &fs, is_recursive)
-                    .await
+                Self::handle_receive_impl(
+                    &self.module, reader, writer, &protocol, &fs, &opts, &mut progress,
+                )
+                .await
             }
         }
     }
@@ -190,19 +205,18 @@ impl ServerSession {
     /// the sender here, so it builds the file list, sends it, then responds
     /// to generator requests with delta data.
     async fn handle_send_impl<R, W>(
-        &self,
+        module: &Module,
         reader: R,
         writer: W,
         protocol: &NegotiatedProtocol,
         fs: &dyn FileSystem,
-        is_recursive: bool,
+        opts: &TransferOptions,
+        progress: &mut ProgressTracker,
     ) -> Result<(), SessionError>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send,
     {
-        let seed = protocol.seed;
-        let checksum_type = protocol.checksum;
         let proto_ver = protocol.version;
 
         // Enable multiplexing: demux incoming, mux outgoing.
@@ -211,49 +225,21 @@ impl ServerSession {
         let mut mplex_out = MplexWriter::new(writer);
 
         // Read and discard filter list from client.
-        // The filter list is a series of (len: i32, rule: bytes) pairs
-        // terminated by len=0.
-        {
-            use tokio::io::AsyncReadExt;
-            loop {
-                let mut len_buf = [0u8; 4];
-                demux_read
-                    .read_exact(&mut len_buf)
-                    .await
-                    .map_err(SessionError::Io)?;
-                let rule_len = i32::from_le_bytes(len_buf);
-                if rule_len == 0 {
-                    break;
-                }
-                let abs_len = rule_len.unsigned_abs() as usize;
-                let mut discard = vec![0u8; abs_len];
-                demux_read
-                    .read_exact(&mut discard)
-                    .await
-                    .map_err(SessionError::Io)?;
-            }
-        }
+        read_and_discard_filter_list(&mut demux_read).await?;
 
         // Build file list from module path.
-        let module_path = &self.module.path;
+        let module_path = &module.path;
         if !fs.lexists(module_path) {
             return Err(SessionError::ModulePathNotFound {
                 path: module_path.display().to_string(),
             });
         }
 
-        let entries = build_module_entries(fs, module_path, is_recursive)?;
-
-        // Build TransferOptions for the file list encoder.
-        let opts = TransferOptions::builder()
-            .recursive(is_recursive)
-            .preserve_times(true)
-            .source(module_path.clone())
-            .build();
+        let entries = build_module_entries(fs, module_path, opts.recursive())?;
 
         // Send file list.
         let mut flist_buf = Vec::new();
-        exchange::send_file_list(&mut flist_buf, &entries, protocol, &opts)
+        exchange::send_file_list(&mut flist_buf, &entries, protocol, opts)
             .await
             .map_err(|e| SessionError::Protocol {
                 message: e.to_string(),
@@ -262,201 +248,31 @@ impl ServerSession {
         mplex_out.write_data(&flist_buf).await?;
         mplex_out.flush().await?;
 
-        // NDX -> entry index mapping.
-        let ndx_start: i32 = if protocol.incremental_flist && proto_ver >= 30 && is_recursive {
-            1
-        } else {
-            0
-        };
-        let ndx_to_entry: std::collections::HashMap<i32, usize> = entries
-            .iter()
-            .enumerate()
-            .map(|(i, _)| (ndx_start + i as i32, i))
-            .collect();
+        // Sender loop via wire_transfer.
+        let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, opts.recursive());
+        let file_reader = ModuleFileReader::new(fs, module_path);
+        let mut stats = TransferStats::new();
+        stats.start();
 
-        // Sender loop: read NDX from client generator, send delta data.
-        let mut gen_ndx_state = varint::NdxState::default();
-        let mut send_ndx_state = varint::NdxState::default();
-        let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
-        let mut phase: u32 = 0;
-
-        loop {
-            let ndx = varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await?;
-
-            if ndx == varint::NDX_DONE {
-                phase += 1;
-                if phase > max_phase {
-                    break;
-                }
-                // Respond with NDX_DONE (phase transition).
-                let mut done_buf = Vec::new();
-                varint::write_ndx(
-                    &mut done_buf,
-                    varint::NDX_DONE,
-                    &mut send_ndx_state,
-                    proto_ver,
-                )
-                .await?;
-                mplex_out.write_data(&done_buf).await?;
-                mplex_out.flush().await?;
-                continue;
-            }
-
-            // NDX_FLIST_EOF (-2) or NDX_DEL_STATS (-3): skip.
-            if ndx < -1 {
-                continue;
-            }
-
-            // Read iflags from generator (proto >= 29).
-            let mut iflags: u16 = 0;
-            if proto_ver >= 29 {
-                use tokio::io::AsyncReadExt;
-                let mut iflags_buf = [0u8; 2];
-                demux_read.read_exact(&mut iflags_buf).await?;
-                iflags = u16::from_le_bytes(iflags_buf);
-
-                // ITEM_BASIS_TYPE_FOLLOWS (1<<11 = 0x0800)
-                if iflags & 0x0800 != 0 {
-                    let mut bt = [0u8; 1];
-                    demux_read.read_exact(&mut bt).await?;
-                }
-                // ITEM_XNAME_FOLLOWS (1<<12 = 0x1000)
-                if iflags & 0x1000 != 0 {
-                    let name_len = varint::read_varint(&mut demux_read).await?;
-                    let mut name_buf = vec![0u8; name_len as usize];
-                    demux_read.read_exact(&mut name_buf).await?;
-                }
-            }
-
-            // Look up the entry for this NDX.
-            let entry_idx = match ndx_to_entry.get(&ndx) {
-                Some(&idx) => idx,
-                None => {
-                    tracing::warn!(ndx, "generator requested unknown NDX, skipping");
-                    continue;
-                }
-            };
-            let entry = &entries[entry_idx];
-
-            // Only regular files have data.
-            if entry.mode & S_IFMT != S_IFREG {
-                continue;
-            }
-
-            // Read block signatures from generator.
-            let sums = sum::read_sums(&mut demux_read).await?;
-
-            // Read local source data.
-            let source_data = read_module_file(fs, &self.module.path, entry)?;
-
-            // Match blocks and compute delta.
-            let ops = matcher::match_blocks(
-                &source_data,
-                &sums,
-                seed,
-                checksum_type,
-                checksum::CHAR_OFFSET_V30,
-                protocol.proper_seed_order,
-            );
-
-            // Build sender response: NDX + iflags + sum_head + tokens + checksum.
-            let mut resp_buf = Vec::new();
-
-            // NDX + iflags.
-            varint::write_ndx(&mut resp_buf, ndx, &mut send_ndx_state, proto_ver).await?;
-            if proto_ver >= 29 {
-                varint::write_shortint(&mut resp_buf, iflags).await?;
-            }
-
-            // sum_head: echo back the generator's sum head.
-            let resp_sum_head = if sums.head.count == 0 {
-                sum::SumHead {
-                    count: 0,
-                    blength: 0,
-                    s2length: 0,
-                    remainder: 0,
-                }
-            } else {
-                sum::SumHead {
-                    count: sums.head.count,
-                    blength: sums.head.blength,
-                    s2length: sums.head.s2length,
-                    remainder: sums.head.remainder,
-                }
-            };
-            sum::write_sum_head(&mut resp_buf, &resp_sum_head).await?;
-
-            // Delta tokens.
-            for op in &ops {
-                match op {
-                    matcher::MatchOp::Data(data) => {
-                        token::send_data(&mut resp_buf, data).await?;
-                    }
-                    matcher::MatchOp::BlockMatch(block_idx) => {
-                        token::send_block_match(&mut resp_buf, *block_idx).await?;
-                    }
-                }
-            }
-            token::send_eof(&mut resp_buf).await?;
-
-            // File-level checksum.
-            let file_sum = checksum::file_checksum(&source_data, seed, checksum_type);
-            resp_buf.extend_from_slice(&file_sum);
-
-            // Send the complete response as MUX DATA.
-            mplex_out.write_data(&resp_buf).await?;
-            mplex_out.flush().await?;
-        }
-
-        // Post-loop: write final NDX_DONE.
-        let mut done_buf = Vec::new();
-        varint::write_ndx(
-            &mut done_buf,
-            varint::NDX_DONE,
-            &mut send_ndx_state,
-            proto_ver,
+        wire_transfer::sender_loop(
+            &mut demux_read,
+            &mut mplex_out,
+            &entries,
+            &ndx_map,
+            &file_reader,
+            protocol,
+            &mut stats,
+            progress,
         )
         .await?;
-        mplex_out.write_data(&done_buf).await?;
-        mplex_out.flush().await?;
 
-        // Write transfer stats (5 varlong30 values).
-        let mut stats_buf = Vec::new();
-        varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-        varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-        varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-        if proto_ver >= 29 {
-            varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-            varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-        }
-        mplex_out.write_data(&stats_buf).await?;
-        mplex_out.flush().await?;
+        // Write transfer stats.
+        wire_transfer::write_stats(&mut mplex_out, &stats, proto_ver).await?;
 
-        // Final goodbye exchange (proto >= 24).
-        // Best-effort: the transfer data is already complete at this point,
-        // so errors here are not fatal.
-        if proto_ver >= 24 {
-            // Send a goodbye NDX_DONE (the receiver expects to read one).
-            let mut gb_buf = Vec::new();
-            let _ = varint::write_ndx(
-                &mut gb_buf,
-                varint::NDX_DONE,
-                &mut send_ndx_state,
-                proto_ver,
-            )
-            .await;
-            let _ = mplex_out.write_data(&gb_buf).await;
-            let _ = mplex_out.flush().await;
-            // Read goodbye NDX_DONEs from receiver (best-effort).
-            let _ = varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await;
-            let _ = varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await;
-            if proto_ver >= 31 {
-                let _ = varint::read_ndx(&mut demux_read, &mut gen_ndx_state, proto_ver).await;
-            }
-        }
+        // Goodbye exchange.
+        wire_transfer::server_sender_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
 
-        // Shut down the write half of the TCP stream so the remote side's
-        // demux task sees EOF and exits.
+        // Shut down the write half so the remote side's demux task sees EOF.
         let _ = mplex_out.shutdown().await;
         drop(mplex_out);
         let _ = demux_handle.await;
@@ -469,28 +285,27 @@ impl ServerSession {
     /// the receiver here, so it receives the file list and delta data
     /// from the client sender.
     async fn handle_receive_impl<R, W>(
-        &self,
+        module: &Module,
         reader: R,
         writer: W,
         protocol: &NegotiatedProtocol,
         fs: &dyn FileSystem,
-        is_recursive: bool,
+        opts: &TransferOptions,
+        progress: &mut ProgressTracker,
     ) -> Result<(), SessionError>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send,
     {
-        if self.module.read_only {
+        if module.read_only {
             return Err(SessionError::Protocol {
                 message: format!(
                     "module '{}' is read-only, cannot receive files",
-                    self.module.name
+                    module.name
                 ),
             });
         }
 
-        let seed = protocol.seed;
-        let checksum_type = protocol.checksum;
         let proto_ver = protocol.version;
 
         // Enable multiplexing.
@@ -498,30 +313,8 @@ impl ServerSession {
         let demux_handle = tokio::spawn(demux_task(reader, demux_write));
         let mut mplex_out = MplexWriter::new(writer);
 
-        // Read the client's filter list (if the client sends one).
-        //
-        // Matching rsync's recv_filter_list behavior: the filter list is only
-        // sent by the client in push mode when delete mode is active or when
-        // filter rules exist. For a basic push without delete/filter, the
-        // client does not send the filter list, and the server must not try
-        // to read it.
-        //
-        // NOTE: For now, our client only sends the filter list in push mode
-        // when delete mode is active (matching rsync). The server skips
-        // reading it in the common push case.
-        //
-        // TODO: When delete mode support is added, conditionally read this
-        // based on the negotiated options.
-
-        // Build TransferOptions for the file list decoder.
-        let opts = TransferOptions::builder()
-            .recursive(is_recursive)
-            .preserve_times(true)
-            .dest(self.module.path.clone())
-            .build();
-
         // Receive file list from client sender.
-        let received_flist = exchange::recv_file_list(&mut demux_read, protocol, &opts)
+        let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts)
             .await
             .map_err(|e| SessionError::Protocol {
                 message: e.to_string(),
@@ -529,174 +322,36 @@ impl ServerSession {
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
 
-        let dest = &self.module.path;
+        // Receiver loop via wire_transfer.
+        let file_ops = ModuleFileOps::new(fs, &module.path);
+        let mut stats = TransferStats::new();
+        stats.start();
 
-        let mut gen_ndx_state = varint::NdxState::default();
-        let mut recv_ndx_state = varint::NdxState::default();
+        wire_transfer::receiver_loop(
+            &mut demux_read,
+            &mut mplex_out,
+            &entries,
+            &entry_ndx,
+            &file_ops,
+            protocol,
+            &mut stats,
+            progress,
+        )
+        .await?;
 
-        // Create directories first.
-        for entry in &entries {
-            if !entry.is_dir() {
-                continue;
-            }
-            let name_str = String::from_utf8_lossy(&entry.name);
-            let dest_path = dest.join(name_str.as_ref());
-            fs.mkdir(&dest_path, 0o755)?;
-        }
+        // Phase exchange.
+        wire_transfer::server_receiver_phase_exchange(
+            &mut demux_read,
+            &mut mplex_out,
+            proto_ver,
+        )
+        .await?;
 
-        // Per-file receiver loop (mirrors client-side run_pull).
-        for (idx, entry) in entries.iter().enumerate() {
-            if !entry.is_file() {
-                continue;
-            }
+        // Read transfer stats.
+        wire_transfer::read_stats(&mut demux_read, proto_ver).await?;
 
-            let name_str = String::from_utf8_lossy(&entry.name);
-            let dest_path = dest.join(name_str.as_ref());
-
-            // Create parent directories.
-            if let Some(parent) = dest_path.parent() {
-                if !fs.lexists(parent) {
-                    fs.mkdir(parent, 0o755)?;
-                }
-            }
-
-            // Read existing basis file (if any).
-            let basis_data = fs.read_file(&dest_path).unwrap_or_default();
-
-            // Send generator output: NDX + iflags + sum_head + block sigs.
-            let file_ndx = entry_ndx[idx];
-            let mut sig_buf = Vec::new();
-            varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, proto_ver).await?;
-            // iflags: ITEM_TRANSFER (1<<15) signals data transfer needed.
-            if proto_ver >= 29 {
-                const ITEM_TRANSFER: u16 = 1 << 15;
-                varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
-            }
-            let sigs = sum::compute_signatures(
-                &basis_data,
-                seed,
-                checksum_type,
-                checksum::CHAR_OFFSET_V30,
-                protocol.proper_seed_order,
-            );
-            sum::write_sums(&mut sig_buf, &sigs).await?;
-            mplex_out.write_data(&sig_buf).await?;
-            mplex_out.flush().await?;
-
-            // Read sender's response.
-            // Wire format: NDX + iflags + sum_head + tokens + checksum
-            let _file_ndx =
-                varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
-            // Read iflags (protocol >= 29).
-            if proto_ver >= 29 {
-                use tokio::io::AsyncReadExt;
-                let mut iflags_buf = [0u8; 2];
-                demux_read.read_exact(&mut iflags_buf).await?;
-                let iflags = u16::from_le_bytes(iflags_buf);
-
-                if iflags & 0x0800 != 0 {
-                    let mut bt = [0u8; 1];
-                    demux_read.read_exact(&mut bt).await?;
-                }
-                if iflags & 0x1000 != 0 {
-                    let name_len = varint::read_varint(&mut demux_read).await?;
-                    let mut name_buf = vec![0u8; name_len as usize];
-                    demux_read.read_exact(&mut name_buf).await?;
-                }
-            }
-
-            // Read sum_head from sender.
-            let sum_head = sum::read_sum_head(&mut demux_read).await?;
-            let blength = if sum_head.blength > 0 {
-                sum_head.blength as usize
-            } else {
-                700
-            };
-
-            // Read tokens + file checksum.
-            let result_data = receiver::recv_file_delta(
-                &mut demux_read,
-                &basis_data,
-                blength,
-                seed,
-                checksum_type,
-            )
-            .await?;
-
-            // Write reconstructed file.
-            fs.write_file(&dest_path, &result_data, None)?;
-        }
-
-        // Phase exchange: server (generator/receiver) sends NDX_DONE for
-        // each phase, the client (sender) reads them, responds with its own
-        // NDX_DONE per phase, then sends a final NDX_DONE + stats after breaking.
-        //
-        // max_phase = 2 for proto >= 29: phases 0, 1, 2.
-        // The sender loop breaks after receiving (max_phase+1) NDX_DONEs.
-        // It responds with NDX_DONE for phases 0..max_phase-1 (i.e., 2 responses),
-        // then writes a final NDX_DONE after breaking out.
-        let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
-
-        // Send (max_phase + 1) NDX_DONEs to the sender.
-        for phase in 0..=max_phase {
-            let mut done_buf = Vec::new();
-            varint::write_ndx(
-                &mut done_buf,
-                varint::NDX_DONE,
-                &mut gen_ndx_state,
-                proto_ver,
-            )
-            .await?;
-            mplex_out.write_data(&done_buf).await?;
-            mplex_out.flush().await?;
-
-            // The sender responds with NDX_DONE for each phase except the last
-            // (it breaks out of the loop on the last one).
-            if phase < max_phase {
-                let resp =
-                    varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
-                if resp != varint::NDX_DONE {
-                    tracing::warn!(ndx = resp, phase, "expected NDX_DONE from sender");
-                }
-            }
-        }
-
-        // Read the sender's final NDX_DONE (written after it breaks from the loop).
-        let final_ndx = varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
-        if final_ndx != varint::NDX_DONE {
-            tracing::warn!(ndx = final_ndx, "expected final NDX_DONE from sender");
-        }
-
-        // Read transfer stats from the sender.
-        let _total_read = varint::read_varlong30(&mut demux_read, 3, proto_ver).await?;
-        let _total_written = varint::read_varlong30(&mut demux_read, 3, proto_ver).await?;
-        let _total_size = varint::read_varlong30(&mut demux_read, 3, proto_ver).await?;
-        if proto_ver >= 29 {
-            let _flist_buildtime = varint::read_varlong30(&mut demux_read, 3, proto_ver).await?;
-            let _flist_xfertime = varint::read_varlong30(&mut demux_read, 3, proto_ver).await?;
-        }
-
-        // Final goodbye exchange (proto >= 24).
-        // The sender reads goodbye NDX_DONEs from us.
-        if proto_ver >= 24 {
-            async fn send_done<WW: AsyncWrite + Unpin>(
-                out: &mut MplexWriter<WW>,
-                st: &mut varint::NdxState,
-                pv: u8,
-            ) {
-                let mut buf = Vec::new();
-                let _ = varint::write_ndx(&mut buf, varint::NDX_DONE, st, pv).await;
-                let _ = out.write_data(&buf).await;
-                let _ = out.flush().await;
-            }
-
-            // Send goodbye NDX_DONEs that the sender expects to read.
-            send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
-
-            if proto_ver >= 31 {
-                send_done(&mut mplex_out, &mut gen_ndx_state, proto_ver).await;
-            }
-        }
+        // Goodbye exchange.
+        wire_transfer::server_receiver_goodbye(&mut mplex_out, proto_ver).await?;
 
         // Shut down the write half and abort the demux task.
         let _ = mplex_out.shutdown().await;
@@ -748,6 +403,34 @@ impl ServerSession {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Read and discard the client's filter list from the demuxed stream.
+///
+/// The filter list is a series of (len: i32, rule: bytes) pairs terminated
+/// by len=0.
+async fn read_and_discard_filter_list<R: AsyncRead + Unpin + Send>(
+    reader: &mut R,
+) -> Result<(), SessionError> {
+    use tokio::io::AsyncReadExt;
+    loop {
+        let mut len_buf = [0u8; 4];
+        reader
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(SessionError::Io)?;
+        let rule_len = i32::from_le_bytes(len_buf);
+        if rule_len == 0 {
+            break;
+        }
+        let abs_len = rule_len.unsigned_abs() as usize;
+        let mut discard = vec![0u8; abs_len];
+        reader
+            .read_exact(&mut discard)
+            .await
+            .map_err(SessionError::Io)?;
+    }
+    Ok(())
+}
 
 /// Extract the client capability string from the `-e.xxx` argument.
 fn extract_client_info(args: &[String]) -> String {
@@ -815,17 +498,6 @@ fn build_module_entries(
     }
 
     Ok(entries)
-}
-
-/// Read a file from the module path given a file entry.
-fn read_module_file(
-    fs: &dyn FileSystem,
-    module_path: &std::path::Path,
-    entry: &FileEntry,
-) -> Result<Vec<u8>, SessionError> {
-    let name_str = String::from_utf8_lossy(&entry.name);
-    let path = module_path.join(name_str.as_ref());
-    Ok(fs.read_file(&path).unwrap_or_default())
 }
 
 // Use the shared demux_task from protocol::multiplex.

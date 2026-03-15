@@ -12,13 +12,14 @@ use crate::delta::checksum;
 use crate::error::FsError;
 use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
 use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem, STREAMING_THRESHOLD};
+use crate::fs::{DirEntry, FileSystem};
 use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::{ChecksumType, NegotiatedProtocol};
 use crate::stats::TransferStats;
 
+use super::file_decision;
 use super::pipeline;
-use super::progress::{ItemizedChanges, ProgressEvent, ProgressTracker};
+use super::progress::{ProgressEvent, ProgressTracker};
 
 type Result<T> = std::result::Result<T, crate::FerrosyncError>;
 
@@ -221,30 +222,18 @@ async fn execute_transfer_impl(
         }
 
         // Check file size limits (--max-size, --min-size).
-        if let Some(max) = options.max_size() {
-            if item.entry.len as u64 > max {
-                stats.files_skipped += 1;
-                progress.emit(ProgressEvent::FileSkipped {
-                    index: item.index,
-                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                });
-                continue;
-            }
-        }
-        if let Some(min) = options.min_size() {
-            if (item.entry.len as u64) < min {
-                stats.files_skipped += 1;
-                progress.emit(ProgressEvent::FileSkipped {
-                    index: item.index,
-                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                });
-                continue;
-            }
+        if file_decision::check_size_limits(&item.entry, options) {
+            stats.files_skipped += 1;
+            progress.emit(ProgressEvent::FileSkipped {
+                index: item.index,
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
+            });
+            continue;
         }
 
         // --compare-dest: skip if identical file exists in any compare-dest dir.
         if !options.compare_dest().is_empty()
-            && check_alt_dest(fs, &item.entry, options.compare_dest()).is_some()
+            && file_decision::check_alt_dest(fs, &item.entry, options.compare_dest()).is_some()
         {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
@@ -256,7 +245,7 @@ async fn execute_transfer_impl(
 
         // --link-dest: hard-link from alt dir if unchanged.
         if !options.link_dest().is_empty() && !options.dry_run() {
-            if let Some(alt_path) = check_alt_dest(fs, &item.entry, options.link_dest()) {
+            if let Some(alt_path) = file_decision::check_alt_dest(fs, &item.entry, options.link_dest()) {
                 if fs.hard_link(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
@@ -272,7 +261,7 @@ async fn execute_transfer_impl(
 
         // --copy-dest: copy from alt dir if unchanged (also use as basis).
         if !options.copy_dest().is_empty() && !options.dry_run() {
-            if let Some(alt_path) = check_alt_dest(fs, &item.entry, options.copy_dest()) {
+            if let Some(alt_path) = file_decision::check_alt_dest(fs, &item.entry, options.copy_dest()) {
                 if fs.copy_file(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
@@ -287,7 +276,7 @@ async fn execute_transfer_impl(
         }
 
         // Check if the file needs updating.
-        if !options.checksum_mode() && should_skip(fs, &item.entry, &dest_path, options) {
+        if !options.checksum_mode() && file_decision::quick_check_skip(fs, &item.entry, &dest_path, options) {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
                 index: item.index,
@@ -315,7 +304,7 @@ async fn execute_transfer_impl(
 
         // Compute and emit itemized changes if requested.
         if options.itemize_changes() {
-            let changes = compute_itemized_changes(fs, &item.entry, &dest_path, options);
+            let changes = file_decision::compute_itemized(fs, &item.entry, &dest_path, options);
             progress.emit(ProgressEvent::FileItemized {
                 index: item.index,
                 name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
@@ -408,7 +397,7 @@ async fn execute_transfer_impl(
 
         // --backup: create backup before overwriting.
         if options.backup() && fs.lexists(&dest_path) {
-            create_backup(
+            file_decision::create_backup(
                 fs,
                 &dest_path,
                 options.suffix(),
@@ -426,35 +415,7 @@ async fn execute_transfer_impl(
         };
 
         // Write the file (choosing method based on options).
-        let mode = if options.preserve_perms() {
-            Some(item.entry.mode & 0o7777)
-        } else {
-            None
-        };
-        if options.sparse() {
-            fs.write_file_sparse(&write_path, &result_data, mode)?;
-        } else if options.inplace() {
-            fs.write_file_inplace(&write_path, &result_data, mode)?;
-        } else if result_data.len() as i64 >= STREAMING_THRESHOLD {
-            // Use streaming write for large files to avoid peak memory.
-            use std::io::Write;
-            let mut writer = fs.write_file_stream(&write_path, mode)?;
-            writer.write_all(&result_data).map_err(|e| {
-                crate::FerrosyncError::Fs(FsError::Io {
-                    path: write_path.clone(),
-                    source: std::sync::Arc::new(e),
-                })
-            })?;
-            writer.flush().map_err(|e| {
-                crate::FerrosyncError::Fs(FsError::Io {
-                    path: write_path.clone(),
-                    source: std::sync::Arc::new(e),
-                })
-            })?;
-            drop(writer);
-        } else {
-            fs.write_file(&write_path, &result_data, mode)?;
-        }
+        file_decision::write_file_with_options(fs, &write_path, &result_data, &item.entry, options)?;
 
         // --partial-dir: move from partial dir to final destination.
         if options.partial_dir().is_some() && write_path != dest_path {
@@ -462,15 +423,7 @@ async fn execute_transfer_impl(
         }
 
         // Set metadata.
-        if options.preserve_times() {
-            fs.set_mtime(&dest_path, item.entry.mtime, item.entry.mtime_nsec)?;
-        }
-        #[cfg(unix)]
-        if options.preserve_owner() {
-            if let Err(e) = fs.set_owner(&dest_path, item.entry.uid, item.entry.gid) {
-                tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
-            }
-        }
+        file_decision::set_file_metadata(fs, &dest_path, &item.entry, options);
 
         stats.files_transferred += 1;
         stats.total_size += item.entry.len as u64;
@@ -583,27 +536,14 @@ async fn execute_transfer_streaming_impl(
         }
 
         // Check file size limits.
-        if let Some(max) = options.max_size() {
-            if entry.len as u64 > max {
-                stats.files_skipped += 1;
-                progress.emit(ProgressEvent::FileSkipped {
-                    index,
-                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                });
-                index += 1;
-                continue;
-            }
-        }
-        if let Some(min) = options.min_size() {
-            if (entry.len as u64) < min {
-                stats.files_skipped += 1;
-                progress.emit(ProgressEvent::FileSkipped {
-                    index,
-                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                });
-                index += 1;
-                continue;
-            }
+        if file_decision::check_size_limits(&entry, options) {
+            stats.files_skipped += 1;
+            progress.emit(ProgressEvent::FileSkipped {
+                index,
+                name: crate::engine::progress::name_to_pathbuf(&entry.name),
+            });
+            index += 1;
+            continue;
         }
 
         // In streaming mode, we don't have source data -- the actual file
@@ -631,16 +571,8 @@ async fn execute_transfer_streaming_impl(
         }
 
         // Set metadata for received files.
-        if options.preserve_times() && fs.lexists(&dest_path) {
-            if let Err(e) = fs.set_mtime(&dest_path, entry.mtime, entry.mtime_nsec) {
-                tracing::warn!(path = %dest_path.display(), error = %e, "failed to set mtime");
-            }
-        }
-        #[cfg(unix)]
-        if options.preserve_owner() && fs.lexists(&dest_path) {
-            if let Err(e) = fs.set_owner(&dest_path, entry.uid, entry.gid) {
-                tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
-            }
+        if fs.lexists(&dest_path) {
+            file_decision::set_file_metadata(fs, &dest_path, &entry, options);
         }
 
         stats.files_transferred += 1;
@@ -871,134 +803,6 @@ fn build_file_list_from_file(
     }
 
     Ok(items)
-}
-
-/// Check if an identical file exists in any of the alternate destination dirs.
-///
-/// Returns the path in the alt dir if size and mtime match.
-fn check_alt_dest(
-    fs: &dyn FileSystem,
-    src_entry: &FileEntry,
-    alt_dirs: &[PathBuf],
-) -> Option<PathBuf> {
-    let name = std::str::from_utf8(&src_entry.name).ok()?;
-    for dir in alt_dirs {
-        let alt_path = dir.join(name);
-        if let Ok(meta) = fs.lstat(&alt_path) {
-            if meta.len == src_entry.len && meta.mtime == src_entry.mtime {
-                return Some(alt_path);
-            }
-        }
-    }
-    None
-}
-
-/// Create a backup of a file before overwriting.
-fn create_backup(
-    fs: &dyn FileSystem,
-    path: &Path,
-    suffix: &str,
-    backup_dir: Option<&Path>,
-) -> std::result::Result<(), FsError> {
-    let file_name = path.file_name().unwrap_or_default();
-    let backup_name = format!("{}{}", file_name.to_string_lossy(), suffix);
-
-    let backup_path = if let Some(dir) = backup_dir {
-        fs.mkdir(dir, 0o755)?;
-        dir.join(&backup_name)
-    } else {
-        path.with_file_name(&backup_name)
-    };
-
-    fs.rename(path, &backup_path)
-}
-
-/// Check if a file should be skipped based on size and mtime comparison.
-fn should_skip(
-    fs: &dyn FileSystem,
-    src_entry: &FileEntry,
-    dest_path: &Path,
-    options: &TransferOptions,
-) -> bool {
-    let dest_meta = match fs.lstat(dest_path) {
-        Ok(m) => m,
-        Err(_) => return false, // dest doesn't exist, must transfer
-    };
-
-    // Size differs -> must transfer.
-    if dest_meta.len != src_entry.len {
-        return false;
-    }
-
-    // --update: skip if dest is newer.
-    if options.update() && dest_meta.mtime > src_entry.mtime {
-        return true;
-    }
-
-    // Same size and same mtime -> skip.
-    if dest_meta.mtime == src_entry.mtime {
-        return true;
-    }
-
-    false
-}
-
-/// Compute itemized change flags by comparing source entry against destination.
-fn compute_itemized_changes(
-    fs: &dyn FileSystem,
-    src_entry: &FileEntry,
-    dest_path: &Path,
-    options: &TransferOptions,
-) -> ItemizedChanges {
-    let file_type = if src_entry.is_dir() {
-        'd'
-    } else if src_entry.is_symlink() {
-        'L'
-    } else if src_entry.is_device() {
-        'D'
-    } else {
-        'f'
-    };
-
-    let dest_meta = match fs.lstat(dest_path) {
-        Ok(m) => m,
-        Err(_) => {
-            // Dest doesn't exist -- creating.
-            return ItemizedChanges {
-                update_type: 'c',
-                file_type,
-                checksum_changed: false,
-                size_changed: true,
-                time_changed: true,
-                perms_changed: true,
-                owner_changed: true,
-                group_changed: true,
-            };
-        }
-    };
-
-    let size_changed = dest_meta.len != src_entry.len;
-    let time_changed = dest_meta.mtime != src_entry.mtime;
-    let perms_changed =
-        options.preserve_perms() && (dest_meta.mode & 0o7777) != (src_entry.mode & 0o7777);
-    let owner_changed = options.preserve_owner() && dest_meta.uid != src_entry.uid;
-    let group_changed =
-        (options.preserve_group() || options.preserve_owner()) && dest_meta.gid != src_entry.gid;
-
-    let any_change =
-        size_changed || time_changed || perms_changed || owner_changed || group_changed;
-    let update_type = if any_change { '>' } else { '.' };
-
-    ItemizedChanges {
-        update_type,
-        file_type,
-        checksum_changed: false,
-        size_changed,
-        time_changed,
-        perms_changed,
-        owner_changed,
-        group_changed,
-    }
 }
 
 /// Delete files on the receiver that don't exist in the source file list.

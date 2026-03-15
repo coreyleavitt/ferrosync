@@ -11,6 +11,7 @@
 
 pub mod checkpoint;
 pub mod concurrent;
+pub mod file_decision;
 pub mod generator;
 pub mod pipeline;
 pub mod progress;
@@ -19,3 +20,4 @@ pub mod sender;
 pub mod session;
 pub mod streaming_flist;
 pub mod transfer;
+pub mod wire_transfer;
