@@ -975,7 +975,6 @@ dependencies = [
  "fastcdc",
  "filetime",
  "flate2",
- "libc",
  "lz4_flex",
  "md-5",
  "md4",

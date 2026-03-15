@@ -9,7 +9,6 @@ use ferrosync_core::options::{DeleteMode, TransferOptions, Verbosity};
 use ferrosync_core::transport::daemon::{
     DaemonTransport, DaemonTransportConfig, DEFAULT_DAEMON_PORT,
 };
-use ferrosync_core::transport::local::LocalTransport;
 use ferrosync_core::transport::quic::{QuicConfig, QuicTransport};
 use ferrosync_core::transport::ssh::{SshTransport, SshTransportConfig};
 use ferrosync_core::transport::tls::{TlsDaemonConfig, TlsDaemonTransport};
@@ -590,24 +589,19 @@ async fn run_sync(
 
     match remote {
         RemotePath::Local(remote_path) => {
+            // Local-to-local: use the transfer engine directly, no subprocess.
             let (source, dest) = match direction {
                 SyncDirection::Push => (local_path, remote_path),
                 SyncDirection::Pull => (remote_path, local_path),
             };
-            let opts = flags.into_transfer_options(source, dest.clone());
-            let server_opts = build_server_options(&opts, direction == SyncDirection::Push);
-            let am_sender = direction == SyncDirection::Push;
-
-            let path = if am_sender {
-                dest
-            } else {
-                opts.source()[0].clone()
-            };
-
-            let transport =
-                LocalTransport::new(rsync_path.as_deref(), am_sender, &server_opts, &path);
-            let session = SyncSession::new(transport, opts, fs, direction);
-            let result = session.run().await?;
+            let opts = flags.into_transfer_options(source, dest);
+            let mut progress = ferrosync_core::engine::progress::ProgressTracker::new();
+            let seed = 0; // No wire handshake, use deterministic seed.
+            let checksum_type = ferrosync_core::protocol::handshake::ChecksumType::Blake3;
+            let result = ferrosync_core::engine::transfer::execute_transfer(
+                &*fs, &opts, seed, checksum_type, &mut progress,
+            )
+            .await?;
             if show_stats {
                 print_stats(&result.stats);
             }
