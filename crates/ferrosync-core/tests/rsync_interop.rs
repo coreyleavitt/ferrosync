@@ -92,6 +92,10 @@ impl RsyncServerTransport {
 }
 
 impl Transport for RsyncServerTransport {
+    fn is_remote(&self) -> bool {
+        false // Local subprocess: rsync sets local_server=1
+    }
+
     fn connect(
         self: Box<Self>,
     ) -> std::pin::Pin<
@@ -517,4 +521,83 @@ async fn test_interop_flist_multiple_files_sorted() {
             "file {name} content mismatch after flist push"
         );
     }
+}
+
+/// Push with archive mode (-a = -rlptgoD) which enables preserve_uid/gid.
+/// This exercises the uid/gid name list exchange after the file list.
+#[tokio::test]
+async fn test_interop_push_archive_mode() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("archive.txt"), "archive mode push\n").unwrap();
+
+    let opts = TransferOptions::builder()
+        .archive()
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, true);
+    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        session.run(),
+    ).await;
+
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("archive push failed: {e}"),
+        Err(_) => panic!("archive push timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("archive.txt")).unwrap();
+    assert_eq!(content, b"archive mode push\n");
+}
+
+/// Pull with archive mode exercises the uid/gid name list on the receive side.
+#[tokio::test]
+async fn test_interop_pull_archive_mode() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("archive.txt"), "archive mode pull\n").unwrap();
+
+    let opts = TransferOptions::builder()
+        .archive()
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        session.run(),
+    ).await;
+
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("archive pull failed: {e}"),
+        Err(_) => panic!("archive pull timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("archive.txt")).unwrap();
+    assert_eq!(content, b"archive mode pull\n");
 }

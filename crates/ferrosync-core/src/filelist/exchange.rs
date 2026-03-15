@@ -14,7 +14,7 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::ProtocolError;
 use crate::options::TransferOptions;
@@ -48,7 +48,12 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
     if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
         send_file_list_incremental(w, entries, &flist_opts).await
     } else {
-        send_file_list_batch(w, entries, &flist_opts).await
+        send_file_list_batch(w, entries, &flist_opts).await?;
+        // C ref: send_id_lists (uidlist.c:407-414), called from flist.c:2514
+        // In batch mode (!inc_recurse), uid/gid name lists are sent after the
+        // file entries and end-of-list marker, inside send_file_list.
+        send_id_list(w, entries, &flist_opts).await?;
+        Ok(())
     }
 }
 
@@ -346,12 +351,97 @@ async fn recv_file_list_incremental_streaming<R: AsyncRead + Unpin>(
     Ok(())
 }
 
+/// Write uid/gid name mapping lists (batch mode only).
+///
+/// C ref: send_id_lists (uidlist.c:407-414), send_one_list (uidlist.c:388)
+///
+/// Each list is a series of `(varint30 id, byte name_len, name_bytes)` entries
+/// for all unique non-zero ids. The list is terminated differently depending
+/// on xmit_id0_names (compat_flags & ID0_NAMES):
+///
+/// - With xmit_id0_names: send `(varint30(0), byte(name_len), name_bytes)`
+///   as the name for uid/gid 0 (e.g., "root"/"root")
+/// - Without xmit_id0_names: send just `varint30(0)` as terminator
+async fn send_id_list<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    entries: &[FileEntry],
+    opts: &FileListOptions,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    // uid list
+    if opts.preserve_uid {
+        let mut uid_names: BTreeMap<u32, &[u8]> = BTreeMap::new();
+        for entry in entries {
+            if !entry.user_name.is_empty() && !uid_names.contains_key(&entry.uid) {
+                uid_names.insert(entry.uid, &entry.user_name);
+            }
+        }
+        // Send non-zero id entries.
+        for (&uid, name) in &uid_names {
+            if uid == 0 {
+                continue; // id 0 is handled specially below
+            }
+            varint::write_varint30(w, uid, opts.protocol_version).await?;
+            let name_len = name.len().min(255) as u8;
+            varint::write_byte(w, name_len).await?;
+            w.write_all(&name[..name_len as usize]).await?;
+        }
+        // Terminator / id-0 entry.
+        if opts.xmit_id0_names {
+            // Modern rsync: send id=0 as the terminator, followed by the name
+            // for uid 0 (e.g., "root"). The recv side reads varint30(0) to exit
+            // the loop, then reads one more recv_user_name(f, 0).
+            varint::write_varint30(w, 0, opts.protocol_version).await?;
+            let id0_name = uid_names.get(&0).map(|n| *n).unwrap_or(b"root");
+            let name_len = id0_name.len().min(255) as u8;
+            varint::write_byte(w, name_len).await?;
+            w.write_all(&id0_name[..name_len as usize]).await?;
+        } else {
+            varint::write_varint30(w, 0, opts.protocol_version).await?;
+        }
+    }
+
+    // gid list
+    if opts.preserve_gid {
+        let mut gid_names: BTreeMap<u32, &[u8]> = BTreeMap::new();
+        for entry in entries {
+            if !entry.group_name.is_empty() && !gid_names.contains_key(&entry.gid) {
+                gid_names.insert(entry.gid, &entry.group_name);
+            }
+        }
+        for (&gid, name) in &gid_names {
+            if gid == 0 {
+                continue;
+            }
+            varint::write_varint30(w, gid, opts.protocol_version).await?;
+            let name_len = name.len().min(255) as u8;
+            varint::write_byte(w, name_len).await?;
+            w.write_all(&name[..name_len as usize]).await?;
+        }
+        if opts.xmit_id0_names {
+            varint::write_varint30(w, 0, opts.protocol_version).await?;
+            let id0_name = gid_names.get(&0).map(|n| *n).unwrap_or(b"root");
+            let name_len = id0_name.len().min(255) as u8;
+            varint::write_byte(w, name_len).await?;
+            w.write_all(&id0_name[..name_len as usize]).await?;
+        } else {
+            varint::write_varint30(w, 0, opts.protocol_version).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Read and discard uid/gid name mapping lists (batch mode only).
+///
+/// C ref: recv_id_list (uidlist.c:460-479)
 ///
 /// rsync sends these after the file entries when `preserve_uid` or
 /// `preserve_gid` is active and `numeric_ids` is false. Each list is a
 /// series of `(varint30 id, byte name_len, name_bytes)` terminated by
-/// `varint30(0)`.
+/// `varint30(0)`. When `xmit_id0_names` is true, an additional name
+/// entry for id=0 follows the terminator.
 async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -> Result<()> {
     // uid list
     if opts.preserve_uid {
@@ -364,6 +454,12 @@ async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -
             let mut name = vec![0u8; name_len];
             r.read_exact(&mut name).await?;
         }
+        // C ref: uidlist.c:469 -- with xmit_id0_names, read the name for uid 0.
+        if opts.xmit_id0_names {
+            let name_len = varint::read_byte(r).await? as usize;
+            let mut name = vec![0u8; name_len];
+            r.read_exact(&mut name).await?;
+        }
     }
     // gid list
     if opts.preserve_gid {
@@ -372,6 +468,11 @@ async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -
             if id == 0 {
                 break;
             }
+            let name_len = varint::read_byte(r).await? as usize;
+            let mut name = vec![0u8; name_len];
+            r.read_exact(&mut name).await?;
+        }
+        if opts.xmit_id0_names {
             let name_len = varint::read_byte(r).await? as usize;
             let mut name = vec![0u8; name_len];
             r.read_exact(&mut name).await?;

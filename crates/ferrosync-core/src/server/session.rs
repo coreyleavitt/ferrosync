@@ -317,15 +317,11 @@ impl ServerSession {
         let demux_handle = tokio::spawn(demux_task(reader, demux_write));
         let mut mplex_out = MplexWriter::new(writer);
 
-        // Read and discard the client's filter list -- CONDITIONAL.
-        // C ref: exclude.c:1377-1411 (recv_filter_list)
-        // The client sender only sends the filter list when delete_mode is active.
-        // We must match that condition to avoid reading file list data as filter list.
-        let expect_filter_list = opts.delete() != crate::options::DeleteMode::None;
-        tracing::debug!(expect_filter_list, delete_mode = ?opts.delete(), "server receive: filter list decision");
-        if expect_filter_list {
-            read_and_discard_filter_list(&mut demux_read).await?;
-        }
+        // Read and discard the client's filter list.
+        // The client always sends the filter list for remote (non-local) connections
+        // (see engine/session.rs send_filter_list condition). Our daemon server is
+        // always a remote connection, so we always read it.
+        read_and_discard_filter_list(&mut demux_read).await?;
 
         // Receive file list from client sender.
         let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts)
