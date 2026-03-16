@@ -135,6 +135,91 @@ pub fn file_checksum(data: &[u8], _seed: i32, checksum_type: ChecksumType) -> Ve
     }
 }
 
+/// Incremental file-level checksum for streaming verification.
+///
+/// Wraps the same hash algorithms as [`file_checksum`] but supports
+/// incremental `update` calls followed by a single `finalize`.
+/// This allows computing the file checksum without buffering the
+/// entire file in memory.
+#[allow(clippy::large_enum_variant)]
+pub enum IncrementalChecksum {
+    Md4(md4::Md4),
+    Md5(md5::Md5),
+    Blake3(Box<blake3::Hasher>),
+    Xxh3(xxhash_rust::xxh3::Xxh3),
+    Xxh128(xxhash_rust::xxh3::Xxh3),
+    None(usize),
+}
+
+impl IncrementalChecksum {
+    /// Create a new incremental checksum for the given algorithm.
+    pub fn new(checksum_type: ChecksumType) -> Self {
+        match checksum_type {
+            ChecksumType::Md4 => {
+                use md4::Digest;
+                IncrementalChecksum::Md4(md4::Md4::new())
+            }
+            ChecksumType::Md5 => {
+                use md5::Digest;
+                IncrementalChecksum::Md5(md5::Md5::new())
+            }
+            ChecksumType::Blake3 => IncrementalChecksum::Blake3(Box::new(blake3::Hasher::new())),
+            ChecksumType::Xxh3 => {
+                IncrementalChecksum::Xxh3(xxhash_rust::xxh3::Xxh3::new())
+            }
+            ChecksumType::Xxh128 => {
+                IncrementalChecksum::Xxh128(xxhash_rust::xxh3::Xxh3::new())
+            }
+            ChecksumType::None => IncrementalChecksum::None(checksum_type.digest_len()),
+        }
+    }
+
+    /// Feed more data into the checksum.
+    pub fn update(&mut self, data: &[u8]) {
+        match self {
+            IncrementalChecksum::Md4(h) => {
+                use md4::Digest;
+                h.update(data);
+            }
+            IncrementalChecksum::Md5(h) => {
+                use md5::Digest;
+                h.update(data);
+            }
+            IncrementalChecksum::Blake3(h) => {
+                h.update(data);
+            }
+            IncrementalChecksum::Xxh3(h) | IncrementalChecksum::Xxh128(h) => {
+                h.update(data);
+            }
+            IncrementalChecksum::None(_) => {}
+        }
+    }
+
+    /// Finalize and return the digest bytes.
+    pub fn finalize(self) -> Vec<u8> {
+        match self {
+            IncrementalChecksum::Md4(h) => {
+                use md4::Digest;
+                h.finalize().to_vec()
+            }
+            IncrementalChecksum::Md5(h) => {
+                use md5::Digest;
+                h.finalize().to_vec()
+            }
+            IncrementalChecksum::Blake3(h) => h.finalize().as_bytes().to_vec(),
+            IncrementalChecksum::Xxh3(h) => {
+                let hash = h.digest();
+                hash.to_le_bytes().to_vec()
+            }
+            IncrementalChecksum::Xxh128(h) => {
+                let hash = h.digest128();
+                hash.to_le_bytes().to_vec()
+            }
+            IncrementalChecksum::None(len) => vec![0; len],
+        }
+    }
+}
+
 /// State for an incremental rolling checksum that can be updated byte-by-byte
 /// as a window slides over the data.
 #[derive(Debug, Clone)]
@@ -417,5 +502,66 @@ mod tests {
         let c1 = file_checksum(b"data", 1, ChecksumType::Xxh128);
         let c2 = file_checksum(b"data", 999, ChecksumType::Xxh128);
         assert_eq!(c1, c2);
+    }
+
+    // -----------------------------------------------------------------------
+    // IncrementalChecksum tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_incremental_matches_batch_md5() {
+        let data = b"hello world, this is a test of incremental checksumming";
+        let batch = file_checksum(data, 0, ChecksumType::Md5);
+        let mut inc = IncrementalChecksum::new(ChecksumType::Md5);
+        inc.update(&data[..10]);
+        inc.update(&data[10..30]);
+        inc.update(&data[30..]);
+        assert_eq!(inc.finalize(), batch);
+    }
+
+    #[test]
+    fn test_incremental_matches_batch_blake3() {
+        let data = b"blake3 incremental test data";
+        let batch = file_checksum(data, 0, ChecksumType::Blake3);
+        let mut inc = IncrementalChecksum::new(ChecksumType::Blake3);
+        inc.update(&data[..5]);
+        inc.update(&data[5..]);
+        assert_eq!(inc.finalize(), batch);
+    }
+
+    #[test]
+    fn test_incremental_matches_batch_xxh3() {
+        let data = b"xxh3 incremental test data";
+        let batch = file_checksum(data, 0, ChecksumType::Xxh3);
+        let mut inc = IncrementalChecksum::new(ChecksumType::Xxh3);
+        inc.update(&data[..8]);
+        inc.update(&data[8..]);
+        assert_eq!(inc.finalize(), batch);
+    }
+
+    #[test]
+    fn test_incremental_matches_batch_xxh128() {
+        let data = b"xxh128 incremental test data";
+        let batch = file_checksum(data, 0, ChecksumType::Xxh128);
+        let mut inc = IncrementalChecksum::new(ChecksumType::Xxh128);
+        inc.update(&data[..12]);
+        inc.update(&data[12..]);
+        assert_eq!(inc.finalize(), batch);
+    }
+
+    #[test]
+    fn test_incremental_matches_batch_md4() {
+        let data = b"md4 incremental test data";
+        let batch = file_checksum(data, 0, ChecksumType::Md4);
+        let mut inc = IncrementalChecksum::new(ChecksumType::Md4);
+        inc.update(data);
+        assert_eq!(inc.finalize(), batch);
+    }
+
+    #[test]
+    fn test_incremental_empty_data() {
+        let batch = file_checksum(b"", 0, ChecksumType::Md5);
+        let inc = IncrementalChecksum::new(ChecksumType::Md5);
+        assert_eq!(inc.finalize(), batch);
     }
 }

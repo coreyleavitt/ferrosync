@@ -177,22 +177,24 @@ impl ServerSession {
         );
 
         #[cfg(unix)]
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs: std::sync::Arc<dyn crate::fs::FileSystem> =
+            std::sync::Arc::new(crate::fs::unix::UnixFileSystem::new());
         #[cfg(windows)]
-        let fs = crate::fs::windows::WindowsFileSystem::new();
+        let fs: std::sync::Arc<dyn crate::fs::FileSystem> =
+            std::sync::Arc::new(crate::fs::windows::WindowsFileSystem::new());
 
         let mut progress = self.progress;
 
         match self.direction {
             TransferDirection::Send => {
                 Self::handle_send_impl(
-                    &self.module, reader, writer, &protocol, &fs, &opts, &mut progress,
+                    &self.module, reader, writer, &protocol, &*fs, &opts, &mut progress,
                 )
                 .await
             }
             TransferDirection::Receive => {
                 Self::handle_receive_impl(
-                    &self.module, reader, writer, &protocol, &fs, &opts, &mut progress,
+                    &self.module, reader, writer, &protocol, fs, &opts, &mut progress,
                 )
                 .await
             }
@@ -293,13 +295,13 @@ impl ServerSession {
         reader: R,
         writer: W,
         protocol: &NegotiatedProtocol,
-        fs: &dyn FileSystem,
+        fs: std::sync::Arc<dyn FileSystem>,
         opts: &TransferOptions,
         progress: &mut ProgressTracker,
     ) -> Result<(), SessionError>
     where
         R: AsyncRead + Unpin + Send + 'static,
-        W: AsyncWrite + Unpin + Send,
+        W: AsyncWrite + Unpin + Send + 'static,
     {
         if module.read_only {
             return Err(SessionError::Protocol {
@@ -314,8 +316,8 @@ impl ServerSession {
 
         // Enable multiplexing.
         // Uses unbounded channel demux to prevent bidirectional deadlock.
-        let (mut demux_read, demux_handle) = start_demux(reader);
-        let mut mplex_out = MplexWriter::new(writer);
+        let (demux_read, demux_handle) = start_demux(reader);
+        let mplex_out = MplexWriter::new(writer);
 
         // Read and discard the client's filter list -- CONDITIONAL.
         //
@@ -324,6 +326,8 @@ impl ServerSession {
         // For server receiver: am_sender=0, receiver_wants_list = delete || prune.
         // Client only sends filter list when delete_mode is active (see session.rs).
         let expect_filter_list = opts.delete() != crate::options::DeleteMode::None;
+        let mut demux_read = demux_read;
+        let mut mplex_out = mplex_out;
         if expect_filter_list {
             read_and_discard_filter_list(&mut demux_read).await?;
         }
@@ -337,22 +341,25 @@ impl ServerSession {
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
 
-        // Receiver loop via wire_transfer.
-        let file_ops = ModuleFileOps::new(fs, &module.path);
+        // Pipelined receiver loop via wire_transfer.
+        let file_ops: std::sync::Arc<dyn wire_transfer::FileOps> =
+            std::sync::Arc::new(ModuleFileOps::new(fs, module.path.clone()));
         let mut stats = TransferStats::new();
         stats.start();
 
-        wire_transfer::receiver_loop(
-            &mut demux_read,
-            &mut mplex_out,
+        let (dr, mo) = wire_transfer::receiver_loop_pipelined(
+            demux_read,
+            mplex_out,
             &entries,
             &entry_ndx,
-            &file_ops,
+            file_ops,
             protocol,
             &mut stats,
             progress,
         )
         .await?;
+        demux_read = dr;
+        mplex_out = mo;
 
         // Phase exchange.
         wire_transfer::server_receiver_phase_exchange(

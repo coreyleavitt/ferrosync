@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
@@ -162,23 +163,23 @@ pub trait FileOps: Send + Sync {
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
-pub struct LocalFileOps<'a> {
-    fs: &'a dyn FileSystem,
-    dest: &'a Path,
-    options: &'a crate::options::TransferOptions,
+pub struct LocalFileOps {
+    fs: Arc<dyn FileSystem>,
+    dest: PathBuf,
+    options: crate::options::TransferOptions,
 }
 
-impl<'a> LocalFileOps<'a> {
+impl LocalFileOps {
     pub fn new(
-        fs: &'a dyn FileSystem,
-        dest: &'a Path,
-        options: &'a crate::options::TransferOptions,
+        fs: Arc<dyn FileSystem>,
+        dest: PathBuf,
+        options: crate::options::TransferOptions,
     ) -> Self {
         Self { fs, dest, options }
     }
 }
 
-impl FileOps for LocalFileOps<'_> {
+impl FileOps for LocalFileOps {
     fn read_basis(&self, entry: &FileEntry) -> Vec<u8> {
         let dest_path = self.dest_path(entry);
         self.fs.read_file(&dest_path).unwrap_or_default()
@@ -191,13 +192,13 @@ impl FileOps for LocalFileOps<'_> {
     ) -> std::result::Result<(), crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
         super::file_decision::write_file_with_options(
-            self.fs, &dest_path, data, entry, self.options,
+            &*self.fs, &dest_path, data, entry, &self.options,
         )
     }
 
     fn set_metadata(&self, entry: &FileEntry) {
         let dest_path = self.dest_path(entry);
-        super::file_decision::set_file_metadata(self.fs, &dest_path, entry, self.options);
+        super::file_decision::set_file_metadata(&*self.fs, &dest_path, entry, &self.options);
     }
 
     fn mkdir(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
@@ -243,18 +244,18 @@ impl FileOps for LocalFileOps<'_> {
 }
 
 /// Receiver-side operations using module directory (server side).
-pub struct ModuleFileOps<'a> {
-    fs: &'a dyn FileSystem,
-    module_path: &'a Path,
+pub struct ModuleFileOps {
+    fs: Arc<dyn FileSystem>,
+    module_path: PathBuf,
 }
 
-impl<'a> ModuleFileOps<'a> {
-    pub fn new(fs: &'a dyn FileSystem, module_path: &'a Path) -> Self {
+impl ModuleFileOps {
+    pub fn new(fs: Arc<dyn FileSystem>, module_path: PathBuf) -> Self {
         Self { fs, module_path }
     }
 }
 
-impl FileOps for ModuleFileOps<'_> {
+impl FileOps for ModuleFileOps {
     fn read_basis(&self, entry: &FileEntry) -> Vec<u8> {
         let dest_path = self.dest_path(entry);
         self.fs.read_file(&dest_path).unwrap_or_default()
@@ -421,16 +422,17 @@ where
             protocol.proper_seed_order,
         );
 
-        // Build sender response: NDX + iflags + sum_head + tokens + checksum.
-        let mut resp_buf = Vec::new();
+        // Stream sender response: NDX + iflags + sum_head (small header),
+        // then tokens individually, then file checksum.
+        // Each piece goes to the wire as its own MUX frame(s), avoiding
+        // an O(file_size) intermediate buffer.
 
-        // NDX + iflags.
-        varint::write_ndx(&mut resp_buf, ndx, &mut send_ndx_state, proto_ver).await?;
+        // 1. Small header: NDX + iflags + sum_head (~20 bytes).
+        let mut hdr = Vec::with_capacity(64);
+        varint::write_ndx(&mut hdr, ndx, &mut send_ndx_state, proto_ver).await?;
         if proto_ver >= 29 {
-            varint::write_shortint(&mut resp_buf, iflags).await?;
+            varint::write_shortint(&mut hdr, iflags).await?;
         }
-
-        // sum_head: echo back the generator's sum head.
         let resp_sum_head = if sums.head.count == 0 {
             sum::SumHead {
                 count: 0,
@@ -446,33 +448,37 @@ where
                 remainder: sums.head.remainder,
             }
         };
-        sum::write_sum_head(&mut resp_buf, &resp_sum_head).await?;
+        sum::write_sum_head(&mut hdr, &resp_sum_head).await?;
+        mplex_out.write_data(&hdr).await?;
 
-        // Delta tokens.
+        // 2. Stream delta tokens directly to the wire.
         let mut literal_bytes = 0u64;
         let mut matched_bytes = 0u64;
         for op in &ops {
             match op {
                 matcher::MatchOp::Data(data) => {
-                    token::send_data(&mut resp_buf, data).await?;
+                    let mut tok_buf = Vec::with_capacity(data.len() + 4);
+                    token::send_data(&mut tok_buf, data).await?;
+                    mplex_out.write_data(&tok_buf).await?;
                     literal_bytes += data.len() as u64;
                 }
                 matcher::MatchOp::BlockMatch(block_idx) => {
-                    token::send_block_match(&mut resp_buf, *block_idx).await?;
+                    let mut tok_buf = Vec::with_capacity(8);
+                    token::send_block_match(&mut tok_buf, *block_idx).await?;
+                    mplex_out.write_data(&tok_buf).await?;
                     if sums.head.blength > 0 {
                         matched_bytes += sums.head.blength as u64;
                     }
                 }
             }
         }
-        token::send_eof(&mut resp_buf).await?;
+        let mut eof_buf = Vec::with_capacity(8);
+        token::send_eof(&mut eof_buf).await?;
+        mplex_out.write_data(&eof_buf).await?;
 
-        // File-level checksum.
+        // 3. File-level checksum.
         let file_sum = checksum::file_checksum(&source_data, seed, checksum_type);
-        resp_buf.extend_from_slice(&file_sum);
-
-        // Send the complete response as MUX DATA.
-        mplex_out.write_data(&resp_buf).await?;
+        mplex_out.write_data(&file_sum).await?;
         mplex_out.flush().await?;
 
         stats.files_transferred += 1;
@@ -621,15 +627,22 @@ where
             700
         };
 
-        // Read tokens + file checksum.
-        let result_data =
-            receiver::recv_file_delta(demux_read, &basis_data, blength, seed, checksum_type)
-                .await?;
+        // Read tokens, reconstruct file via streaming writer, verify checksum.
+        let mut output = Vec::new();
+        let bytes_written = receiver::recv_file_delta_to_writer(
+            demux_read,
+            &basis_data,
+            blength,
+            seed,
+            checksum_type,
+            &mut output,
+        )
+        .await?;
 
-        let literal_bytes = result_data.len() as u64;
+        let literal_bytes = bytes_written;
 
         // Write reconstructed file.
-        file_ops.write_file(entry, &result_data)?;
+        file_ops.write_file(entry, &output)?;
 
         // Set metadata.
         file_ops.set_metadata(entry);
@@ -648,6 +661,244 @@ where
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined receiver loop
+// ---------------------------------------------------------------------------
+
+/// Message from the generator task to the receiver task.
+enum GeneratorItem {
+    /// A file is being requested from the sender.
+    File {
+        entry_idx: usize,
+        basis_data: Vec<u8>,
+        blength: usize,
+    },
+    /// All phases are complete.
+    Done,
+}
+
+/// Run the receiver loop with pipelined generator/receiver tasks.
+///
+/// The generator task sends block signatures to the remote sender while
+/// the receiver task concurrently processes delta responses. This allows
+/// the generator to request file N+1 while the receiver is still
+/// reconstructing file N, matching rsync's 3-process architecture.
+///
+/// The `mplex_out` writer is owned exclusively by the generator task.
+/// The `demux_read` reader is owned exclusively by the receiver task.
+/// A bounded mpsc channel carries [`GeneratorItem`] messages from the
+/// generator to the receiver so it knows which file to expect next.
+#[allow(clippy::too_many_arguments)]
+pub async fn receiver_loop_pipelined<R, W>(
+    demux_read: R,
+    mplex_out: MplexWriter<W>,
+    entries: &[FileEntry],
+    entry_ndx: &[i32],
+    file_ops: Arc<dyn FileOps>,
+    protocol: &NegotiatedProtocol,
+    stats: &mut TransferStats,
+    progress: &mut ProgressTracker,
+) -> Result<(R, MplexWriter<W>)>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let seed = protocol.seed;
+    let checksum_type = protocol.checksum;
+    let proto_ver = protocol.version;
+    let proper_seed_order = protocol.proper_seed_order;
+
+    // Create directories first (same as sequential loop).
+    for entry in entries {
+        if !entry.is_dir() {
+            continue;
+        }
+        file_ops.mkdir(entry)?;
+        stats.directories_created += 1;
+    }
+
+    // Pre-compute file items: (entry_idx, file_ndx, entry_clone).
+    // We clone entries that need transferring so they can be moved
+    // into the spawned tasks.
+    let mut file_items: Vec<(usize, i32, FileEntry)> = Vec::new();
+    for (idx, entry) in entries.iter().enumerate() {
+        if !entry.is_file() {
+            continue;
+        }
+        if file_ops.should_skip(entry) {
+            continue;
+        }
+        file_ops.ensure_parent(entry)?;
+        file_items.push((idx, entry_ndx[idx], entry.clone()));
+    }
+
+    // Bounded channel: generator -> receiver. Capacity of 4 provides
+    // enough pipelining without unbounded memory growth.
+    let (gen_tx, mut gen_rx) = tokio::sync::mpsc::channel::<GeneratorItem>(4);
+
+    // Clone data needed by the generator task.
+    let gen_file_items = file_items.clone();
+    let gen_file_ops = Arc::clone(&file_ops);
+
+    // --- Generator task ---
+    // Owns mplex_out exclusively. Reads basis files, computes signatures,
+    // sends them to the wire, and tells the receiver what's coming.
+    let generator_handle = tokio::spawn(async move {
+        let mut mplex_out = mplex_out;
+        let mut gen_ndx_state = varint::NdxState::default();
+
+        for (idx, file_ndx, entry) in &gen_file_items {
+            // Read existing basis file for delta computation.
+            let basis_data = gen_file_ops.read_basis(entry);
+
+            // Compute block signatures.
+            let sigs = sum::compute_signatures(
+                &basis_data,
+                seed,
+                checksum_type,
+                checksum::CHAR_OFFSET_V30,
+                proper_seed_order,
+            );
+
+            let blength = if sigs.head.blength > 0 {
+                sigs.head.blength as usize
+            } else {
+                700
+            };
+
+            // Send generator output to wire: NDX + iflags + sum_head + block sigs.
+            let mut sig_buf = Vec::new();
+            varint::write_ndx(&mut sig_buf, *file_ndx, &mut gen_ndx_state, proto_ver).await?;
+            if proto_ver >= 29 {
+                const ITEM_TRANSFER: u16 = 1 << 15;
+                varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
+            }
+            sum::write_sums(&mut sig_buf, &sigs).await?;
+            mplex_out.write_data(&sig_buf).await?;
+            mplex_out.flush().await?;
+
+            // Tell receiver task what file to expect.
+            let item = GeneratorItem::File {
+                entry_idx: *idx,
+                basis_data,
+                blength,
+            };
+            if gen_tx.send(item).await.is_err() {
+                // Receiver dropped -- it hit an error.
+                break;
+            }
+        }
+
+        // Signal completion.
+        let _ = gen_tx.send(GeneratorItem::Done).await;
+
+        Ok::<MplexWriter<W>, WireError>(mplex_out)
+    });
+
+    // --- Receiver task (runs on current task) ---
+    // Owns demux_read exclusively. Reads GeneratorItems from the channel,
+    // then reads the sender's delta response from the wire.
+    let mut demux_read = demux_read;
+    let mut recv_ndx_state = varint::NdxState::default();
+
+    while let Some(item) = gen_rx.recv().await {
+        match item {
+            GeneratorItem::File {
+                entry_idx,
+                basis_data,
+                blength,
+            } => {
+                let entry = &entries[entry_idx];
+
+                progress.emit(ProgressEvent::FileStart {
+                    index: entry_idx as i32,
+                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    size: entry.len,
+                });
+
+                // Read sender's response NDX.
+                let _file_ndx =
+                    varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
+
+                // Read iflags (protocol >= 29).
+                if proto_ver >= 29 {
+                    let mut iflags_buf = [0u8; 2];
+                    demux_read.read_exact(&mut iflags_buf).await?;
+                    let iflags = u16::from_le_bytes(iflags_buf);
+
+                    if iflags & 0x0800 != 0 {
+                        let mut bt = [0u8; 1];
+                        demux_read.read_exact(&mut bt).await?;
+                    }
+                    if iflags & 0x1000 != 0 {
+                        let name_len = varint::read_varint(&mut demux_read).await?;
+                        if name_len > 0x10000 {
+                            return Err(WireError::Protocol(
+                                ProtocolError::WireValueOutOfRange {
+                                    field: "xname_len",
+                                    value: name_len as i64,
+                                    max: 0x10000,
+                                },
+                            ));
+                        }
+                        let mut name_buf = vec![0u8; name_len as usize];
+                        demux_read.read_exact(&mut name_buf).await?;
+                    }
+                }
+
+                // Read sum_head from sender.
+                let sum_head = sum::read_sum_head(&mut demux_read).await?;
+                let blength_actual = if sum_head.blength > 0 {
+                    sum_head.blength as usize
+                } else {
+                    blength
+                };
+
+                // Reconstruct file via streaming writer.
+                let mut output = Vec::new();
+                let bytes_written = receiver::recv_file_delta_to_writer(
+                    &mut demux_read,
+                    &basis_data,
+                    blength_actual,
+                    seed,
+                    checksum_type,
+                    &mut output,
+                )
+                .await?;
+
+                let literal_bytes = bytes_written;
+
+                // Write reconstructed file.
+                file_ops.write_file(entry, &output)?;
+                file_ops.set_metadata(entry);
+
+                stats.files_transferred += 1;
+                stats.total_size += entry.len as u64;
+                stats.literal_data += literal_bytes;
+                stats.bytes_received += literal_bytes;
+
+                progress.emit(ProgressEvent::FileComplete {
+                    index: entry_idx as i32,
+                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    literal_bytes,
+                    matched_bytes: 0,
+                });
+            }
+            GeneratorItem::Done => break,
+        }
+    }
+
+    // Wait for generator task to complete and recover mplex_out.
+    // We need mplex_out back for the phase exchange that follows.
+    let mplex_out = generator_handle.await.map_err(|e| {
+        WireError::Protocol(ProtocolError::Handshake {
+            message: format!("generator task panicked: {e}"),
+        })
+    })??;
+
+    Ok((demux_read, mplex_out))
 }
 
 // ---------------------------------------------------------------------------

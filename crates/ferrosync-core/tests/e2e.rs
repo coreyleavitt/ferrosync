@@ -426,6 +426,179 @@ async fn test_e2e_push_archive_mode() {
     assert_eq!(pushed, content);
 }
 
+// ---------------------------------------------------------------------------
+// Pipelining stress tests
+//
+// These tests exercise the concurrent generator/receiver pipeline by
+// transferring many files (where the generator can send signatures for
+// file N+1 while the receiver is still processing file N's delta).
+// ---------------------------------------------------------------------------
+
+/// Pull many small files to exercise generator/receiver pipelining.
+#[tokio::test]
+async fn test_e2e_pull_many_small_files() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+
+    // Create 50 small files on the server.
+    let file_count = 50;
+    for i in 0..file_count {
+        let content = format!("file {i} content -- small file pipelining test\n");
+        std::fs::write(
+            server_dir.path().join(format!("file_{i:03}.txt")),
+            content.as_bytes(),
+        )
+        .unwrap();
+    }
+
+    let (addr, shutdown) = start_test_server(server_dir.path(), true).await;
+    ferrosync_client_pull(addr, "test", client_dir.path()).await;
+    let _ = shutdown.send(true);
+
+    // Verify all files arrived correctly.
+    for i in 0..file_count {
+        let expected = format!("file {i} content -- small file pipelining test\n");
+        let actual = std::fs::read(client_dir.path().join(format!("file_{i:03}.txt"))).unwrap();
+        assert_eq!(actual, expected.as_bytes(), "mismatch for file_{i:03}.txt");
+    }
+}
+
+/// Push many small files to exercise server-side pipelined receiver.
+#[tokio::test]
+async fn test_e2e_push_many_small_files() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+
+    // Create 50 small files on the client.
+    let file_count = 50;
+    for i in 0..file_count {
+        let content = format!("pushed file {i}\n");
+        std::fs::write(
+            client_dir.path().join(format!("push_{i:03}.txt")),
+            content.as_bytes(),
+        )
+        .unwrap();
+    }
+
+    let (addr, shutdown) = start_test_server(server_dir.path(), false).await;
+    ferrosync_client_push(addr, "test", client_dir.path()).await;
+    let _ = shutdown.send(true);
+
+    for i in 0..file_count {
+        let expected = format!("pushed file {i}\n");
+        let actual = std::fs::read(server_dir.path().join(format!("push_{i:03}.txt"))).unwrap();
+        assert_eq!(actual, expected.as_bytes(), "mismatch for push_{i:03}.txt");
+    }
+}
+
+/// Pull a mix of large and small files to stress the pipeline with
+/// varied per-file processing times.
+#[tokio::test]
+async fn test_e2e_pull_mixed_file_sizes() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+
+    // Small files interspersed with larger ones.
+    std::fs::write(server_dir.path().join("tiny_1.txt"), b"a").unwrap();
+    let medium: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
+    std::fs::write(server_dir.path().join("medium.bin"), &medium).unwrap();
+    std::fs::write(server_dir.path().join("tiny_2.txt"), b"bb").unwrap();
+    let large: Vec<u8> = (0..128 * 1024).map(|i| (i % 199) as u8).collect();
+    std::fs::write(server_dir.path().join("large.bin"), &large).unwrap();
+    std::fs::write(server_dir.path().join("tiny_3.txt"), b"ccc").unwrap();
+    std::fs::write(server_dir.path().join("empty.dat"), b"").unwrap();
+
+    let (addr, shutdown) = start_test_server(server_dir.path(), true).await;
+    ferrosync_client_pull(addr, "test", client_dir.path()).await;
+    let _ = shutdown.send(true);
+
+    assert_eq!(
+        std::fs::read(client_dir.path().join("tiny_1.txt")).unwrap(),
+        b"a"
+    );
+    assert_eq!(
+        std::fs::read(client_dir.path().join("medium.bin")).unwrap(),
+        medium
+    );
+    assert_eq!(
+        std::fs::read(client_dir.path().join("tiny_2.txt")).unwrap(),
+        b"bb"
+    );
+    assert_eq!(
+        std::fs::read(client_dir.path().join("large.bin")).unwrap(),
+        large
+    );
+    assert_eq!(
+        std::fs::read(client_dir.path().join("tiny_3.txt")).unwrap(),
+        b"ccc"
+    );
+    assert_eq!(
+        std::fs::read(client_dir.path().join("empty.dat")).unwrap(),
+        b""
+    );
+}
+
+/// Pull with delta: many files where the basis already exists at the
+/// destination. Exercises pipelining with non-trivial block matching.
+#[tokio::test]
+async fn test_e2e_pull_many_files_delta() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+
+    let file_count = 20;
+    for i in 0..file_count {
+        // Create basis on client (old version).
+        let mut basis = vec![0u8; 4096];
+        for (j, b) in basis.iter_mut().enumerate() {
+            *b = ((i + j) % 256) as u8;
+        }
+        std::fs::write(
+            client_dir.path().join(format!("delta_{i:02}.bin")),
+            &basis,
+        )
+        .unwrap();
+
+        // Create modified version on server.
+        let mut modified = basis.clone();
+        modified[2048] = 0xFF;
+        modified[2049] = 0xFE;
+        std::fs::write(
+            server_dir.path().join(format!("delta_{i:02}.bin")),
+            &modified,
+        )
+        .unwrap();
+        // Set future mtime so quick-check detects the change.
+        let future = filetime::FileTime::from_unix_time(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + 200,
+            0,
+        );
+        filetime::set_file_mtime(
+            server_dir.path().join(format!("delta_{i:02}.bin")),
+            future,
+        )
+        .unwrap();
+    }
+
+    let (addr, shutdown) = start_test_server(server_dir.path(), true).await;
+    ferrosync_client_pull(addr, "test", client_dir.path()).await;
+    let _ = shutdown.send(true);
+
+    for i in 0..file_count {
+        let mut expected = vec![0u8; 4096];
+        for (j, b) in expected.iter_mut().enumerate() {
+            *b = ((i + j) % 256) as u8;
+        }
+        expected[2048] = 0xFF;
+        expected[2049] = 0xFE;
+        let actual = std::fs::read(client_dir.path().join(format!("delta_{i:02}.bin"))).unwrap();
+        assert_eq!(actual, expected, "mismatch for delta_{i:02}.bin");
+    }
+}
+
 /// Pull with archive mode to exercise uid/gid name list decoding.
 #[tokio::test]
 async fn test_e2e_pull_archive_mode() {
