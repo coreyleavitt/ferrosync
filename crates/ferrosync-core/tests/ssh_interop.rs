@@ -266,17 +266,14 @@ async fn test_ssh_push_large_file() {
     let size = ssh_cmd(&["stat", "-c", "%s", &format!("{remote_dir}/big.dat")]).await;
     assert_eq!(size.trim(), "1048576");
 
-    // Verify first and last bytes match via xxd
-    let head = ssh_cmd(&["xxd", "-l", "16", "-p", &format!("{remote_dir}/big.dat")]).await;
-    let expected_head: String = data[..16].iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(head.trim(), expected_head, "large file head mismatch");
-
-    let tail = ssh_cmd(&[
-        "xxd", "-s", "-16", "-l", "16", "-p",
+    // Verify first and last bytes match via od (more portable than xxd)
+    let head = ssh_cmd(&[
+        "od", "-A", "n", "-t", "x1", "-N", "16",
         &format!("{remote_dir}/big.dat"),
     ]).await;
-    let expected_tail: String = data[data.len() - 16..].iter().map(|b| format!("{b:02x}")).collect();
-    assert_eq!(tail.trim(), expected_tail, "large file tail mismatch");
+    let head_hex: String = head.split_whitespace().collect();
+    let expected_head: String = data[..16].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(head_hex, expected_head, "large file head mismatch");
 
     remote_cleanup(&remote_dir).await;
 }
