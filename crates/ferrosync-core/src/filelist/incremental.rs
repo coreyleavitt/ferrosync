@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::ProtocolError;
 use crate::protocol::varint::{self, NdxState};
+use crate::protocol::wire_format::IntCodec;
 
 use super::codec::{
     recv_file_entry, send_file_entry, write_end_of_flist, DeltaState, FileListOptions,
@@ -74,9 +75,9 @@ impl IncrementalReceiver {
     pub async fn read_ndx_marker<R: AsyncRead + Unpin>(
         &mut self,
         r: &mut R,
-        protocol_version: u8,
+        codec: IntCodec,
     ) -> Result<i32> {
-        varint::read_ndx(r, &mut self.ndx_state, protocol_version).await
+        varint::read_ndx(r, &mut self.ndx_state, codec).await
     }
 
     /// Receive a complete sub-file-list from the stream.
@@ -146,10 +147,10 @@ impl IncrementalSender {
         &mut self,
         w: &mut W,
         dir_ndx: i32,
-        protocol_version: u8,
+        codec: IntCodec,
     ) -> Result<()> {
         let ndx_val = NDX_FLIST_OFFSET - dir_ndx;
-        varint::write_ndx(w, ndx_val, &mut self.ndx_state, protocol_version).await
+        varint::write_ndx(w, ndx_val, &mut self.ndx_state, codec).await
     }
 
     /// Send a complete sub-file-list.
@@ -163,7 +164,7 @@ impl IncrementalSender {
         opts: &FileListOptions,
     ) -> Result<()> {
         // Write the sub-flist marker.
-        self.write_sub_flist_marker(w, dir_ndx, opts.protocol_version)
+        self.write_sub_flist_marker(w, dir_ndx, opts.wire.int_codec)
             .await?;
 
         // Write entries.
@@ -182,9 +183,9 @@ impl IncrementalSender {
     pub async fn write_flist_eof<W: AsyncWrite + Unpin>(
         &mut self,
         w: &mut W,
-        protocol_version: u8,
+        codec: IntCodec,
     ) -> Result<()> {
-        varint::write_ndx(w, NDX_FLIST_EOF, &mut self.ndx_state, protocol_version).await
+        varint::write_ndx(w, NDX_FLIST_EOF, &mut self.ndx_state, codec).await
     }
 }
 
@@ -192,12 +193,16 @@ impl IncrementalSender {
 mod tests {
     use super::*;
     use crate::filelist::entry::{S_IFDIR, S_IFREG};
+    use crate::protocol::wire_format::WireFormat;
     use std::io::Cursor;
 
     fn test_opts() -> FileListOptions {
         FileListOptions {
-            protocol_version: 31,
-            xfer_flags_as_varint: true,
+            wire: WireFormat::new(
+                31,
+                crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
+                    | crate::protocol::handshake::compat_flags::INC_RECURSE,
+            ),
             ..Default::default()
         }
     }
@@ -247,7 +252,7 @@ mod tests {
             .unwrap();
         // EOF.
         sender
-            .write_flist_eof(&mut buf, opts.protocol_version)
+            .write_flist_eof(&mut buf, opts.wire.int_codec)
             .await
             .unwrap();
 
@@ -257,7 +262,7 @@ mod tests {
 
         // Read first marker.
         let ndx = receiver
-            .read_ndx_marker(&mut cursor, opts.protocol_version)
+            .read_ndx_marker(&mut cursor, opts.wire.int_codec)
             .await
             .unwrap();
         assert!(ndx <= NDX_FLIST_OFFSET);
@@ -274,7 +279,7 @@ mod tests {
 
         // Read second marker.
         let ndx = receiver
-            .read_ndx_marker(&mut cursor, opts.protocol_version)
+            .read_ndx_marker(&mut cursor, opts.wire.int_codec)
             .await
             .unwrap();
         let dir_ndx = NDX_FLIST_OFFSET - ndx;
@@ -289,7 +294,7 @@ mod tests {
 
         // Read EOF.
         let ndx = receiver
-            .read_ndx_marker(&mut cursor, opts.protocol_version)
+            .read_ndx_marker(&mut cursor, opts.wire.int_codec)
             .await
             .unwrap();
         assert_eq!(ndx, NDX_FLIST_EOF);

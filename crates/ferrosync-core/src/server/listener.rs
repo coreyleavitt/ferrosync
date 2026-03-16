@@ -18,6 +18,7 @@ use tokio::sync::watch;
 use super::auth;
 use super::module::ModuleRegistry;
 use super::session::ServerSession;
+use crate::protocol::handshake::MAX_PROTOCOL_VERSION;
 
 /// Listener-specific error type.
 #[derive(Debug, thiserror::Error)]
@@ -35,8 +36,8 @@ pub enum ListenerError {
     Io(#[from] std::io::Error),
 }
 
-/// Protocol version we advertise to clients.
-const DAEMON_PROTOCOL_VERSION: u8 = 31;
+/// Protocol version we advertise to clients (matches binary protocol).
+const DAEMON_PROTOCOL_VERSION: u8 = MAX_PROTOCOL_VERSION;
 /// Sub-protocol version.
 const DAEMON_SUB_PROTOCOL_VERSION: u8 = 0;
 /// Maximum line length from clients (8 KiB).
@@ -542,7 +543,7 @@ mod tests {
 
         let s = String::from_utf8(buf).unwrap();
         assert!(s.starts_with("@RSYNCD: "));
-        assert!(s.contains("31.0"));
+        assert!(s.contains(&format!("{DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}")));
         assert!(s.ends_with('\n'));
     }
 
@@ -605,7 +606,7 @@ mod tests {
 
         // Read server greeting.
         let greeting = read_line(&mut reader).await.unwrap();
-        assert!(greeting.starts_with("@RSYNCD: 31"));
+        assert!(greeting.starts_with(&format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}")));
 
         // Send client greeting.
         writer.write_all(b"@RSYNCD: 31.0\n").await.unwrap();

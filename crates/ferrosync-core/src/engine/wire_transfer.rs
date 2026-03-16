@@ -19,6 +19,7 @@ use crate::fs::FileSystem;
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::protocol::multiplex::MplexWriter;
 use crate::protocol::varint;
+use crate::protocol::wire_format::IntCodec;
 use crate::stats::TransferStats;
 
 type Result<T> = std::result::Result<T, WireError>;
@@ -324,15 +325,16 @@ where
 {
     let seed = protocol.seed;
     let checksum_type = protocol.checksum;
-    let proto_ver = protocol.version;
+    let int_codec = protocol.wire.int_codec;
+    let wire = &protocol.wire;
 
     let mut gen_ndx_state = varint::NdxState::default();
     let mut send_ndx_state = varint::NdxState::default();
-    let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
+    let max_phase: u32 = wire.phase_count as u32;
     let mut phase: u32 = 0;
 
     loop {
-        let ndx = varint::read_ndx(demux_read, &mut gen_ndx_state, proto_ver).await?;
+        let ndx = varint::read_ndx(demux_read, &mut gen_ndx_state, int_codec).await?;
 
         if ndx == varint::NDX_DONE {
             phase += 1;
@@ -345,7 +347,7 @@ where
                 &mut done_buf,
                 varint::NDX_DONE,
                 &mut send_ndx_state,
-                proto_ver,
+                int_codec,
             )
             .await?;
             mplex_out.write_data(&done_buf).await?;
@@ -360,7 +362,7 @@ where
 
         // Read iflags from generator (proto >= 29).
         let mut iflags: u16 = 0;
-        if proto_ver >= 29 {
+        if wire.has_iflags {
             let mut iflags_buf = [0u8; 2];
             demux_read.read_exact(&mut iflags_buf).await?;
             iflags = u16::from_le_bytes(iflags_buf);
@@ -429,8 +431,8 @@ where
 
         // 1. Small header: NDX + iflags + sum_head (~20 bytes).
         let mut hdr = Vec::with_capacity(64);
-        varint::write_ndx(&mut hdr, ndx, &mut send_ndx_state, proto_ver).await?;
-        if proto_ver >= 29 {
+        varint::write_ndx(&mut hdr, ndx, &mut send_ndx_state, int_codec).await?;
+        if wire.has_iflags {
             varint::write_shortint(&mut hdr, iflags).await?;
         }
         let resp_sum_head = if sums.head.count == 0 {
@@ -501,7 +503,7 @@ where
         &mut done_buf,
         varint::NDX_DONE,
         &mut send_ndx_state,
-        proto_ver,
+        int_codec,
     )
     .await?;
     mplex_out.write_data(&done_buf).await?;
@@ -535,7 +537,8 @@ where
 {
     let seed = protocol.seed;
     let checksum_type = protocol.checksum;
-    let proto_ver = protocol.version;
+    let int_codec = protocol.wire.int_codec;
+    let wire = &protocol.wire;
 
     let mut gen_ndx_state = varint::NdxState::default();
     let mut recv_ndx_state = varint::NdxState::default();
@@ -575,9 +578,9 @@ where
         // Send generator output: NDX + iflags + sum_head + block sigs.
         let file_ndx = entry_ndx[idx];
         let mut sig_buf = Vec::new();
-        varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, proto_ver).await?;
+        varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, int_codec).await?;
         // iflags: ITEM_TRANSFER (1<<15) signals data transfer needed.
-        if proto_ver >= 29 {
+        if wire.has_iflags {
             const ITEM_TRANSFER: u16 = 1 << 15;
             varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
         }
@@ -593,10 +596,10 @@ where
         mplex_out.flush().await?;
 
         // Read sender's response.
-        let _file_ndx = varint::read_ndx(demux_read, &mut recv_ndx_state, proto_ver).await?;
+        let _file_ndx = varint::read_ndx(demux_read, &mut recv_ndx_state, int_codec).await?;
 
-        // Read iflags (protocol >= 29).
-        if proto_ver >= 29 {
+        // Read iflags (when wire format includes them).
+        if wire.has_iflags {
             let mut iflags_buf = [0u8; 2];
             demux_read.read_exact(&mut iflags_buf).await?;
             let iflags = u16::from_le_bytes(iflags_buf);
@@ -707,8 +710,9 @@ where
 {
     let seed = protocol.seed;
     let checksum_type = protocol.checksum;
-    let proto_ver = protocol.version;
+    let int_codec = protocol.wire.int_codec;
     let proper_seed_order = protocol.proper_seed_order;
+    let has_iflags = protocol.wire.has_iflags;
 
     // Create directories first (same as sequential loop).
     for entry in entries {
@@ -770,8 +774,8 @@ where
 
             // Send generator output to wire: NDX + iflags + sum_head + block sigs.
             let mut sig_buf = Vec::new();
-            varint::write_ndx(&mut sig_buf, *file_ndx, &mut gen_ndx_state, proto_ver).await?;
-            if proto_ver >= 29 {
+            varint::write_ndx(&mut sig_buf, *file_ndx, &mut gen_ndx_state, int_codec).await?;
+            if has_iflags {
                 const ITEM_TRANSFER: u16 = 1 << 15;
                 varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
             }
@@ -820,10 +824,10 @@ where
 
                 // Read sender's response NDX.
                 let _file_ndx =
-                    varint::read_ndx(&mut demux_read, &mut recv_ndx_state, proto_ver).await?;
+                    varint::read_ndx(&mut demux_read, &mut recv_ndx_state, int_codec).await?;
 
-                // Read iflags (protocol >= 29).
-                if proto_ver >= 29 {
+                // Read iflags (when wire format includes them).
+                if has_iflags {
                     let mut iflags_buf = [0u8; 2];
                     demux_read.read_exact(&mut iflags_buf).await?;
                     let iflags = u16::from_le_bytes(iflags_buf);
@@ -911,12 +915,11 @@ pub fn build_ndx_map(
     protocol: &NegotiatedProtocol,
     is_recursive: bool,
 ) -> HashMap<i32, usize> {
-    let ndx_start: i32 =
-        if protocol.incremental_flist && protocol.version >= 30 && is_recursive {
-            1
-        } else {
-            0
-        };
+    let ndx_start: i32 = if protocol.wire.supports_incremental_flist && is_recursive {
+        1
+    } else {
+        0
+    };
     entries
         .iter()
         .enumerate()
@@ -928,15 +931,16 @@ pub fn build_ndx_map(
 pub async fn write_stats<W: AsyncWrite + Unpin + Send>(
     mplex_out: &mut MplexWriter<W>,
     stats: &TransferStats,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()> {
+    let int_codec = protocol.wire.int_codec;
     let mut stats_buf = Vec::new();
-    varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-    varint::write_varlong30(&mut stats_buf, stats.bytes_sent as i64, 3, proto_ver).await?;
-    varint::write_varlong30(&mut stats_buf, stats.total_size as i64, 3, proto_ver).await?;
-    if proto_ver >= 29 {
-        varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
-        varint::write_varlong30(&mut stats_buf, 0, 3, proto_ver).await?;
+    varint::write_varlong30(&mut stats_buf, 0, 3, int_codec).await?;
+    varint::write_varlong30(&mut stats_buf, stats.bytes_sent as i64, 3, int_codec).await?;
+    varint::write_varlong30(&mut stats_buf, stats.total_size as i64, 3, int_codec).await?;
+    if protocol.wire.has_iflags {
+        varint::write_varlong30(&mut stats_buf, 0, 3, int_codec).await?;
+        varint::write_varlong30(&mut stats_buf, 0, 3, int_codec).await?;
     }
     mplex_out.write_data(&stats_buf).await?;
     mplex_out.flush().await?;
@@ -946,14 +950,15 @@ pub async fn write_stats<W: AsyncWrite + Unpin + Send>(
 /// Read transfer stats from the sender.
 pub async fn read_stats<R: AsyncRead + Unpin + Send>(
     demux_read: &mut R,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()> {
-    let _total_read = varint::read_varlong30(demux_read, 3, proto_ver).await?;
-    let _total_written = varint::read_varlong30(demux_read, 3, proto_ver).await?;
-    let _total_size = varint::read_varlong30(demux_read, 3, proto_ver).await?;
-    if proto_ver >= 29 {
-        let _flist_buildtime = varint::read_varlong30(demux_read, 3, proto_ver).await?;
-        let _flist_xfertime = varint::read_varlong30(demux_read, 3, proto_ver).await?;
+    let int_codec = protocol.wire.int_codec;
+    let _total_read = varint::read_varlong30(demux_read, 3, int_codec).await?;
+    let _total_written = varint::read_varlong30(demux_read, 3, int_codec).await?;
+    let _total_size = varint::read_varlong30(demux_read, 3, int_codec).await?;
+    if protocol.wire.has_iflags {
+        let _flist_buildtime = varint::read_varlong30(demux_read, 3, int_codec).await?;
+        let _flist_xfertime = varint::read_varlong30(demux_read, 3, int_codec).await?;
     }
     Ok(())
 }
@@ -968,28 +973,29 @@ pub async fn read_stats<R: AsyncRead + Unpin + Send>(
 pub async fn sender_goodbye<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    if proto_ver >= 24 {
+    let int_codec = protocol.wire.int_codec;
+    {
         let mut read_state = varint::NdxState::default();
         let mut write_state = varint::NdxState::default();
 
-        if proto_ver >= 31 {
+        if protocol.wire.has_error_exit_sync {
             // Read first goodbye NDX_DONE from receiver.
-            let _ = varint::read_ndx(demux_read, &mut read_state, proto_ver).await;
+            let _ = varint::read_ndx(demux_read, &mut read_state, int_codec).await;
 
             // Acknowledge with our own NDX_DONE.
-            write_goodbye_done(mplex_out, &mut write_state, proto_ver).await;
+            write_goodbye_done(mplex_out, &mut write_state, int_codec).await;
 
             // Read error-exit sync NDX_DONE.
-            let _ = varint::read_ndx(demux_read, &mut read_state, proto_ver).await;
+            let _ = varint::read_ndx(demux_read, &mut read_state, int_codec).await;
         } else {
             // Proto 24-30: just read the final NDX_DONE.
-            let _ = varint::read_ndx(demux_read, &mut read_state, proto_ver).await;
+            let _ = varint::read_ndx(demux_read, &mut read_state, int_codec).await;
         }
     }
     Ok(())
@@ -1001,16 +1007,16 @@ where
 pub async fn receiver_phase_exchange<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
     num_flists: usize,
-    incremental_flist: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
-    let flist_cleanup_rounds: u32 = if incremental_flist && proto_ver >= 30 {
+    let int_codec = protocol.wire.int_codec;
+    let max_phase: u32 = protocol.wire.phase_count as u32;
+    let flist_cleanup_rounds: u32 = if protocol.wire.supports_incremental_flist {
         (num_flists as u32).saturating_sub(1)
     } else {
         0
@@ -1026,14 +1032,14 @@ where
             &mut done_buf,
             varint::NDX_DONE,
             &mut gen_ndx_state,
-            proto_ver,
+            int_codec,
         )
         .await?;
         mplex_out.write_data(&done_buf).await?;
         mplex_out.flush().await?;
 
         // Read sender's NDX_DONE response.
-        let resp = varint::read_ndx(demux_read, &mut recv_ndx_state, proto_ver).await?;
+        let resp = varint::read_ndx(demux_read, &mut recv_ndx_state, int_codec).await?;
         if resp != varint::NDX_DONE {
             tracing::warn!(
                 ndx = resp,
@@ -1052,10 +1058,10 @@ where
 async fn write_goodbye_done<W: AsyncWrite + Unpin>(
     out: &mut MplexWriter<W>,
     st: &mut varint::NdxState,
-    pv: u8,
+    codec: IntCodec,
 ) {
     let mut buf = Vec::new();
-    let _ = varint::write_ndx(&mut buf, varint::NDX_DONE, st, pv).await;
+    let _ = varint::write_ndx(&mut buf, varint::NDX_DONE, st, codec).await;
     let _ = out.write_data(&buf).await;
     let _ = out.flush().await;
 }
@@ -1066,22 +1072,23 @@ async fn write_goodbye_done<W: AsyncWrite + Unpin>(
 pub async fn receiver_goodbye<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    if proto_ver >= 24 {
+    let int_codec = protocol.wire.int_codec;
+    {
         let mut gen_ndx_state = varint::NdxState::default();
         let mut recv_ndx_state = varint::NdxState::default();
 
-        write_goodbye_done(mplex_out, &mut gen_ndx_state, proto_ver).await;
-        let _ = varint::read_ndx(demux_read, &mut recv_ndx_state, proto_ver).await;
-        write_goodbye_done(mplex_out, &mut gen_ndx_state, proto_ver).await;
+        write_goodbye_done(mplex_out, &mut gen_ndx_state, int_codec).await;
+        let _ = varint::read_ndx(demux_read, &mut recv_ndx_state, int_codec).await;
+        write_goodbye_done(mplex_out, &mut gen_ndx_state, int_codec).await;
 
-        if proto_ver >= 31 {
-            write_goodbye_done(mplex_out, &mut gen_ndx_state, proto_ver).await;
+        if protocol.wire.has_error_exit_sync {
+            write_goodbye_done(mplex_out, &mut gen_ndx_state, int_codec).await;
         }
     }
     Ok(())
@@ -1094,23 +1101,24 @@ where
 pub async fn server_sender_goodbye<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    if proto_ver >= 24 {
+    let int_codec = protocol.wire.int_codec;
+    {
         let mut send_ndx_state = varint::NdxState::default();
         let mut gen_ndx_state = varint::NdxState::default();
 
-        write_goodbye_done(mplex_out, &mut send_ndx_state, proto_ver).await;
+        write_goodbye_done(mplex_out, &mut send_ndx_state, int_codec).await;
 
         // Read goodbye NDX_DONEs from receiver (best-effort).
-        let _ = varint::read_ndx(demux_read, &mut gen_ndx_state, proto_ver).await;
-        let _ = varint::read_ndx(demux_read, &mut gen_ndx_state, proto_ver).await;
-        if proto_ver >= 31 {
-            let _ = varint::read_ndx(demux_read, &mut gen_ndx_state, proto_ver).await;
+        let _ = varint::read_ndx(demux_read, &mut gen_ndx_state, int_codec).await;
+        let _ = varint::read_ndx(demux_read, &mut gen_ndx_state, int_codec).await;
+        if protocol.wire.has_error_exit_sync {
+            let _ = varint::read_ndx(demux_read, &mut gen_ndx_state, int_codec).await;
         }
     }
     Ok(())
@@ -1123,13 +1131,14 @@ where
 pub async fn server_receiver_phase_exchange<R, W>(
     demux_read: &mut R,
     mplex_out: &mut MplexWriter<W>,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let max_phase: u32 = if proto_ver >= 29 { 2 } else { 1 };
+    let int_codec = protocol.wire.int_codec;
+    let max_phase: u32 = protocol.wire.phase_count as u32;
     let mut gen_ndx_state = varint::NdxState::default();
     let mut recv_ndx_state = varint::NdxState::default();
 
@@ -1140,7 +1149,7 @@ where
             &mut done_buf,
             varint::NDX_DONE,
             &mut gen_ndx_state,
-            proto_ver,
+            int_codec,
         )
         .await?;
         mplex_out.write_data(&done_buf).await?;
@@ -1148,7 +1157,7 @@ where
 
         // The sender responds with NDX_DONE for each phase except the last.
         if phase < max_phase {
-            let resp = varint::read_ndx(demux_read, &mut recv_ndx_state, proto_ver).await?;
+            let resp = varint::read_ndx(demux_read, &mut recv_ndx_state, int_codec).await?;
             if resp != varint::NDX_DONE {
                 tracing::warn!(ndx = resp, phase, "expected NDX_DONE from sender");
             }
@@ -1156,7 +1165,7 @@ where
     }
 
     // Read the sender's final NDX_DONE.
-    let final_ndx = varint::read_ndx(demux_read, &mut recv_ndx_state, proto_ver).await?;
+    let final_ndx = varint::read_ndx(demux_read, &mut recv_ndx_state, int_codec).await?;
     if final_ndx != varint::NDX_DONE {
         tracing::warn!(ndx = final_ndx, "expected final NDX_DONE from sender");
     }
@@ -1167,13 +1176,14 @@ where
 /// Server-side receiver goodbye exchange (proto >= 24).
 pub async fn server_receiver_goodbye<W: AsyncWrite + Unpin + Send>(
     mplex_out: &mut MplexWriter<W>,
-    proto_ver: u8,
+    protocol: &NegotiatedProtocol,
 ) -> Result<()> {
-    if proto_ver >= 24 {
+    let int_codec = protocol.wire.int_codec;
+    {
         let mut gen_ndx_state = varint::NdxState::default();
-        write_goodbye_done(mplex_out, &mut gen_ndx_state, proto_ver).await;
-        if proto_ver >= 31 {
-            write_goodbye_done(mplex_out, &mut gen_ndx_state, proto_ver).await;
+        write_goodbye_done(mplex_out, &mut gen_ndx_state, int_codec).await;
+        if protocol.wire.has_error_exit_sync {
+            write_goodbye_done(mplex_out, &mut gen_ndx_state, int_codec).await;
         }
     }
     Ok(())

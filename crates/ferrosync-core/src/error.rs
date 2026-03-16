@@ -8,8 +8,8 @@ use std::sync::Arc;
 /// Errors originating from rsync wire-protocol encoding/decoding.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ProtocolError {
-    #[error("unsupported protocol version {version} (supported: 27..=31)")]
-    UnsupportedVersion { version: u8 },
+    #[error("unsupported protocol version {version} (supported: {min}..={max})")]
+    UnsupportedVersion { version: u8, min: u8, max: u8 },
 
     #[error("protocol version negotiation failed: local={local}, remote={remote}")]
     NegotiationFailed { local: u8, remote: u8 },

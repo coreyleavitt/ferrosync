@@ -171,7 +171,7 @@ impl ServerSession {
             version = protocol.version,
             checksum = ?protocol.checksum,
             compress = ?protocol.compress,
-            incremental = protocol.incremental_flist,
+            incremental = protocol.wire.supports_incremental_flist,
             seed = protocol.seed,
             "server handshake complete"
         );
@@ -219,8 +219,6 @@ impl ServerSession {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send,
     {
-        let proto_ver = protocol.version;
-
         // Enable multiplexing: demux incoming, mux outgoing.
         // Uses unbounded channel demux to prevent bidirectional deadlock.
         let (mut demux_read, demux_handle) = start_demux(reader);
@@ -273,10 +271,10 @@ impl ServerSession {
         .await?;
 
         // Write transfer stats.
-        wire_transfer::write_stats(&mut mplex_out, &stats, proto_ver).await?;
+        wire_transfer::write_stats(&mut mplex_out, &stats, protocol).await?;
 
         // Goodbye exchange.
-        wire_transfer::server_sender_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
+        wire_transfer::server_sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
 
         // Shut down the write half so the remote side's demux task sees EOF.
         let _ = mplex_out.shutdown().await;
@@ -311,8 +309,6 @@ impl ServerSession {
                 ),
             });
         }
-
-        let proto_ver = protocol.version;
 
         // Enable multiplexing.
         // Uses unbounded channel demux to prevent bidirectional deadlock.
@@ -365,7 +361,7 @@ impl ServerSession {
         wire_transfer::server_receiver_phase_exchange(
             &mut demux_read,
             &mut mplex_out,
-            proto_ver,
+            protocol,
         )
         .await?;
 
@@ -374,7 +370,7 @@ impl ServerSession {
         // the sender (am_server && am_sender, i.e., pull mode).
 
         // Goodbye exchange.
-        wire_transfer::server_receiver_goodbye(&mut mplex_out, proto_ver).await?;
+        wire_transfer::server_receiver_goodbye(&mut mplex_out, protocol).await?;
 
         // Shut down the write half and abort the demux task.
         let _ = mplex_out.shutdown().await;

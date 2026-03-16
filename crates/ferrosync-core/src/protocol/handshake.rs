@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::delta::chunker::ChunkingStrategy;
 use crate::error::ProtocolError;
 use crate::protocol::varint;
+use crate::protocol::wire_format::WireFormat;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -24,7 +25,7 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 pub const MIN_PROTOCOL_VERSION: u8 = 27;
 
 /// Maximum protocol version we advertise.
-pub const MAX_PROTOCOL_VERSION: u8 = 31;
+pub const MAX_PROTOCOL_VERSION: u8 = 32;
 
 // ---------------------------------------------------------------------------
 // Compatibility flags (CF_*)
@@ -165,13 +166,9 @@ impl CompressType {
 #[derive(Debug, Clone)]
 pub struct NegotiatedProtocol {
     /// Agreed protocol version (min of both sides).
-    pub version: u8,
+    pub(crate) version: u8,
     /// Compatibility flags (proto >= 30).
     pub compat_flags: u32,
-    /// Whether incremental file lists are enabled (proto >= 30 + flag).
-    pub incremental_flist: bool,
-    /// Whether flist XMIT flags use varint encoding.
-    pub varint_flist_flags: bool,
     /// Negotiated checksum algorithm.
     pub checksum: ChecksumType,
     /// Negotiated compression algorithm.
@@ -186,13 +183,8 @@ pub struct NegotiatedProtocol {
     /// ferrosync, this can be upgraded to `FastCDC` via out-of-band
     /// negotiation (wire negotiation not yet implemented).
     pub chunking: ChunkingStrategy,
-}
-
-impl NegotiatedProtocol {
-    /// Whether this protocol version uses compact varint encoding.
-    pub fn uses_varint(&self) -> bool {
-        self.version >= 30
-    }
+    /// All version-dependent wire format decisions, resolved at handshake time.
+    pub wire: WireFormat,
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +314,8 @@ where
     if version < MIN_PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedVersion {
             version: remote_version,
+            min: MIN_PROTOCOL_VERSION,
+            max: MAX_PROTOCOL_VERSION,
         });
     }
 
@@ -338,10 +332,8 @@ where
         flags = varint::read_varint(r).await?;
     }
 
-    let varint_flist_flags = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
-    let do_negotiated_strings = varint_flist_flags;
+    let do_negotiated_strings = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
     let proper_seed_order = flags & compat_flags::CHKSUM_SEED_FIX != 0;
-    let incremental_flist = flags & compat_flags::INC_RECURSE != 0;
 
     // Step 3: Checksum/compression negotiation (proto >= 30, with 'v').
     let mut checksum = ChecksumType::default_for_version(version);
@@ -383,13 +375,12 @@ where
     Ok(NegotiatedProtocol {
         version,
         compat_flags: flags,
-        incremental_flist,
-        varint_flist_flags,
         checksum,
         compress,
         proper_seed_order,
         seed,
         chunking: ChunkingStrategy::default(),
+        wire: WireFormat::new(version, flags),
     })
 }
 
@@ -418,6 +409,8 @@ where
     if version < MIN_PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedVersion {
             version: remote_version,
+            min: MIN_PROTOCOL_VERSION,
+            max: MAX_PROTOCOL_VERSION,
         });
     }
 
@@ -430,10 +423,8 @@ where
         varint::write_varint(w, flags).await?;
     }
 
-    let varint_flist_flags = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
-    let do_negotiated_strings = varint_flist_flags;
+    let do_negotiated_strings = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
     let proper_seed_order = flags & compat_flags::CHKSUM_SEED_FIX != 0;
-    let incremental_flist = flags & compat_flags::INC_RECURSE != 0;
 
     // Step 3: Checksum/compression negotiation.
     let mut checksum = ChecksumType::default_for_version(version);
@@ -473,13 +464,12 @@ where
     Ok(NegotiatedProtocol {
         version,
         compat_flags: flags,
-        incremental_flist,
-        varint_flist_flags,
         checksum,
         compress,
         proper_seed_order,
         seed,
         chunking: ChunkingStrategy::default(),
+        wire: WireFormat::new(version, flags),
     })
 }
 
@@ -652,8 +642,7 @@ mod tests {
         assert_eq!(result.version, 31);
         assert_eq!(result.checksum, ChecksumType::Blake3);
         assert_eq!(result.seed, 12345);
-        assert!(result.varint_flist_flags);
-        assert!(result.incremental_flist);
+        assert!(result.wire.supports_incremental_flist);
         assert!(result.proper_seed_order);
 
         // Verify the client sent the expected bytes.

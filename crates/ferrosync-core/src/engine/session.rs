@@ -311,7 +311,7 @@ impl<T: Transport> SyncSession<T> {
             version = protocol.version,
             checksum = ?protocol.checksum,
             compress = ?protocol.compress,
-            incremental = protocol.incremental_flist,
+            incremental = protocol.wire.supports_incremental_flist,
             seed = protocol.seed,
             "handshake complete"
         );
@@ -364,8 +364,6 @@ async fn run_push(
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
     stats.start();
-
-    let proto_ver = protocol.version;
 
     // Both sides enable MUX after handshake (proto >= 30).
     // C ref: io_start_multiplex_out (main.c:1146)
@@ -454,7 +452,7 @@ async fn run_push(
     // For push (client is sender, am_server=false), handle_stats(-1) is a no-op.
 
     // Goodbye exchange.
-    wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
+    wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
 
     let _ = demux_handle.await;
 
@@ -492,8 +490,6 @@ async fn run_pull(
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
     stats.start();
-
-    let proto_ver = protocol.version;
 
     // Uses unbounded channel demux to prevent bidirectional deadlock.
     let (mut demux_read, demux_handle) = start_demux(reader);
@@ -588,17 +584,16 @@ async fn run_pull(
     wire_transfer::receiver_phase_exchange(
         &mut demux_read,
         &mut mplex_out,
-        proto_ver,
+        protocol,
         received_flist.num_flists,
-        protocol.incremental_flist,
     )
     .await?;
 
     // Read transfer stats.
-    wire_transfer::read_stats(&mut demux_read, proto_ver).await?;
+    wire_transfer::read_stats(&mut demux_read, protocol).await?;
 
     // Goodbye exchange.
-    wire_transfer::receiver_goodbye(&mut demux_read, &mut mplex_out, proto_ver).await?;
+    wire_transfer::receiver_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
 
     let _ = demux_handle.await;
 

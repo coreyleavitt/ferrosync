@@ -14,6 +14,7 @@ use crate::protocol::varint::{
     self, read_byte, read_int, read_varint, read_varint30, read_varlong, read_varlong30,
     write_byte, write_int, write_varint, write_varint30, write_varlong, write_varlong30,
 };
+use crate::protocol::wire_format::{DeviceCodec, FlagsCodec, IntCodec, WireFormat};
 
 use super::entry::{FileEntry, S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSOCK, WIRE_S_IFLNK};
 use super::xmit::*;
@@ -27,10 +28,8 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 /// Options that control which fields are present in the file list wire format.
 #[derive(Debug, Clone)]
 pub struct FileListOptions {
-    /// Negotiated protocol version.
-    pub protocol_version: u8,
-    /// True if XMIT flags are sent as varints (proto >= 30 with CF_VARINT_FLIST_FLAGS).
-    pub xfer_flags_as_varint: bool,
+    /// Wire format descriptor capturing version-dependent encoding choices.
+    pub wire: WireFormat,
     /// True if uid is preserved (-o).
     pub preserve_uid: bool,
     /// True if gid is preserved (-g).
@@ -55,8 +54,7 @@ pub struct FileListOptions {
 impl Default for FileListOptions {
     fn default() -> Self {
         Self {
-            protocol_version: 31,
-            xfer_flags_as_varint: true,
+            wire: WireFormat::new(31, crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS | crate::protocol::handshake::compat_flags::INC_RECURSE),
             preserve_uid: false,
             preserve_gid: false,
             preserve_devices: false,
@@ -80,8 +78,7 @@ impl FileListOptions {
         opts: &crate::options::TransferOptions,
     ) -> Self {
         Self {
-            protocol_version: proto.version,
-            xfer_flags_as_varint: proto.varint_flist_flags,
+            wire: proto.wire.clone(),
             preserve_uid: opts.preserve_owner(),
             preserve_gid: opts.preserve_group() || opts.preserve_owner(),
             preserve_devices: opts.preserve_devices(),
@@ -147,31 +144,42 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     opts: &FileListOptions,
 ) -> Result<ReadEntryResult> {
     // Read XMIT flags.
-    let flags = if opts.xfer_flags_as_varint {
-        let f = read_varint(r).await?;
-        if f == 0 {
-            let io_error = read_varint(r).await? as i32;
-            return Ok(ReadEntryResult::EndOfList { io_error });
-        }
-        f
-    } else {
-        let first_byte = read_byte(r).await?;
-        if first_byte == 0 {
-            return Ok(ReadEntryResult::EndOfList { io_error: 0 });
-        }
-        let mut f = first_byte as u32;
-        if opts.protocol_version >= 28 && (f & XMIT_EXTENDED_FLAGS) != 0 {
-            let second_byte = read_byte(r).await?;
-            f |= (second_byte as u32) << 8;
-            if f == (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) {
+    let flags = match opts.wire.flags_codec {
+        FlagsCodec::Varint => {
+            let f = read_varint(r).await?;
+            if f == 0 {
                 let io_error = read_varint(r).await? as i32;
                 return Ok(ReadEntryResult::EndOfList { io_error });
             }
+            f
         }
-        f
+        FlagsCodec::ByteExtended => {
+            let first_byte = read_byte(r).await?;
+            if first_byte == 0 {
+                return Ok(ReadEntryResult::EndOfList { io_error: 0 });
+            }
+            let mut f = first_byte as u32;
+            if (f & XMIT_EXTENDED_FLAGS) != 0 {
+                let second_byte = read_byte(r).await?;
+                f |= (second_byte as u32) << 8;
+                if f == (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) {
+                    let io_error = read_varint(r).await? as i32;
+                    return Ok(ReadEntryResult::EndOfList { io_error });
+                }
+            }
+            f
+        }
+        FlagsCodec::Byte => {
+            let first_byte = read_byte(r).await?;
+            if first_byte == 0 {
+                return Ok(ReadEntryResult::EndOfList { io_error: 0 });
+            }
+            first_byte as u32
+        }
     };
 
-    let pv = opts.protocol_version;
+    // Raw version for varint functions that still require it.
+    let codec = opts.wire.int_codec;
 
     // --- Filename ---
     let prefix_len = if (flags & XMIT_SAME_NAME) != 0 {
@@ -181,7 +189,7 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     };
 
     let suffix_len = if (flags & XMIT_LONG_NAME) != 0 {
-        read_varint30(r, pv).await? as usize
+        read_varint30(r, codec).await? as usize
     } else {
         read_byte(r).await? as usize
     };
@@ -215,19 +223,19 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     }
 
     // --- File length ---
-    let len = read_varlong30(r, 3, pv).await?;
+    let len = read_varlong30(r, 3, codec).await?;
 
     // --- Modification time ---
     let mtime = if (flags & XMIT_SAME_TIME) != 0 {
         state.prev_mtime
-    } else if pv >= 30 {
+    } else if opts.wire.int_codec == IntCodec::Compact {
         read_varlong(r, 4).await?
     } else {
         read_int(r).await? as i64
     };
 
-    // --- Mtime nanoseconds (proto >= 31) ---
-    let mtime_nsec = if pv >= 31 && (flags & XMIT_MOD_NSEC) != 0 {
+    // --- Mtime nanoseconds ---
+    let mtime_nsec = if opts.wire.has_nanoseconds && (flags & XMIT_MOD_NSEC) != 0 {
         read_varint(r).await?
     } else {
         0
@@ -242,12 +250,12 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
 
     // --- UID ---
     let (uid, user_name) = if opts.preserve_uid && (flags & XMIT_SAME_UID) == 0 {
-        let uid = if pv >= 30 {
+        let uid = if opts.wire.int_codec == IntCodec::Compact {
             read_varint(r).await?
         } else {
             read_int(r).await? as u32
         };
-        let uname = if pv >= 30 && (flags & XMIT_USER_NAME_FOLLOWS) != 0 {
+        let uname = if opts.wire.has_inline_names && (flags & XMIT_USER_NAME_FOLLOWS) != 0 {
             let namelen = read_byte(r).await? as usize;
             let mut buf = vec![0u8; namelen];
             r.read_exact(&mut buf).await?;
@@ -262,12 +270,12 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
 
     // --- GID ---
     let (gid, group_name) = if opts.preserve_gid && (flags & XMIT_SAME_GID) == 0 {
-        let gid = if pv >= 30 {
+        let gid = if opts.wire.int_codec == IntCodec::Compact {
             read_varint(r).await?
         } else {
             read_int(r).await? as u32
         };
-        let gname = if pv >= 30 && (flags & XMIT_GROUP_NAME_FOLLOWS) != 0 {
+        let gname = if opts.wire.has_inline_names && (flags & XMIT_GROUP_NAME_FOLLOWS) != 0 {
             let namelen = read_byte(r).await? as usize;
             let mut buf = vec![0u8; namelen];
             r.read_exact(&mut buf).await?;
@@ -289,7 +297,7 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
 
     // --- Symlink target ---
     let link_target = if (mode & S_IFMT) == WIRE_S_IFLNK && opts.preserve_links {
-        let link_len = read_varint30(r, pv).await? as usize;
+        let link_len = read_varint30(r, codec).await? as usize;
         if link_len > MAX_NAME_LEN {
             return Err(ProtocolError::WireValueOutOfRange {
                 field: "symlink_target_len",
@@ -305,7 +313,9 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     };
 
     // --- File checksum ---
-    let checksum = if opts.always_checksum && ((mode & S_IFMT) == S_IFREG || pv < 28) {
+    // Proto < 28 sends checksums for all file types; >= 28 only for regular files.
+    let checksum_for_all_types = opts.wire.flags_codec == FlagsCodec::Byte;
+    let checksum = if opts.always_checksum && ((mode & S_IFMT) == S_IFREG || checksum_for_all_types) {
         let mut buf = vec![0u8; opts.checksum_len];
         r.read_exact(&mut buf).await?;
         buf
@@ -350,7 +360,7 @@ fn should_send_rdev(mode: u32, opts: &FileListOptions) -> bool {
     if opts.preserve_devices && is_device {
         return true;
     }
-    if opts.preserve_specials && is_special && opts.protocol_version < 31 {
+    if opts.preserve_specials && is_special && opts.wire.special_rdev {
         return true;
     }
     false
@@ -363,32 +373,35 @@ async fn read_rdev<R: AsyncRead + Unpin>(
     state: &DeltaState,
     opts: &FileListOptions,
 ) -> Result<u64> {
-    let pv = opts.protocol_version;
+    let codec = opts.wire.int_codec;
 
-    if pv < 28 {
-        // Proto < 28: single int for rdev if not XMIT_SAME_RDEV_PRE28.
-        if (flags & XMIT_SAME_RDEV_PRE28) != 0 {
-            return Ok(state.prev_rdev);
+    match opts.wire.device_codec {
+        DeviceCodec::SingleInt => {
+            // Proto < 28: single int for rdev if not XMIT_SAME_RDEV_PRE28.
+            if (flags & XMIT_SAME_RDEV_PRE28) != 0 {
+                return Ok(state.prev_rdev);
+            }
+            Ok(read_int(r).await? as u64)
         }
-        return Ok(read_int(r).await? as u64);
+        DeviceCodec::MajorMinor { varint_minor } => {
+            // Proto >= 28: major and minor separately.
+            let major = if (flags & XMIT_SAME_RDEV_MAJOR) != 0 {
+                state.prev_rdev_major
+            } else {
+                read_varint30(r, codec).await?
+            };
+
+            let minor = if varint_minor {
+                read_varint(r).await?
+            } else if (flags & XMIT_RDEV_MINOR_8_PRE30) != 0 {
+                read_byte(r).await? as u32
+            } else {
+                read_int(r).await? as u32
+            };
+
+            Ok(((major as u64) << 8) | (minor as u64))
+        }
     }
-
-    // Proto >= 28: major and minor separately.
-    let major = if (flags & XMIT_SAME_RDEV_MAJOR) != 0 {
-        state.prev_rdev_major
-    } else {
-        read_varint30(r, pv).await?
-    };
-
-    let minor = if pv >= 30 {
-        read_varint(r).await?
-    } else if (flags & XMIT_RDEV_MINOR_8_PRE30) != 0 {
-        read_byte(r).await? as u32
-    } else {
-        read_int(r).await? as u32
-    };
-
-    Ok(((major as u64) << 8) | (minor as u64))
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +415,8 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     state: &mut DeltaState,
     opts: &FileListOptions,
 ) -> Result<()> {
-    let pv = opts.protocol_version;
+    // Raw version for varint functions that still require it.
+    let codec = opts.wire.int_codec;
 
     // --- Compute XMIT flags ---
     let mut flags = entry.flags & XMIT_TOP_DIR; // Preserve TOP_DIR if set.
@@ -431,24 +445,30 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     }
 
     // Device flags.
-    if should_send_rdev(entry.mode, opts) && pv >= 28 {
-        let major = entry.rdev_major();
-        if major == state.prev_rdev_major {
-            flags |= XMIT_SAME_RDEV_MAJOR;
+    if should_send_rdev(entry.mode, opts) {
+        match opts.wire.device_codec {
+            DeviceCodec::MajorMinor { .. } => {
+                if entry.rdev_major() == state.prev_rdev_major {
+                    flags |= XMIT_SAME_RDEV_MAJOR;
+                }
+            }
+            DeviceCodec::SingleInt => {
+                if entry.rdev == state.prev_rdev {
+                    flags |= XMIT_SAME_RDEV_PRE28;
+                }
+            }
         }
-    } else if should_send_rdev(entry.mode, opts) && pv < 28 && entry.rdev == state.prev_rdev {
-        flags |= XMIT_SAME_RDEV_PRE28;
     }
 
-    // Mtime nanoseconds (proto >= 31).
-    if pv >= 31 && entry.mtime_nsec != 0 {
+    // Mtime nanoseconds.
+    if opts.wire.has_nanoseconds && entry.mtime_nsec != 0 {
         flags |= XMIT_MOD_NSEC;
     }
 
-    // Username/group name follows (proto >= 30).
+    // Username/group name follows.
     if opts.preserve_uid
         && (flags & XMIT_SAME_UID) == 0
-        && pv >= 30
+        && opts.wire.has_inline_names
         && !entry.user_name.is_empty()
         && entry.user_name != state.prev_user_name
     {
@@ -456,7 +476,7 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     }
     if opts.preserve_gid
         && (flags & XMIT_SAME_GID) == 0
-        && pv >= 30
+        && opts.wire.has_inline_names
         && !entry.group_name.is_empty()
         && entry.group_name != state.prev_group_name
     {
@@ -471,18 +491,18 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
         write_byte(w, common_prefix as u8).await?;
     }
     if (flags & XMIT_LONG_NAME) != 0 {
-        write_varint30(w, suffix_len as u32, pv).await?;
+        write_varint30(w, suffix_len as u32, codec).await?;
     } else {
         write_byte(w, suffix_len as u8).await?;
     }
     w.write_all(&entry.name[common_prefix..]).await?;
 
     // --- File length ---
-    write_varlong30(w, entry.len, 3, pv).await?;
+    write_varlong30(w, entry.len, 3, codec).await?;
 
     // --- Modification time ---
     if (flags & XMIT_SAME_TIME) == 0 {
-        if pv >= 30 {
+        if opts.wire.int_codec == IntCodec::Compact {
             write_varlong(w, entry.mtime, 4).await?;
         } else {
             write_int(w, entry.mtime as i32).await?;
@@ -490,7 +510,7 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     }
 
     // --- Mtime nanoseconds ---
-    if pv >= 31 && (flags & XMIT_MOD_NSEC) != 0 {
+    if opts.wire.has_nanoseconds && (flags & XMIT_MOD_NSEC) != 0 {
         write_varint(w, entry.mtime_nsec).await?;
     }
 
@@ -501,7 +521,7 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
 
     // --- UID ---
     if opts.preserve_uid && (flags & XMIT_SAME_UID) == 0 {
-        if pv >= 30 {
+        if opts.wire.int_codec == IntCodec::Compact {
             write_varint(w, entry.uid).await?;
             if (flags & XMIT_USER_NAME_FOLLOWS) != 0 {
                 write_byte(w, entry.user_name.len() as u8).await?;
@@ -514,7 +534,7 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
 
     // --- GID ---
     if opts.preserve_gid && (flags & XMIT_SAME_GID) == 0 {
-        if pv >= 30 {
+        if opts.wire.int_codec == IntCodec::Compact {
             write_varint(w, entry.gid).await?;
             if (flags & XMIT_GROUP_NAME_FOLLOWS) != 0 {
                 write_byte(w, entry.group_name.len() as u8).await?;
@@ -532,12 +552,13 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
 
     // --- Symlink target ---
     if (entry.mode & S_IFMT) == WIRE_S_IFLNK && opts.preserve_links {
-        write_varint30(w, entry.link_target.len() as u32, pv).await?;
+        write_varint30(w, entry.link_target.len() as u32, codec).await?;
         w.write_all(&entry.link_target).await?;
     }
 
     // --- File checksum ---
-    if opts.always_checksum && ((entry.mode & S_IFMT) == S_IFREG || pv < 28) {
+    let checksum_for_all_types = opts.wire.flags_codec == FlagsCodec::Byte;
+    if opts.always_checksum && ((entry.mode & S_IFMT) == S_IFREG || checksum_for_all_types) {
         let csum = if entry.checksum.len() >= opts.checksum_len {
             &entry.checksum[..opts.checksum_len]
         } else {
@@ -563,27 +584,31 @@ async fn write_xmit_flags<W: AsyncWrite + Unpin>(
     flags: u32,
     opts: &FileListOptions,
 ) -> Result<()> {
-    if opts.xfer_flags_as_varint {
-        // Varint mode: if flags would be 0, send XMIT_EXTENDED_FLAGS instead.
-        let wire_flags = if flags == 0 {
-            XMIT_EXTENDED_FLAGS
-        } else {
-            flags
-        };
-        write_varint(w, wire_flags).await?;
-    } else if opts.protocol_version >= 28 {
-        if (flags & 0xFF00) != 0 || flags == 0 {
-            let wire_flags = flags | XMIT_EXTENDED_FLAGS;
-            varint::write_shortint(w, wire_flags as u16).await?;
-        } else {
-            write_byte(w, flags as u8).await?;
+    match opts.wire.flags_codec {
+        FlagsCodec::Varint => {
+            // Varint mode: if flags would be 0, send XMIT_EXTENDED_FLAGS instead.
+            let wire_flags = if flags == 0 {
+                XMIT_EXTENDED_FLAGS
+            } else {
+                flags
+            };
+            write_varint(w, wire_flags).await?;
         }
-    } else {
-        let mut low = (flags & 0xFF) as u8;
-        if low == 0 {
-            low = XMIT_TOP_DIR as u8;
+        FlagsCodec::ByteExtended => {
+            if (flags & 0xFF00) != 0 || flags == 0 {
+                let wire_flags = flags | XMIT_EXTENDED_FLAGS;
+                varint::write_shortint(w, wire_flags as u16).await?;
+            } else {
+                write_byte(w, flags as u8).await?;
+            }
         }
-        write_byte(w, low).await?;
+        FlagsCodec::Byte => {
+            let mut low = (flags & 0xFF) as u8;
+            if low == 0 {
+                low = XMIT_TOP_DIR as u8;
+            }
+            write_byte(w, low).await?;
+        }
     }
     Ok(())
 }
@@ -594,14 +619,18 @@ pub async fn write_end_of_flist<W: AsyncWrite + Unpin>(
     io_error: i32,
     opts: &FileListOptions,
 ) -> Result<()> {
-    if opts.xfer_flags_as_varint {
-        write_varint(w, 0).await?;
-        write_varint(w, io_error as u32).await?;
-    } else if io_error != 0 {
-        varint::write_shortint(w, (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) as u16).await?;
-        write_varint(w, io_error as u32).await?;
-    } else {
-        write_byte(w, 0).await?;
+    match opts.wire.flags_codec {
+        FlagsCodec::Varint => {
+            write_varint(w, 0).await?;
+            write_varint(w, io_error as u32).await?;
+        }
+        FlagsCodec::ByteExtended if io_error != 0 => {
+            varint::write_shortint(w, (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) as u16).await?;
+            write_varint(w, io_error as u32).await?;
+        }
+        _ => {
+            write_byte(w, 0).await?;
+        }
     }
     Ok(())
 }
@@ -614,25 +643,27 @@ async fn write_rdev<W: AsyncWrite + Unpin>(
     _state: &DeltaState,
     opts: &FileListOptions,
 ) -> Result<()> {
-    let pv = opts.protocol_version;
+    let codec = opts.wire.int_codec;
 
-    if pv < 28 {
-        if (flags & XMIT_SAME_RDEV_PRE28) == 0 {
-            write_int(w, entry.rdev as i32).await?;
+    match opts.wire.device_codec {
+        DeviceCodec::SingleInt => {
+            if (flags & XMIT_SAME_RDEV_PRE28) == 0 {
+                write_int(w, entry.rdev as i32).await?;
+            }
         }
-        return Ok(());
-    }
+        DeviceCodec::MajorMinor { varint_minor } => {
+            // Proto >= 28: major and minor separately.
+            if (flags & XMIT_SAME_RDEV_MAJOR) == 0 {
+                write_varint30(w, entry.rdev_major(), codec).await?;
+            }
 
-    // Proto >= 28: major and minor separately.
-    if (flags & XMIT_SAME_RDEV_MAJOR) == 0 {
-        write_varint30(w, entry.rdev_major(), pv).await?;
-    }
-
-    let minor = entry.rdev_minor();
-    if pv >= 30 {
-        write_varint(w, minor).await?;
-    } else {
-        write_int(w, minor as i32).await?;
+            let minor = entry.rdev_minor();
+            if varint_minor {
+                write_varint(w, minor).await?;
+            } else {
+                write_int(w, minor as i32).await?;
+            }
+        }
     }
 
     Ok(())
@@ -670,8 +701,7 @@ mod tests {
 
     fn default_opts() -> FileListOptions {
         FileListOptions {
-            protocol_version: 31,
-            xfer_flags_as_varint: true,
+            wire: WireFormat::new(31, crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS | crate::protocol::handshake::compat_flags::INC_RECURSE),
             ..Default::default()
         }
     }
@@ -1039,8 +1069,7 @@ mod tests {
     #[tokio::test]
     async fn test_end_of_list_legacy() {
         let opts = FileListOptions {
-            protocol_version: 28,
-            xfer_flags_as_varint: false,
+            wire: WireFormat::new(28, 0),
             ..Default::default()
         };
 
@@ -1070,8 +1099,7 @@ mod tests {
     #[tokio::test]
     async fn test_roundtrip_proto27() {
         let opts = FileListOptions {
-            protocol_version: 27,
-            xfer_flags_as_varint: false,
+            wire: WireFormat::new(27, 0),
             ..Default::default()
         };
 

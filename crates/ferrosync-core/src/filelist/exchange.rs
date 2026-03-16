@@ -45,7 +45,7 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
 
     // inc_recurse requires BOTH the capability flag AND recursive mode.
     // rsync sets inc_recurse=0 when -r is not active, even with CF_INC_RECURSE.
-    if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
+    if protocol.wire.supports_incremental_flist && opts.recursive() {
         send_file_list_incremental(w, entries, &flist_opts).await
     } else {
         send_file_list_batch(w, entries, &flist_opts).await?;
@@ -72,7 +72,7 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
     // For proto < 30 (byte-mode flags), rsync sends an io_error int after
     // the end-of-list marker. The varint-mode end-of-list (proto >= 30)
     // already includes io_error in its varint(0) + varint(io_error) sequence.
-    if opts.protocol_version < 30 {
+    if opts.wire.trailing_io_error {
         varint::write_int(w, 0).await?;
     }
 
@@ -102,7 +102,7 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     write_end_of_flist(w, 0, opts).await?;
 
     // Write NDX_FLIST_EOF to signal end of all file lists.
-    sender.write_flist_eof(w, opts.protocol_version).await?;
+    sender.write_flist_eof(w, opts.wire.int_codec).await?;
     Ok(())
 }
 
@@ -139,7 +139,7 @@ pub async fn recv_file_list<R: AsyncRead + Unpin>(
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
     let (entries, ndx_start, entry_ndx, num_flists) =
-        if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
+        if protocol.wire.supports_incremental_flist && opts.recursive() {
             // Incremental: entries are already sorted per-flist with correct NDX.
             recv_file_list_incremental(r, &flist_opts).await?
         } else {
@@ -178,7 +178,7 @@ async fn recv_file_list_batch<R: AsyncRead + Unpin>(
     // For proto < 30 (byte-mode flags), rsync sends an io_error int after the
     // end-of-list marker. The varint-mode end-of-list (proto >= 30) already
     // includes io_error in its varint(0) + varint(io_error) sequence.
-    if opts.protocol_version < 30 {
+    if opts.wire.trailing_io_error {
         let _io_error = varint::read_int(r).await?;
     }
 
@@ -237,7 +237,7 @@ async fn recv_file_list_incremental<R: AsyncRead + Unpin>(
 
     // Read subsequent sub-flists prefixed with NDX markers.
     loop {
-        let ndx = receiver.read_ndx_marker(r, opts.protocol_version).await?;
+        let ndx = receiver.read_ndx_marker(r, opts.wire.int_codec).await?;
         if ndx == NDX_FLIST_EOF {
             break;
         }
@@ -279,7 +279,7 @@ pub async fn recv_file_list_streaming<R: AsyncRead + Unpin>(
 ) -> Result<()> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
-    if protocol.incremental_flist && protocol.version >= 30 && opts.recursive() {
+    if protocol.wire.supports_incremental_flist && opts.recursive() {
         recv_file_list_incremental_streaming(r, &flist_opts, tx).await
     } else {
         recv_file_list_batch_streaming(r, &flist_opts, tx).await
@@ -302,7 +302,7 @@ async fn recv_file_list_batch_streaming<R: AsyncRead + Unpin>(
     }
 
     // For proto < 30, consume the io_error int after the end-of-list marker.
-    if opts.protocol_version < 30 {
+    if opts.wire.trailing_io_error {
         let _io_error = varint::read_int(r).await?;
     }
 
@@ -327,7 +327,7 @@ async fn recv_file_list_incremental_streaming<R: AsyncRead + Unpin>(
 
     // Subsequent sub-flists prefixed with NDX markers.
     loop {
-        let ndx = receiver.read_ndx_marker(r, opts.protocol_version).await?;
+        let ndx = receiver.read_ndx_marker(r, opts.wire.int_codec).await?;
 
         if ndx == NDX_FLIST_EOF {
             break;
@@ -382,7 +382,7 @@ async fn send_id_list<W: AsyncWrite + Unpin>(
             if uid == 0 {
                 continue; // id 0 is handled specially below
             }
-            varint::write_varint30(w, uid, opts.protocol_version).await?;
+            varint::write_varint30(w, uid, opts.wire.int_codec).await?;
             let name_len = name.len().min(255) as u8;
             varint::write_byte(w, name_len).await?;
             w.write_all(&name[..name_len as usize]).await?;
@@ -392,13 +392,13 @@ async fn send_id_list<W: AsyncWrite + Unpin>(
             // Modern rsync: send id=0 as the terminator, followed by the name
             // for uid 0 (e.g., "root"). The recv side reads varint30(0) to exit
             // the loop, then reads one more recv_user_name(f, 0).
-            varint::write_varint30(w, 0, opts.protocol_version).await?;
+            varint::write_varint30(w, 0, opts.wire.int_codec).await?;
             let id0_name = uid_names.get(&0).copied().unwrap_or(b"root");
             let name_len = id0_name.len().min(255) as u8;
             varint::write_byte(w, name_len).await?;
             w.write_all(&id0_name[..name_len as usize]).await?;
         } else {
-            varint::write_varint30(w, 0, opts.protocol_version).await?;
+            varint::write_varint30(w, 0, opts.wire.int_codec).await?;
         }
     }
 
@@ -414,19 +414,19 @@ async fn send_id_list<W: AsyncWrite + Unpin>(
             if gid == 0 {
                 continue;
             }
-            varint::write_varint30(w, gid, opts.protocol_version).await?;
+            varint::write_varint30(w, gid, opts.wire.int_codec).await?;
             let name_len = name.len().min(255) as u8;
             varint::write_byte(w, name_len).await?;
             w.write_all(&name[..name_len as usize]).await?;
         }
         if opts.xmit_id0_names {
-            varint::write_varint30(w, 0, opts.protocol_version).await?;
+            varint::write_varint30(w, 0, opts.wire.int_codec).await?;
             let id0_name = gid_names.get(&0).copied().unwrap_or(b"root");
             let name_len = id0_name.len().min(255) as u8;
             varint::write_byte(w, name_len).await?;
             w.write_all(&id0_name[..name_len as usize]).await?;
         } else {
-            varint::write_varint30(w, 0, opts.protocol_version).await?;
+            varint::write_varint30(w, 0, opts.wire.int_codec).await?;
         }
     }
 
@@ -446,7 +446,7 @@ async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -
     // uid list
     if opts.preserve_uid {
         loop {
-            let id = varint::read_varint30(r, opts.protocol_version).await?;
+            let id = varint::read_varint30(r, opts.wire.int_codec).await?;
             if id == 0 {
                 break;
             }
@@ -464,7 +464,7 @@ async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -
     // gid list
     if opts.preserve_gid {
         loop {
-            let id = varint::read_varint30(r, opts.protocol_version).await?;
+            let id = varint::read_varint30(r, opts.wire.int_codec).await?;
             if id == 0 {
                 break;
             }
@@ -489,19 +489,20 @@ mod tests {
     use crate::protocol::handshake::{
         compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
     };
+    use crate::protocol::wire_format::{FlagsCodec, IntCodec, WireFormat};
     use std::io::Cursor;
 
     fn proto_v31() -> NegotiatedProtocol {
         NegotiatedProtocol {
             version: 31,
             compat_flags: compat_flags::DEFAULT | compat_flags::INC_RECURSE,
-            incremental_flist: true,
-            varint_flist_flags: true,
+
             checksum: ChecksumType::Md5,
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(31, compat_flags::DEFAULT | compat_flags::INC_RECURSE),
         }
     }
 
@@ -509,13 +510,13 @@ mod tests {
         NegotiatedProtocol {
             version: 27,
             compat_flags: 0,
-            incremental_flist: false,
-            varint_flist_flags: false,
+
             checksum: ChecksumType::Md4,
             compress: CompressType::None,
             proper_seed_order: false,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(27, 0),
         }
     }
 
@@ -523,13 +524,13 @@ mod tests {
         NegotiatedProtocol {
             version: 29,
             compat_flags: 0,
-            incremental_flist: false,
-            varint_flist_flags: false,
+
             checksum: ChecksumType::Md4,
             compress: CompressType::None,
             proper_seed_order: false,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(29, 0),
         }
     }
 
@@ -537,13 +538,13 @@ mod tests {
         NegotiatedProtocol {
             version: 30,
             compat_flags: compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS,
-            incremental_flist: false,
-            varint_flist_flags: true,
+
             checksum: ChecksumType::Md5,
             compress: CompressType::None,
             proper_seed_order: false,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(30, compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS),
         }
     }
 
@@ -750,8 +751,8 @@ mod tests {
             .build();
 
         let flist_opts = FileListOptions::from_protocol(&proto, &opts);
-        assert_eq!(flist_opts.protocol_version, 31);
-        assert!(flist_opts.xfer_flags_as_varint);
+        assert_eq!(flist_opts.wire.int_codec, IntCodec::Compact);
+        assert_eq!(flist_opts.wire.flags_codec, FlagsCodec::Varint);
         assert!(flist_opts.preserve_uid);
         assert!(flist_opts.preserve_gid);
         assert!(flist_opts.preserve_devices);
@@ -767,8 +768,8 @@ mod tests {
         let opts = TransferOptions::default();
 
         let flist_opts = FileListOptions::from_protocol(&proto, &opts);
-        assert_eq!(flist_opts.protocol_version, 27);
-        assert!(!flist_opts.xfer_flags_as_varint);
+        assert_eq!(flist_opts.wire.int_codec, IntCodec::Fixed);
+        assert_eq!(flist_opts.wire.flags_codec, FlagsCodec::Byte);
         assert_eq!(flist_opts.checksum_len, 16); // MD4 = 16 bytes
     }
 

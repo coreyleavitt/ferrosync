@@ -12,6 +12,7 @@
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::ProtocolError;
+use crate::protocol::wire_format::IntCodec;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -262,59 +263,55 @@ pub(crate) async fn write_varlong<W: AsyncWrite + Unpin>(
 // Version-switching wrappers
 // ---------------------------------------------------------------------------
 
-/// Read a 32-bit integer using compact varint for proto >= 30, fixed 4 bytes
-/// otherwise.
+/// Read a 32-bit integer using compact varint for `Compact` codec, fixed 4
+/// bytes for `Fixed`.
 pub(crate) async fn read_varint30<R: AsyncRead + Unpin>(
     r: &mut R,
-    protocol_version: u8,
+    codec: IntCodec,
 ) -> Result<u32> {
-    if protocol_version < 30 {
-        Ok(read_int(r).await? as u32)
-    } else {
-        read_varint(r).await
+    match codec {
+        IntCodec::Fixed => Ok(read_int(r).await? as u32),
+        IntCodec::Compact => read_varint(r).await,
     }
 }
 
-/// Write a 32-bit integer using compact varint for proto >= 30, fixed 4 bytes
-/// otherwise.
+/// Write a 32-bit integer using compact varint for `Compact` codec, fixed 4
+/// bytes for `Fixed`.
 pub(crate) async fn write_varint30<W: AsyncWrite + Unpin>(
     w: &mut W,
     val: u32,
-    protocol_version: u8,
+    codec: IntCodec,
 ) -> Result<()> {
-    if protocol_version < 30 {
-        write_int(w, val as i32).await
-    } else {
-        write_varint(w, val).await
+    match codec {
+        IntCodec::Fixed => write_int(w, val as i32).await,
+        IntCodec::Compact => write_varint(w, val).await,
     }
 }
 
-/// Read a 64-bit integer using compact varlong for proto >= 30, sentinel-based
-/// longint otherwise.
+/// Read a 64-bit integer using compact varlong for `Compact` codec,
+/// sentinel-based longint for `Fixed`.
 pub(crate) async fn read_varlong30<R: AsyncRead + Unpin>(
     r: &mut R,
     min_bytes: usize,
-    protocol_version: u8,
+    codec: IntCodec,
 ) -> Result<i64> {
-    if protocol_version < 30 {
-        read_longint(r).await
-    } else {
-        read_varlong(r, min_bytes).await
+    match codec {
+        IntCodec::Fixed => read_longint(r).await,
+        IntCodec::Compact => read_varlong(r, min_bytes).await,
     }
 }
 
-/// Write a 64-bit integer using compact varlong for proto >= 30, sentinel-based
-/// longint otherwise.
+/// Write a 64-bit integer using compact varlong for `Compact` codec,
+/// sentinel-based longint for `Fixed`.
 pub(crate) async fn write_varlong30<W: AsyncWrite + Unpin>(
     w: &mut W,
     val: i64,
     min_bytes: usize,
-    protocol_version: u8,
+    codec: IntCodec,
 ) -> Result<()> {
-    if protocol_version < 30 {
-        write_longint(w, val).await
-    } else {
-        write_varlong(w, val, min_bytes).await
+    match codec {
+        IntCodec::Fixed => write_longint(w, val).await,
+        IntCodec::Compact => write_varlong(w, val, min_bytes).await,
     }
 }
 
@@ -343,13 +340,13 @@ pub const NDX_DONE: i32 = -1;
 
 /// Read a delta-encoded file list index (protocol >= 30).
 ///
-/// For protocol < 30, falls back to `read_int`.
+/// For `Fixed` codec, falls back to `read_int`.
 pub async fn read_ndx<R: AsyncRead + Unpin>(
     r: &mut R,
     state: &mut NdxState,
-    protocol_version: u8,
+    codec: IntCodec,
 ) -> Result<i32> {
-    if protocol_version < 30 {
+    if codec == IntCodec::Fixed {
         return read_int(r).await;
     }
 
@@ -404,14 +401,14 @@ pub async fn read_ndx<R: AsyncRead + Unpin>(
 
 /// Write a delta-encoded file list index (protocol >= 30).
 ///
-/// For protocol < 30, falls back to `write_int`.
+/// For `Fixed` codec, falls back to `write_int`.
 pub async fn write_ndx<W: AsyncWrite + Unpin>(
     w: &mut W,
     ndx: i32,
     state: &mut NdxState,
-    protocol_version: u8,
+    codec: IntCodec,
 ) -> Result<()> {
-    if protocol_version < 30 {
+    if codec == IntCodec::Fixed {
         return write_int(w, ndx).await;
     }
 
@@ -627,25 +624,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_varint30_proto_below_30() {
-        // Proto < 30: always 4 bytes.
+    async fn test_varint30_fixed_codec() {
+        // Fixed codec: always 4 bytes.
         let mut buf = Vec::new();
-        write_varint30(&mut buf, 42, 29).await.unwrap();
+        write_varint30(&mut buf, 42, IntCodec::Fixed).await.unwrap();
         assert_eq!(buf.len(), 4);
 
         let mut cursor = Cursor::new(&buf);
-        assert_eq!(read_varint30(&mut cursor, 29).await.unwrap(), 42);
+        assert_eq!(read_varint30(&mut cursor, IntCodec::Fixed).await.unwrap(), 42);
     }
 
     #[tokio::test]
-    async fn test_varint30_proto_30() {
-        // Proto >= 30: compact encoding.
+    async fn test_varint30_compact_codec() {
+        // Compact codec: compact encoding.
         let mut buf = Vec::new();
-        write_varint30(&mut buf, 42, 31).await.unwrap();
+        write_varint30(&mut buf, 42, IntCodec::Compact).await.unwrap();
         assert_eq!(buf.len(), 1);
 
         let mut cursor = Cursor::new(&buf);
-        assert_eq!(read_varint30(&mut cursor, 31).await.unwrap(), 42);
+        assert_eq!(read_varint30(&mut cursor, IntCodec::Compact).await.unwrap(), 42);
     }
 
     #[tokio::test]
@@ -654,14 +651,14 @@ mod tests {
         let mut state_r = NdxState::default();
 
         let mut buf = Vec::new();
-        write_ndx(&mut buf, NDX_DONE, &mut state_w, 31)
+        write_ndx(&mut buf, NDX_DONE, &mut state_w, IntCodec::Compact)
             .await
             .unwrap();
         assert_eq!(buf, &[0x00]);
 
         let mut cursor = Cursor::new(&buf);
         assert_eq!(
-            read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(),
+            read_ndx(&mut cursor, &mut state_r, IntCodec::Compact).await.unwrap(),
             NDX_DONE
         );
     }
@@ -675,12 +672,12 @@ mod tests {
         let indices = [0, 1, 2, 3, 100, 200];
         let mut buf = Vec::new();
         for &ndx in &indices {
-            write_ndx(&mut buf, ndx, &mut state_w, 31).await.unwrap();
+            write_ndx(&mut buf, ndx, &mut state_w, IntCodec::Compact).await.unwrap();
         }
 
         let mut cursor = Cursor::new(&buf);
         for &expected in &indices {
-            let got = read_ndx(&mut cursor, &mut state_r, 31).await.unwrap();
+            let got = read_ndx(&mut cursor, &mut state_r, IntCodec::Compact).await.unwrap();
             assert_eq!(got, expected, "ndx mismatch");
         }
     }
@@ -691,11 +688,11 @@ mod tests {
         let mut state_r = NdxState::default();
 
         let mut buf = Vec::new();
-        write_ndx(&mut buf, -5, &mut state_w, 31).await.unwrap();
+        write_ndx(&mut buf, -5, &mut state_w, IntCodec::Compact).await.unwrap();
         assert_eq!(buf[0], 0xFF); // negative prefix
 
         let mut cursor = Cursor::new(&buf);
-        assert_eq!(read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(), -5);
+        assert_eq!(read_ndx(&mut cursor, &mut state_r, IntCodec::Compact).await.unwrap(), -5);
     }
 
     #[tokio::test]
@@ -705,31 +702,31 @@ mod tests {
 
         // First write index 0, then jump to a large value.
         let mut buf = Vec::new();
-        write_ndx(&mut buf, 0, &mut state_w, 31).await.unwrap();
-        write_ndx(&mut buf, 100_000, &mut state_w, 31)
+        write_ndx(&mut buf, 0, &mut state_w, IntCodec::Compact).await.unwrap();
+        write_ndx(&mut buf, 100_000, &mut state_w, IntCodec::Compact)
             .await
             .unwrap();
 
         let mut cursor = Cursor::new(&buf);
-        assert_eq!(read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(), 0);
+        assert_eq!(read_ndx(&mut cursor, &mut state_r, IntCodec::Compact).await.unwrap(), 0);
         assert_eq!(
-            read_ndx(&mut cursor, &mut state_r, 31).await.unwrap(),
+            read_ndx(&mut cursor, &mut state_r, IntCodec::Compact).await.unwrap(),
             100_000
         );
     }
 
     #[tokio::test]
-    async fn test_ndx_proto_below_30() {
-        // Proto < 30: falls back to read_int/write_int.
+    async fn test_ndx_fixed_codec() {
+        // Fixed codec: falls back to read_int/write_int.
         let mut state_w = NdxState::default();
         let mut state_r = NdxState::default();
 
         let mut buf = Vec::new();
-        write_ndx(&mut buf, 42, &mut state_w, 29).await.unwrap();
+        write_ndx(&mut buf, 42, &mut state_w, IntCodec::Fixed).await.unwrap();
         assert_eq!(buf.len(), 4); // fixed 4-byte encoding
 
         let mut cursor = Cursor::new(&buf);
-        assert_eq!(read_ndx(&mut cursor, &mut state_r, 29).await.unwrap(), 42);
+        assert_eq!(read_ndx(&mut cursor, &mut state_r, IntCodec::Fixed).await.unwrap(), 42);
     }
 
     #[tokio::test]
@@ -876,7 +873,7 @@ mod tests {
     async fn test_read_ndx_truncated_empty() {
         let mut cursor = Cursor::new(&[] as &[u8]);
         let mut state = NdxState::default();
-        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        let result = read_ndx(&mut cursor, &mut state, IntCodec::Compact).await;
         assert!(result.is_err(), "empty input should return error");
     }
 
@@ -885,7 +882,7 @@ mod tests {
         // 0xFF prefix (negative marker) with no following byte.
         let mut cursor = Cursor::new(&[0xFF]);
         let mut state = NdxState::default();
-        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        let result = read_ndx(&mut cursor, &mut state, IntCodec::Compact).await;
         assert!(
             result.is_err(),
             "negative prefix with no value should return error"
@@ -897,7 +894,7 @@ mod tests {
         // 0xFE prefix means 2-byte or 4-byte absolute/delta encoding follows.
         let mut cursor = Cursor::new(&[0xFE]);
         let mut state = NdxState::default();
-        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        let result = read_ndx(&mut cursor, &mut state, IntCodec::Compact).await;
         assert!(
             result.is_err(),
             "0xFE prefix with no payload should return error"
@@ -909,7 +906,7 @@ mod tests {
         // 0xFE, then 2 bytes with high bit set (4-byte encoding), but missing last 2 bytes.
         let mut cursor = Cursor::new(&[0xFE, 0x80, 0x00]);
         let mut state = NdxState::default();
-        let result = read_ndx(&mut cursor, &mut state, 31).await;
+        let result = read_ndx(&mut cursor, &mut state, IntCodec::Compact).await;
         assert!(
             result.is_err(),
             "4-byte ndx with missing bytes should return error"

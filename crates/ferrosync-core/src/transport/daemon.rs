@@ -26,20 +26,21 @@ use tokio::net::TcpStream;
 
 use super::{Transport, TransportStreams};
 use crate::error::TransportError;
+use crate::protocol::handshake::MAX_PROTOCOL_VERSION;
 
 type Result<T> = std::result::Result<T, TransportError>;
 
 /// Default rsync daemon port.
 pub const DEFAULT_DAEMON_PORT: u16 = 873;
 
-/// Protocol version we advertise to the daemon.
-///
-/// This is the text-level daemon protocol version, not the binary rsync
-/// protocol version (which is negotiated later via the binary handshake).
-const DAEMON_PROTOCOL_VERSION: u8 = 31;
+/// Protocol version we advertise to the daemon (matches binary protocol).
+const DAEMON_PROTOCOL_VERSION: u8 = MAX_PROTOCOL_VERSION;
 
 /// Sub-protocol version (used since protocol 30+).
 const DAEMON_SUB_PROTOCOL_VERSION: u8 = 0;
+
+/// Auth digest algorithms we support, in priority order.
+const AUTH_DIGEST_LIST: &str = "md5 md4";
 
 /// A module entry returned by the daemon's module listing.
 #[derive(Debug, Clone)]
@@ -125,7 +126,7 @@ impl DaemonTransport {
         let mut reader = BufReader::new(reader);
 
         // Exchange greetings.
-        let _version = read_greeting(&mut reader).await?;
+        let _remote = read_greeting(&mut reader).await?;
         send_greeting(&mut writer).await?;
 
         // Send #list request.
@@ -199,7 +200,7 @@ impl Transport for DaemonTransport {
             let mut reader = BufReader::new(reader);
 
             // Step 1: Exchange daemon protocol greetings.
-            let _remote_version = read_greeting(&mut reader).await?;
+            let remote = read_greeting(&mut reader).await?;
             send_greeting(&mut writer).await?;
 
             // Step 2: Send the module name.
@@ -220,10 +221,12 @@ impl Transport for DaemonTransport {
                         .trim_start_matches("@RSYNCD: AUTHREQD ")
                         .trim()
                         .to_string();
+                    let digest = negotiate_auth_digest(&remote.digest_list);
                     let response = compute_auth_response(
                         &challenge,
                         self.config.user.as_deref().unwrap_or(""),
                         self.config.password.as_deref().unwrap_or(""),
+                        digest,
                     );
                     writer
                         .write_all(response.as_bytes())
@@ -336,10 +339,22 @@ async fn tcp_connect(addr: &str, timeout: Duration) -> Result<TcpStream> {
         })
 }
 
-/// Read the daemon greeting line: `@RSYNCD: <major>.<minor>\n`.
+/// Parsed daemon greeting.
+#[derive(Debug)]
+struct DaemonGreeting {
+    /// Major protocol version.
+    #[allow(dead_code)]
+    version: u8,
+    /// Auth digest algorithms advertised by the server (protocol >= 32).
+    /// Empty for protocol < 32.
+    digest_list: Vec<String>,
+}
+
+/// Read the daemon greeting line: `@RSYNCD: <major>.<minor> [digest ...]`.
 ///
-/// Returns the major protocol version.
-async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<u8> {
+/// For protocol >= 32, the greeting includes a space-separated list of
+/// supported auth digest algorithms (e.g., "32.0 md5 md4").
+async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<DaemonGreeting> {
     let line = read_line(reader).await?;
 
     if !line.starts_with("@RSYNCD: ") {
@@ -350,21 +365,32 @@ async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Re
 
     let version_str = line.trim_start_matches("@RSYNCD: ").trim();
 
-    // Version may be "31" or "31.0".
-    let major_str = version_str.split('.').next().unwrap_or(version_str);
-    let major: u8 = major_str
+    // Split into tokens: first is "major.minor", rest are digest names.
+    let mut tokens = version_str.split_whitespace();
+    let ver_token = tokens.next().unwrap_or(version_str);
+    let digest_list: Vec<String> = tokens.map(String::from).collect();
+
+    let major_str = ver_token.split('.').next().unwrap_or(ver_token);
+    let version: u8 = major_str
         .parse()
         .map_err(|_| TransportError::ConnectionFailed {
             message: format!("invalid daemon version: {version_str}"),
         })?;
 
-    tracing::debug!(version = %version_str, "daemon greeting received");
-    Ok(major)
+    tracing::debug!(version = %version_str, digests = ?digest_list, "daemon greeting received");
+    Ok(DaemonGreeting { version, digest_list })
 }
 
 /// Send our daemon protocol greeting.
+///
+/// For protocol >= 32, the greeting includes a space-separated list of
+/// supported auth digest algorithms after the version (e.g., "32.0 md5 md4").
 async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W) -> Result<()> {
-    let greeting = format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n");
+    let greeting = if DAEMON_PROTOCOL_VERSION >= 32 {
+        format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION} {AUTH_DIGEST_LIST}\n")
+    } else {
+        format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n")
+    };
     writer
         .write_all(greeting.as_bytes())
         .await
@@ -430,32 +456,72 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result
     Ok(s)
 }
 
+/// Auth digest algorithm for daemon authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthDigest {
+    Md4,
+    Md5,
+}
+
+/// Negotiate the auth digest algorithm from the server's advertised list.
+///
+/// Returns the first digest from our preferred list ("md5 md4") that
+/// the server supports. If the server advertises no digests (proto < 32),
+/// falls back to MD4 (the original rsync auth digest).
+fn negotiate_auth_digest(server_digests: &[String]) -> AuthDigest {
+    if server_digests.is_empty() {
+        return AuthDigest::Md4;
+    }
+    // Our preference: MD5 first, then MD4.
+    for our in AUTH_DIGEST_LIST.split_whitespace() {
+        if server_digests.iter().any(|s| s == our) {
+            return match our {
+                "md5" => AuthDigest::Md5,
+                "md4" => AuthDigest::Md4,
+                _ => continue,
+            };
+        }
+    }
+    AuthDigest::Md4
+}
+
 /// Compute the authentication response for a daemon challenge (for use by TLS transport).
 pub(crate) fn compute_auth_response_for_tls(challenge: &str, user: &str, password: &str) -> String {
-    compute_auth_response(challenge, user, password)
+    compute_auth_response(challenge, user, password, AuthDigest::Md4)
 }
 
 /// Compute the authentication response for a daemon challenge.
 ///
 /// The rsync daemon auth protocol:
 /// 1. Server sends a base64-encoded challenge string.
-/// 2. Client computes MD4(zero-padded-password + challenge) and base64-encodes it.
+/// 2. Client computes HASH(zero-padded-password + challenge) and base64-encodes it.
+///    HASH is MD4 (proto < 32) or negotiated from the greeting (proto >= 32).
 /// 3. Client sends `<user> <base64_hash>\n`.
-fn compute_auth_response(challenge: &str, user: &str, password: &str) -> String {
-    use md4::{Digest, Md4};
-
-    let mut hasher = Md4::new();
+fn compute_auth_response(challenge: &str, user: &str, password: &str, digest: AuthDigest) -> String {
     // Zero-pad the password to 64 bytes (rsync behavior).
     let mut padded_password = [0u8; 64];
     let pw_bytes = password.as_bytes();
     let copy_len = pw_bytes.len().min(64);
     padded_password[..copy_len].copy_from_slice(&pw_bytes[..copy_len]);
 
-    hasher.update(padded_password);
-    hasher.update(challenge.as_bytes());
-    let digest = hasher.finalize();
+    let hash = match digest {
+        AuthDigest::Md4 => {
+            use md4::{Digest, Md4};
+            let mut hasher = Md4::new();
+            hasher.update(padded_password);
+            hasher.update(challenge.as_bytes());
+            hasher.finalize().to_vec()
+        }
+        AuthDigest::Md5 => {
+            use md5::{Digest, Md5};
+            let mut hasher = Md5::new();
+            hasher.update(padded_password);
+            hasher.update(challenge.as_bytes());
+            hasher.finalize().to_vec()
+        }
+    };
 
-    let encoded = base64_encode(&digest);
+    let encoded = base64_encode(&hash);
     format!("{user} {encoded}\n")
 }
 
@@ -553,8 +619,22 @@ mod tests {
     }
 
     #[test]
+    fn test_negotiate_auth_digest() {
+        // Server advertises md5 + md4: we pick md5.
+        let digests = vec!["md5".to_string(), "md4".to_string()];
+        assert_eq!(negotiate_auth_digest(&digests), AuthDigest::Md5);
+
+        // Server advertises only md4.
+        let digests = vec!["md4".to_string()];
+        assert_eq!(negotiate_auth_digest(&digests), AuthDigest::Md4);
+
+        // No digest list (proto < 32): fallback to md4.
+        assert_eq!(negotiate_auth_digest(&[]), AuthDigest::Md4);
+    }
+
+    #[test]
     fn test_compute_auth_response_format() {
-        let response = compute_auth_response("testchallenge", "myuser", "mypass");
+        let response = compute_auth_response("testchallenge", "myuser", "mypass", AuthDigest::Md4);
         assert!(response.starts_with("myuser "));
         assert!(response.ends_with('\n'));
         let parts: Vec<&str> = response.trim().split(' ').collect();
@@ -567,11 +647,11 @@ mod tests {
 
     #[test]
     fn test_compute_auth_response_deterministic() {
-        let r1 = compute_auth_response("challenge1", "user", "pass");
-        let r2 = compute_auth_response("challenge1", "user", "pass");
+        let r1 = compute_auth_response("challenge1", "user", "pass", AuthDigest::Md4);
+        let r2 = compute_auth_response("challenge1", "user", "pass", AuthDigest::Md4);
         assert_eq!(r1, r2);
 
-        let r3 = compute_auth_response("challenge2", "user", "pass");
+        let r3 = compute_auth_response("challenge2", "user", "pass", AuthDigest::Md4);
         assert_ne!(r1, r3);
     }
 
@@ -579,16 +659,26 @@ mod tests {
     async fn test_read_greeting_valid() {
         let data = b"@RSYNCD: 31.0\n";
         let mut reader = tokio::io::BufReader::new(&data[..]);
-        let version = read_greeting(&mut reader).await.unwrap();
-        assert_eq!(version, 31);
+        let greeting = read_greeting(&mut reader).await.unwrap();
+        assert_eq!(greeting.version, 31);
+        assert!(greeting.digest_list.is_empty());
     }
 
     #[tokio::test]
     async fn test_read_greeting_no_subversion() {
         let data = b"@RSYNCD: 30\n";
         let mut reader = tokio::io::BufReader::new(&data[..]);
-        let version = read_greeting(&mut reader).await.unwrap();
-        assert_eq!(version, 30);
+        let greeting = read_greeting(&mut reader).await.unwrap();
+        assert_eq!(greeting.version, 30);
+    }
+
+    #[tokio::test]
+    async fn test_read_greeting_with_digests() {
+        let data = b"@RSYNCD: 32.0 md5 md4\n";
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let greeting = read_greeting(&mut reader).await.unwrap();
+        assert_eq!(greeting.version, 32);
+        assert_eq!(greeting.digest_list, vec!["md5", "md4"]);
     }
 
     #[tokio::test]
@@ -624,9 +714,10 @@ mod tests {
         let mut buf = Vec::new();
         send_greeting(&mut buf).await.unwrap();
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.starts_with("@RSYNCD: "));
+        assert!(s.starts_with("@RSYNCD: 32.0"));
         assert!(s.ends_with('\n'));
-        assert!(s.contains("31"));
+        // Proto 32 includes digest list.
+        assert!(s.contains("md5"));
     }
 
     /// Helper: simulate a daemon server on one side of a duplex stream.
@@ -671,8 +762,8 @@ mod tests {
         let (reader, mut writer) = tokio::io::split(client_stream);
         let mut reader = BufReader::new(reader);
 
-        let version = read_greeting(&mut reader).await.unwrap();
-        assert_eq!(version, 31);
+        let greeting = read_greeting(&mut reader).await.unwrap();
+        assert_eq!(greeting.version, 31);
         send_greeting(&mut writer).await.unwrap();
 
         writer.write_all(b"testmod\n").await.unwrap();
@@ -743,7 +834,7 @@ mod tests {
         let (reader, mut writer) = tokio::io::split(client_stream);
         let mut reader = BufReader::new(reader);
 
-        let _version = read_greeting(&mut reader).await.unwrap();
+        let _greeting = read_greeting(&mut reader).await.unwrap();
         send_greeting(&mut writer).await.unwrap();
 
         writer.write_all(b"backup\n").await.unwrap();
@@ -816,7 +907,7 @@ mod tests {
         let (reader, mut writer) = tokio::io::split(client_stream);
         let mut reader = BufReader::new(reader);
 
-        let _version = read_greeting(&mut reader).await.unwrap();
+        let _greeting = read_greeting(&mut reader).await.unwrap();
         send_greeting(&mut writer).await.unwrap();
 
         writer.write_all(b"secured\n").await.unwrap();
@@ -832,7 +923,7 @@ mod tests {
             .to_string();
         assert_eq!(challenge, "abc123challenge");
 
-        let response = compute_auth_response(&challenge, "backupuser", "secretpass");
+        let response = compute_auth_response(&challenge, "backupuser", "secretpass", AuthDigest::Md4);
         writer.write_all(response.as_bytes()).await.unwrap();
         writer.flush().await.unwrap();
 
@@ -879,7 +970,7 @@ mod tests {
         let (reader, mut writer) = tokio::io::split(client_stream);
         let mut reader = BufReader::new(reader);
 
-        let _version = read_greeting(&mut reader).await.unwrap();
+        let _greeting = read_greeting(&mut reader).await.unwrap();
         send_greeting(&mut writer).await.unwrap();
 
         writer.write_all(b"#list\n").await.unwrap();

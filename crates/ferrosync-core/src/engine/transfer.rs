@@ -1600,6 +1600,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_transfer_protocol() {
         use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
@@ -1611,13 +1612,13 @@ mod tests {
         let protocol = NegotiatedProtocol {
             version: 31,
             compat_flags: compat_flags::DEFAULT,
-            incremental_flist: true,
-            varint_flist_flags: true,
+
             checksum: ChecksumType::Md5,
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(31, compat_flags::DEFAULT),
         };
 
         let opts = TransferOptions::builder()
@@ -1642,6 +1643,7 @@ mod tests {
     async fn test_streaming_transfer_dry_run() {
         use crate::filelist::entry::S_IFREG;
         use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("dst");
@@ -1650,13 +1652,13 @@ mod tests {
         let protocol = NegotiatedProtocol {
             version: 31,
             compat_flags: compat_flags::DEFAULT,
-            incremental_flist: true,
-            varint_flist_flags: true,
+
             checksum: ChecksumType::Md5,
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(31, compat_flags::DEFAULT),
         };
 
         let opts = TransferOptions::builder()
@@ -1703,6 +1705,7 @@ mod tests {
     async fn test_streaming_transfer_directories() {
         use crate::filelist::entry::{S_IFDIR, S_IFREG};
         use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("dst");
@@ -1711,13 +1714,13 @@ mod tests {
         let protocol = NegotiatedProtocol {
             version: 31,
             compat_flags: compat_flags::DEFAULT,
-            incremental_flist: true,
-            varint_flist_flags: true,
+
             checksum: ChecksumType::Md5,
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(31, compat_flags::DEFAULT),
         };
 
         let opts = TransferOptions::builder()
@@ -1761,6 +1764,7 @@ mod tests {
     async fn test_streaming_transfer_with_size_filter() {
         use crate::filelist::entry::S_IFREG;
         use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("dst");
@@ -1769,13 +1773,13 @@ mod tests {
         let protocol = NegotiatedProtocol {
             version: 31,
             compat_flags: compat_flags::DEFAULT,
-            incremental_flist: true,
-            varint_flist_flags: true,
+
             checksum: ChecksumType::Md5,
             compress: CompressType::None,
             proper_seed_order: true,
             seed: 42,
             chunking: ChunkingStrategy::default(),
+            wire: WireFormat::new(31, compat_flags::DEFAULT),
         };
 
         let opts = TransferOptions::builder()
