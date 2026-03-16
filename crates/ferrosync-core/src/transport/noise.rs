@@ -132,7 +132,6 @@ impl NoiseStream {
 /// Each Noise message on the wire is prefixed by a 2-byte big-endian length.
 /// Because `poll_read` may return partial data at any point, we must track
 /// exactly where we are in the read sequence across calls.
-#[allow(dead_code)]
 enum NoiseReadState {
     /// Ready to start reading a new frame.
     Idle,
@@ -144,8 +143,6 @@ enum NoiseReadState {
         buf: Vec<u8>,
         pos: usize,
     },
-    /// Delivering decrypted plaintext to the caller.
-    Delivering { plaintext: Vec<u8>, pos: usize },
 }
 
 /// State machine for writing framed Noise messages.
@@ -325,16 +322,6 @@ impl AsyncRead for NoiseReader {
                         }
                         Poll::Pending => return Poll::Pending,
                     }
-                }
-                NoiseReadState::Delivering { plaintext, pos } => {
-                    let remaining = &plaintext[*pos..];
-                    let to_copy = remaining.len().min(buf.remaining());
-                    buf.put_slice(&remaining[..to_copy]);
-                    *pos += to_copy;
-                    if *pos >= plaintext.len() {
-                        me.read_state = NoiseReadState::Idle;
-                    }
-                    return Poll::Ready(Ok(()));
                 }
             }
         }

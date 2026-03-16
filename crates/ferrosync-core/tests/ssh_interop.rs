@@ -286,6 +286,54 @@ async fn test_ssh_push_large_file() {
     remote_cleanup(&remote_dir).await;
 }
 
+/// Push a very large file (16MB) that previously deadlocked with the bounded
+/// duplex pipe. This exercises sustained sender writes across hundreds of MUX
+/// chunks and verifies the unbounded channel handles backpressure correctly.
+#[tokio::test]
+async fn test_ssh_push_very_large_file() {
+    skip_if_no_ssh!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // 16MB file with recognizable pattern.
+    let size = 16 * 1024 * 1024;
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    std::fs::write(src.join("huge.dat"), &data).unwrap();
+
+    let remote_dir = remote_tmpdir().await;
+    let result = push_archive(&src, &remote_dir, 120).await;
+    assert_eq!(result.stats.files_transferred, 1);
+
+    // Verify size on remote.
+    let remote_size = ssh_cmd(&["stat", "-c", "%s", &format!("{remote_dir}/huge.dat")]).await;
+    assert_eq!(
+        remote_size.trim(),
+        size.to_string(),
+        "remote file size mismatch"
+    );
+
+    // Verify first 4KB and last 4KB match to confirm no corruption.
+    let head = ssh_cmd(&[
+        "od", "-A", "n", "-t", "x1", "-N", "4096",
+        &format!("{remote_dir}/huge.dat"),
+    ]).await;
+    let head_hex: String = head.split_whitespace().collect();
+    let expected_head: String = data[..4096].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(head_hex, expected_head, "16MB file head mismatch");
+
+    let tail = ssh_cmd(&[
+        "od", "-A", "n", "-t", "x1", "-j", &format!("{}", size - 4096), "-N", "4096",
+        &format!("{remote_dir}/huge.dat"),
+    ]).await;
+    let tail_hex: String = tail.split_whitespace().collect();
+    let expected_tail: String = data[size - 4096..].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(tail_hex, expected_tail, "16MB file tail mismatch");
+
+    remote_cleanup(&remote_dir).await;
+}
+
 /// Push a mixed directory: subdirs + many small files + one large file.
 /// This is the scenario that deadlocks with the 64KB demux pipe.
 #[tokio::test]
@@ -366,9 +414,8 @@ async fn test_ssh_push_idempotent() {
     // First push
     push_archive(&src, &remote_dir, 30).await;
 
-    // Second push (should succeed, ideally fewer transfers)
-    let result2 = push_archive(&src, &remote_dir, 30).await;
-    eprintln!("second push: {} files transferred", result2.stats.files_transferred);
+    // Second push (should succeed, ideally fewer transfers).
+    let _result2 = push_archive(&src, &remote_dir, 30).await;
 
     let content = remote_cat(&format!("{remote_dir}/stable.txt")).await;
     assert_eq!(content, "no change\n");
@@ -397,6 +444,40 @@ async fn test_ssh_pull_single_file() {
 
     let content = std::fs::read_to_string(dst.join("pull.txt")).unwrap();
     assert_eq!(content, "pulled via SSH\n");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+/// Pull a large file (1MB+) to exercise the unbounded channel demux under load.
+/// This verifies that the pull path handles sustained high-throughput data
+/// without deadlocking or dropping chunks.
+#[tokio::test]
+async fn test_ssh_pull_large_file() {
+    skip_if_no_ssh!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create a 1MB file on the remote with a deterministic byte pattern.
+    let remote_dir = remote_tmpdir().await;
+    ssh_cmd(&[
+        "python3", "-c",
+        &format!(
+            "f=open('{remote_dir}/big.dat','wb'); f.write(bytes(i%251 for i in range(1048576))); f.close()"
+        ),
+    ]).await;
+
+    let remote_path = format!("{remote_dir}/");
+    let result = pull_archive(&remote_path, &dst, 60).await;
+    assert_eq!(result.stats.files_transferred, 1);
+
+    // Verify size and content pattern.
+    let pulled = std::fs::read(dst.join("big.dat")).unwrap();
+    assert_eq!(pulled.len(), 1_048_576, "pulled file should be 1MB");
+
+    let expected: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+    assert_eq!(pulled, expected, "large file content mismatch after pull");
 
     remote_cleanup(&remote_dir).await;
 }

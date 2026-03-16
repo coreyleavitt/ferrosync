@@ -124,15 +124,13 @@ pub trait FileSystem: Send + Sync {
 
     /// Return a streaming writer for the file at `path`.
     ///
-    /// The writer creates the file (or truncates if it exists). The optional
-    /// `mode` sets Unix permissions after the write completes (platform
-    /// permitting). The default implementation collects all written bytes
-    /// into a buffer; callers should flush and drop the writer, then call
-    /// [`write_file`] with the accumulated data.
+    /// The writer creates the file (or truncates if it exists). The default
+    /// implementation collects all written bytes into an in-memory buffer.
     ///
     /// Platform implementations override this with proper file I/O.
-    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
-        Ok(Box::new(BufferedFileWriter::new(path.to_path_buf(), mode)))
+    fn write_file_stream(&self, path: &Path, _mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
+        let _ = path;
+        Ok(Box::new(BufferedFileWriter::new()))
     }
 }
 
@@ -140,26 +138,18 @@ pub trait FileSystem: Send + Sync {
 /// whole-file reads/writes. Currently set to 64 MiB.
 pub const STREAMING_THRESHOLD: i64 = 64 * 1024 * 1024;
 
-/// Collects writes into a buffer.
+/// Collects writes into an in-memory buffer.
 ///
 /// Used by the default [`FileSystem::write_file_stream`] implementation.
-/// Callers are expected to retrieve the buffered data via
-/// [`into_inner`](BufferedFileWriter::into_inner) or simply rely on the
-/// platform-specific override that writes to an actual file.
-#[allow(dead_code)]
+/// Platform-specific implementations override `write_file_stream` with
+/// proper file I/O, so this fallback is rarely used in practice.
 pub(crate) struct BufferedFileWriter {
-    path: std::path::PathBuf,
-    mode: Option<u32>,
     buf: Vec<u8>,
 }
 
 impl BufferedFileWriter {
-    fn new(path: std::path::PathBuf, mode: Option<u32>) -> Self {
-        Self {
-            path,
-            mode,
-            buf: Vec::new(),
-        }
+    fn new() -> Self {
+        Self { buf: Vec::new() }
     }
 }
 

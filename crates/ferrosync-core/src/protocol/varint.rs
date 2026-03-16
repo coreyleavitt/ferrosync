@@ -99,16 +99,6 @@ pub(crate) async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) ->
 // Compact varint (protocol >= 30): 1-4 bytes for values up to 0x0FFFFFFF
 // ---------------------------------------------------------------------------
 
-/// Maximum value encodable by the compact varint format.
-///
-/// Maximum value for the varint encoding.
-///
-/// rsync's varint uses up to 5 wire bytes: 1 prefix byte + 4 extra bytes.
-/// For values > 0x0FFFFFFF, the prefix byte is 0xF0 (no data bits) and all
-/// 32 bits come from the 4 extra bytes. This covers the full u32 range.
-#[allow(dead_code)]
-pub(crate) const VARINT_MAX: u32 = u32::MAX;
-
 /// Read a compact variable-length 32-bit integer (protocol >= 30).
 ///
 /// The first byte's high bits encode the number of extra bytes via the

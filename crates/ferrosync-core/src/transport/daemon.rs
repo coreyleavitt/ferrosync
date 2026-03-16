@@ -488,7 +488,8 @@ fn base64_encode(data: &[u8]) -> String {
                 result.push('=');
                 result.push('=');
             }
-            _ => unreachable!(),
+            // chunks(3) only yields slices of length 1, 2, or 3.
+            _ => unreachable!("chunks(3) produced an empty slice"),
         }
     }
 
@@ -915,7 +916,7 @@ mod tests {
     #[tokio::test]
     async fn test_connect_real_daemon() {
         if std::env::var("FERROSYNC_DAEMON_TEST").as_deref() != Ok("1") {
-            eprintln!("skipping daemon integration test (set FERROSYNC_DAEMON_TEST=1)");
+            tracing::info!("skipping daemon integration test (set FERROSYNC_DAEMON_TEST=1)");
             return;
         }
 
@@ -928,13 +929,13 @@ mod tests {
 
         match DaemonTransport::list_modules(&host, port, Duration::from_secs(5)).await {
             Ok(modules) => {
-                eprintln!("daemon modules:");
+                tracing::info!("daemon modules:");
                 for m in &modules {
-                    eprintln!("  {} - {}", m.name, m.comment);
+                    tracing::info!("  {} - {}", m.name, m.comment);
                 }
             }
             Err(e) => {
-                eprintln!("daemon connection failed (expected in CI): {e}");
+                tracing::warn!("daemon connection failed (expected in CI): {e}");
             }
         }
     }

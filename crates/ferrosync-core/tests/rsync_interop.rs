@@ -251,22 +251,8 @@ async fn test_interop_push_single_file() {
 
     match result {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            // Give monitor task time to capture stderr.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            panic!("push failed: {e}");
-        }
+        Ok(Err(e)) => panic!("push failed: {e}"),
         Err(_) => panic!("push timed out after 10s"),
-    }
-
-    // List what rsync actually wrote.
-    eprintln!("dst contents:");
-    if let Ok(entries) = std::fs::read_dir(&dst) {
-        for entry in entries.flatten() {
-            eprintln!("  {}", entry.path().display());
-        }
-    } else {
-        eprintln!("  (directory doesn't exist or can't be read)");
     }
 
     let content = std::fs::read(dst.join("upload.txt")).unwrap();
@@ -641,10 +627,7 @@ async fn test_interop_ssh_push_single_file() {
 
     match result {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            panic!("ssh push failed: {e}");
-        }
+        Ok(Err(e)) => panic!("ssh push failed: {e}"),
         Err(_) => panic!("ssh push timed out after 10s"),
     }
 
@@ -682,10 +665,7 @@ async fn test_interop_ssh_push_archive_mode() {
 
     match result {
         Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            panic!("ssh archive push failed: {e}");
-        }
+        Ok(Err(e)) => panic!("ssh archive push failed: {e}"),
         Err(_) => panic!("ssh archive push timed out after 10s"),
     }
 
