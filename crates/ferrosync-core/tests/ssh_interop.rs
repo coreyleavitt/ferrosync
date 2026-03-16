@@ -32,7 +32,7 @@ fn init_tracing() {
 }
 
 fn ssh_test_enabled() -> bool {
-    std::env::var("FERROSYNC_SSH_TEST").map_or(false, |v| v == "1")
+    std::env::var("FERROSYNC_SSH_TEST").is_ok_and(|v| v == "1")
 }
 
 fn ssh_host() -> String {
@@ -67,10 +67,14 @@ async fn ssh_cmd(args: &[&str]) -> String {
     let host = ssh_host();
     let output = tokio::process::Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-i", "/root/.ssh/id_ed25519",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-i",
+            "/root/.ssh/id_ed25519",
         ])
         .arg(format!("root@{host}"))
         .args(args)
@@ -101,10 +105,14 @@ async fn remote_cat(path: &str) -> String {
 async fn remote_exists(path: &str) -> bool {
     let output = tokio::process::Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-i", "/root/.ssh/id_ed25519",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-i",
+            "/root/.ssh/id_ed25519",
         ])
         .arg(format!("root@{}", ssh_host()))
         .args(["test", "-e", path])
@@ -126,21 +134,11 @@ async fn push_archive(
         .build();
 
     let server_opts = build_server_options(&opts, true);
-    let transport = SshTransport::new(
-        test_ssh_config(),
-        true,
-        &server_opts,
-        Path::new(remote_dir),
-    );
+    let transport = SshTransport::new(test_ssh_config(), true, &server_opts, Path::new(remote_dir));
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        session.run(),
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => panic!("SSH push failed: {e}"),
         Err(_) => panic!("SSH push timed out after {timeout_secs}s"),
@@ -168,12 +166,7 @@ async fn pull_archive(
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        session.run(),
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => panic!("SSH pull failed: {e}"),
         Err(_) => panic!("SSH pull timed out after {timeout_secs}s"),
@@ -221,8 +214,14 @@ async fn test_ssh_push_directory_recursive() {
     push_archive(&src, &remote_dir, 30).await;
 
     assert_eq!(remote_cat(&format!("{remote_dir}/top.txt")).await, "top\n");
-    assert_eq!(remote_cat(&format!("{remote_dir}/a/mid.txt")).await, "mid\n");
-    assert_eq!(remote_cat(&format!("{remote_dir}/a/b/deep.txt")).await, "deep\n");
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/a/mid.txt")).await,
+        "mid\n"
+    );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/a/b/deep.txt")).await,
+        "deep\n"
+    );
 
     remote_cleanup(&remote_dir).await;
 }
@@ -238,7 +237,11 @@ async fn test_ssh_push_many_small_files() {
 
     // Create 50 small files
     for i in 0..50 {
-        std::fs::write(src.join(format!("file_{i:03}.txt")), format!("content {i}\n")).unwrap();
+        std::fs::write(
+            src.join(format!("file_{i:03}.txt")),
+            format!("content {i}\n"),
+        )
+        .unwrap();
     }
 
     let remote_dir = remote_tmpdir().await;
@@ -246,8 +249,14 @@ async fn test_ssh_push_many_small_files() {
     assert_eq!(result.stats.files_transferred, 50);
 
     // Spot-check a few
-    assert_eq!(remote_cat(&format!("{remote_dir}/file_000.txt")).await, "content 0\n");
-    assert_eq!(remote_cat(&format!("{remote_dir}/file_049.txt")).await, "content 49\n");
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/file_000.txt")).await,
+        "content 0\n"
+    );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/file_049.txt")).await,
+        "content 49\n"
+    );
 
     remote_cleanup(&remote_dir).await;
 }
@@ -276,9 +285,16 @@ async fn test_ssh_push_large_file() {
 
     // Verify first and last bytes match via od (more portable than xxd)
     let head = ssh_cmd(&[
-        "od", "-A", "n", "-t", "x1", "-N", "16",
+        "od",
+        "-A",
+        "n",
+        "-t",
+        "x1",
+        "-N",
+        "16",
         &format!("{remote_dir}/big.dat"),
-    ]).await;
+    ])
+    .await;
     let head_hex: String = head.split_whitespace().collect();
     let expected_head: String = data[..16].iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(head_hex, expected_head, "large file head mismatch");
@@ -316,19 +332,38 @@ async fn test_ssh_push_very_large_file() {
 
     // Verify first 4KB and last 4KB match to confirm no corruption.
     let head = ssh_cmd(&[
-        "od", "-A", "n", "-t", "x1", "-N", "4096",
+        "od",
+        "-A",
+        "n",
+        "-t",
+        "x1",
+        "-N",
+        "4096",
         &format!("{remote_dir}/huge.dat"),
-    ]).await;
+    ])
+    .await;
     let head_hex: String = head.split_whitespace().collect();
     let expected_head: String = data[..4096].iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(head_hex, expected_head, "16MB file head mismatch");
 
     let tail = ssh_cmd(&[
-        "od", "-A", "n", "-t", "x1", "-j", &format!("{}", size - 4096), "-N", "4096",
+        "od",
+        "-A",
+        "n",
+        "-t",
+        "x1",
+        "-j",
+        &format!("{}", size - 4096),
+        "-N",
+        "4096",
         &format!("{remote_dir}/huge.dat"),
-    ]).await;
+    ])
+    .await;
     let tail_hex: String = tail.split_whitespace().collect();
-    let expected_tail: String = data[size - 4096..].iter().map(|b| format!("{b:02x}")).collect();
+    let expected_tail: String = data[size - 4096..]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     assert_eq!(tail_hex, expected_tail, "16MB file tail mismatch");
 
     remote_cleanup(&remote_dir).await;
@@ -369,8 +404,14 @@ async fn test_ssh_push_mixed_directory() {
     assert_eq!(result.stats.files_transferred, 31);
 
     // Spot-check
-    assert_eq!(remote_cat(&format!("{remote_dir}/small_00.txt")).await, "data 0\n");
-    assert_eq!(remote_cat(&format!("{remote_dir}/sub/nested_09.txt")).await, "nested 9\n");
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/small_00.txt")).await,
+        "data 0\n"
+    );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/sub/nested_09.txt")).await,
+        "nested 9\n"
+    );
     assert!(remote_exists(&format!("{remote_dir}/medium.bin")).await);
 
     remote_cleanup(&remote_dir).await;
@@ -437,7 +478,12 @@ async fn test_ssh_pull_single_file() {
     std::fs::create_dir_all(&dst).unwrap();
 
     let remote_dir = remote_tmpdir().await;
-    ssh_cmd(&["sh", "-c", &format!("echo 'pulled via SSH' > {remote_dir}/pull.txt")]).await;
+    ssh_cmd(&[
+        "sh",
+        "-c",
+        &format!("echo 'pulled via SSH' > {remote_dir}/pull.txt"),
+    ])
+    .await;
 
     let remote_path = format!("{remote_dir}/");
     pull_archive(&remote_path, &dst, 30).await;
@@ -494,13 +540,24 @@ async fn test_ssh_pull_directory_recursive() {
     let remote_dir = remote_tmpdir().await;
     ssh_cmd(&["mkdir", "-p", &format!("{remote_dir}/sub")]).await;
     ssh_cmd(&["sh", "-c", &format!("echo 'top' > {remote_dir}/top.txt")]).await;
-    ssh_cmd(&["sh", "-c", &format!("echo 'deep' > {remote_dir}/sub/deep.txt")]).await;
+    ssh_cmd(&[
+        "sh",
+        "-c",
+        &format!("echo 'deep' > {remote_dir}/sub/deep.txt"),
+    ])
+    .await;
 
     let remote_path = format!("{remote_dir}/");
     pull_archive(&remote_path, &dst, 30).await;
 
-    assert_eq!(std::fs::read_to_string(dst.join("top.txt")).unwrap(), "top\n");
-    assert_eq!(std::fs::read_to_string(dst.join("sub/deep.txt")).unwrap(), "deep\n");
+    assert_eq!(
+        std::fs::read_to_string(dst.join("top.txt")).unwrap(),
+        "top\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dst.join("sub/deep.txt")).unwrap(),
+        "deep\n"
+    );
 
     remote_cleanup(&remote_dir).await;
 }

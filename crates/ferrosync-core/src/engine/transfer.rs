@@ -245,7 +245,9 @@ async fn execute_transfer_impl(
 
         // --link-dest: hard-link from alt dir if unchanged.
         if !options.link_dest().is_empty() && !options.dry_run() {
-            if let Some(alt_path) = file_decision::check_alt_dest(fs, &item.entry, options.link_dest()) {
+            if let Some(alt_path) =
+                file_decision::check_alt_dest(fs, &item.entry, options.link_dest())
+            {
                 if fs.hard_link(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
@@ -261,7 +263,9 @@ async fn execute_transfer_impl(
 
         // --copy-dest: copy from alt dir if unchanged (also use as basis).
         if !options.copy_dest().is_empty() && !options.dry_run() {
-            if let Some(alt_path) = file_decision::check_alt_dest(fs, &item.entry, options.copy_dest()) {
+            if let Some(alt_path) =
+                file_decision::check_alt_dest(fs, &item.entry, options.copy_dest())
+            {
                 if fs.copy_file(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {
@@ -276,7 +280,9 @@ async fn execute_transfer_impl(
         }
 
         // Check if the file needs updating.
-        if !options.checksum_mode() && file_decision::quick_check_skip(fs, &item.entry, &dest_path, options) {
+        if !options.checksum_mode()
+            && file_decision::quick_check_skip(fs, &item.entry, &dest_path, options)
+        {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
                 index: item.index,
@@ -415,7 +421,13 @@ async fn execute_transfer_impl(
         };
 
         // Write the file (choosing method based on options).
-        file_decision::write_file_with_options(fs, &write_path, &result_data, &item.entry, options)?;
+        file_decision::write_file_with_options(
+            fs,
+            &write_path,
+            &result_data,
+            &item.entry,
+            options,
+        )?;
 
         // --partial-dir: move from partial dir to final destination.
         if options.partial_dir().is_some() && write_path != dest_path {

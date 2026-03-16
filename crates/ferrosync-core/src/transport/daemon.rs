@@ -354,7 +354,9 @@ struct DaemonGreeting {
 ///
 /// For protocol >= 32, the greeting includes a space-separated list of
 /// supported auth digest algorithms (e.g., "32.0 md5 md4").
-async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<DaemonGreeting> {
+async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<DaemonGreeting> {
     let line = read_line(reader).await?;
 
     if !line.starts_with("@RSYNCD: ") {
@@ -378,7 +380,10 @@ async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Re
         })?;
 
     tracing::debug!(version = %version_str, digests = ?digest_list, "daemon greeting received");
-    Ok(DaemonGreeting { version, digest_list })
+    Ok(DaemonGreeting {
+        version,
+        digest_list,
+    })
 }
 
 /// Send our daemon protocol greeting.
@@ -387,7 +392,9 @@ async fn read_greeting<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Re
 /// supported auth digest algorithms after the version (e.g., "32.0 md5 md4").
 async fn send_greeting<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W) -> Result<()> {
     let greeting = if DAEMON_PROTOCOL_VERSION >= 32 {
-        format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION} {AUTH_DIGEST_LIST}\n")
+        format!(
+            "@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION} {AUTH_DIGEST_LIST}\n"
+        )
     } else {
         format!("@RSYNCD: {DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}\n")
     };
@@ -497,7 +504,12 @@ pub(crate) fn compute_auth_response_for_tls(challenge: &str, user: &str, passwor
 /// 2. Client computes HASH(zero-padded-password + challenge) and base64-encodes it.
 ///    HASH is MD4 (proto < 32) or negotiated from the greeting (proto >= 32).
 /// 3. Client sends `<user> <base64_hash>\n`.
-fn compute_auth_response(challenge: &str, user: &str, password: &str, digest: AuthDigest) -> String {
+fn compute_auth_response(
+    challenge: &str,
+    user: &str,
+    password: &str,
+    digest: AuthDigest,
+) -> String {
     // Zero-pad the password to 64 bytes (rsync behavior).
     let mut padded_password = [0u8; 64];
     let pw_bytes = password.as_bytes();
@@ -923,7 +935,8 @@ mod tests {
             .to_string();
         assert_eq!(challenge, "abc123challenge");
 
-        let response = compute_auth_response(&challenge, "backupuser", "secretpass", AuthDigest::Md4);
+        let response =
+            compute_auth_response(&challenge, "backupuser", "secretpass", AuthDigest::Md4);
         writer.write_all(response.as_bytes()).await.unwrap();
         writer.flush().await.unwrap();
 

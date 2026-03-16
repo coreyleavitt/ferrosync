@@ -54,7 +54,11 @@ pub struct FileListOptions {
 impl Default for FileListOptions {
     fn default() -> Self {
         Self {
-            wire: WireFormat::new(31, crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS | crate::protocol::handshake::compat_flags::INC_RECURSE),
+            wire: WireFormat::new(
+                31,
+                crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
+                    | crate::protocol::handshake::compat_flags::INC_RECURSE,
+            ),
             preserve_uid: false,
             preserve_gid: false,
             preserve_devices: false,
@@ -315,7 +319,8 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     // --- File checksum ---
     // Proto < 28 sends checksums for all file types; >= 28 only for regular files.
     let checksum_for_all_types = opts.wire.flags_codec == FlagsCodec::Byte;
-    let checksum = if opts.always_checksum && ((mode & S_IFMT) == S_IFREG || checksum_for_all_types) {
+    let checksum = if opts.always_checksum && ((mode & S_IFMT) == S_IFREG || checksum_for_all_types)
+    {
         let mut buf = vec![0u8; opts.checksum_len];
         r.read_exact(&mut buf).await?;
         buf
@@ -701,7 +706,11 @@ mod tests {
 
     fn default_opts() -> FileListOptions {
         FileListOptions {
-            wire: WireFormat::new(31, crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS | crate::protocol::handshake::compat_flags::INC_RECURSE),
+            wire: WireFormat::new(
+                31,
+                crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
+                    | crate::protocol::handshake::compat_flags::INC_RECURSE,
+            ),
             ..Default::default()
         }
     }

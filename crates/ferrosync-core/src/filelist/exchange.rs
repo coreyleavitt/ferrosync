@@ -544,7 +544,10 @@ mod tests {
             proper_seed_order: false,
             seed: 42,
             chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(30, compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS),
+            wire: WireFormat::new(
+                30,
+                compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS,
+            ),
         }
     }
 

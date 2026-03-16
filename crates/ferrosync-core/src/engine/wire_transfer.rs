@@ -193,7 +193,11 @@ impl FileOps for LocalFileOps {
     ) -> std::result::Result<(), crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
         super::file_decision::write_file_with_options(
-            &*self.fs, &dest_path, data, entry, &self.options,
+            &*self.fs,
+            &dest_path,
+            data,
+            entry,
+            &self.options,
         )
     }
 
@@ -839,13 +843,11 @@ where
                     if iflags & 0x1000 != 0 {
                         let name_len = varint::read_varint(&mut demux_read).await?;
                         if name_len > 0x10000 {
-                            return Err(WireError::Protocol(
-                                ProtocolError::WireValueOutOfRange {
-                                    field: "xname_len",
-                                    value: name_len as i64,
-                                    max: 0x10000,
-                                },
-                            ));
+                            return Err(WireError::Protocol(ProtocolError::WireValueOutOfRange {
+                                field: "xname_len",
+                                value: name_len as i64,
+                                max: 0x10000,
+                            }));
                         }
                         let mut name_buf = vec![0u8; name_len as usize];
                         demux_read.read_exact(&mut name_buf).await?;

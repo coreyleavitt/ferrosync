@@ -677,7 +677,14 @@ async fn run_sync(
                     danger_accept_invalid_certs: insecure,
                     ..Default::default()
                 };
-                run_remote_session(TlsDaemonTransport::new(config, am_sender, &server_opts), opts, fs, direction, verbose).await?
+                run_remote_session(
+                    TlsDaemonTransport::new(config, am_sender, &server_opts),
+                    opts,
+                    fs,
+                    direction,
+                    verbose,
+                )
+                .await?
             } else {
                 let config = DaemonTransportConfig {
                     host,
@@ -686,7 +693,14 @@ async fn run_sync(
                     path: remote_path,
                     ..Default::default()
                 };
-                run_remote_session(DaemonTransport::new(config, am_sender, &server_opts), opts, fs, direction, verbose).await?
+                run_remote_session(
+                    DaemonTransport::new(config, am_sender, &server_opts),
+                    opts,
+                    fs,
+                    direction,
+                    verbose,
+                )
+                .await?
             };
             if show_stats {
                 print_stats(&result.stats);
@@ -718,23 +732,21 @@ async fn run_remote_session<T: ferrosync_core::transport::Transport + 'static>(
 /// transfer and passed to both local and remote transfer paths.
 fn build_progress_tracker(verbose: u8) -> ferrosync_core::engine::progress::ProgressTracker {
     if verbose > 0 {
-        ferrosync_core::engine::progress::ProgressTracker::with_callback(Box::new(
-            move |event| {
-                use ferrosync_core::engine::progress::ProgressEvent;
-                match event {
-                    ProgressEvent::FileStart { name, .. } => {
-                        eprintln!("{}", name.display());
-                    }
-                    ProgressEvent::FileDeleted { name } => {
-                        eprintln!("*deleting   {}", name.display());
-                    }
-                    ProgressEvent::FileItemized { name, changes, .. } => {
-                        eprintln!("{} {}", changes, name.display());
-                    }
-                    _ => {}
+        ferrosync_core::engine::progress::ProgressTracker::with_callback(Box::new(move |event| {
+            use ferrosync_core::engine::progress::ProgressEvent;
+            match event {
+                ProgressEvent::FileStart { name, .. } => {
+                    eprintln!("{}", name.display());
                 }
-            },
-        ))
+                ProgressEvent::FileDeleted { name } => {
+                    eprintln!("*deleting   {}", name.display());
+                }
+                ProgressEvent::FileItemized { name, changes, .. } => {
+                    eprintln!("{} {}", changes, name.display());
+                }
+                _ => {}
+            }
+        }))
     } else {
         ferrosync_core::engine::progress::ProgressTracker::new()
     }

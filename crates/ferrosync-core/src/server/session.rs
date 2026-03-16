@@ -188,13 +188,25 @@ impl ServerSession {
         match self.direction {
             TransferDirection::Send => {
                 Self::handle_send_impl(
-                    &self.module, reader, writer, &protocol, &*fs, &opts, &mut progress,
+                    &self.module,
+                    reader,
+                    writer,
+                    &protocol,
+                    &*fs,
+                    &opts,
+                    &mut progress,
                 )
                 .await
             }
             TransferDirection::Receive => {
                 Self::handle_receive_impl(
-                    &self.module, reader, writer, &protocol, fs, &opts, &mut progress,
+                    &self.module,
+                    reader,
+                    writer,
+                    &protocol,
+                    fs,
+                    &opts,
+                    &mut progress,
                 )
                 .await
             }
@@ -344,26 +356,15 @@ impl ServerSession {
         stats.start();
 
         let (dr, mo) = wire_transfer::receiver_loop_pipelined(
-            demux_read,
-            mplex_out,
-            &entries,
-            &entry_ndx,
-            file_ops,
-            protocol,
-            &mut stats,
-            progress,
+            demux_read, mplex_out, &entries, &entry_ndx, file_ops, protocol, &mut stats, progress,
         )
         .await?;
         demux_read = dr;
         mplex_out = mo;
 
         // Phase exchange.
-        wire_transfer::server_receiver_phase_exchange(
-            &mut demux_read,
-            &mut mplex_out,
-            protocol,
-        )
-        .await?;
+        wire_transfer::server_receiver_phase_exchange(&mut demux_read, &mut mplex_out, protocol)
+            .await?;
 
         // C ref: handle_stats (main.c:325) -- server receiver does NOT
         // read/write stats. Stats are only exchanged when the server is

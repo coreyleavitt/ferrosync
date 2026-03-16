@@ -543,7 +543,9 @@ mod tests {
 
         let s = String::from_utf8(buf).unwrap();
         assert!(s.starts_with("@RSYNCD: "));
-        assert!(s.contains(&format!("{DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}")));
+        assert!(s.contains(&format!(
+            "{DAEMON_PROTOCOL_VERSION}.{DAEMON_SUB_PROTOCOL_VERSION}"
+        )));
         assert!(s.ends_with('\n'));
     }
 

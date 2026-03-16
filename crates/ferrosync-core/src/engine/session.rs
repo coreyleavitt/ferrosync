@@ -155,7 +155,11 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
 /// This is the inverse of [`build_server_options`]. The server uses it to
 /// reconstruct a [`TransferOptions`] from the flags the client sent. The
 /// `module_path` is used as the dest (for receive) or source (for send).
-pub fn parse_server_args(args: &[String], module_path: std::path::PathBuf, am_sender: bool) -> TransferOptions {
+pub fn parse_server_args(
+    args: &[String],
+    module_path: std::path::PathBuf,
+    am_sender: bool,
+) -> TransferOptions {
     let mut builder = TransferOptions::builder();
 
     // Find the condensed option string (starts with `-`, not `--`).
@@ -182,20 +186,48 @@ pub fn parse_server_args(args: &[String], module_path: std::path::PathBuf, am_se
 
     for ch in flags_part.chars() {
         match ch {
-            'l' => { builder = builder.preserve_links(true); }
-            'o' => { builder = builder.preserve_owner(true); }
-            'g' => { builder = builder.preserve_group(true); }
-            'D' => { builder = builder.preserve_devices(true).preserve_specials(true); }
-            't' => { builder = builder.preserve_times(true); }
-            'p' => { builder = builder.preserve_perms(true); }
-            'r' => { builder = builder.recursive(true); }
-            'z' => { builder = builder.compress(true); }
-            'c' => { builder = builder.checksum_mode(true); }
-            'u' => { builder = builder.update(true); }
-            'n' => { builder = builder.dry_run(true); }
-            'W' => { builder = builder.whole_file(true); }
-            'x' => { builder = builder.one_file_system(true); }
-            'S' => { builder = builder.sparse(true); }
+            'l' => {
+                builder = builder.preserve_links(true);
+            }
+            'o' => {
+                builder = builder.preserve_owner(true);
+            }
+            'g' => {
+                builder = builder.preserve_group(true);
+            }
+            'D' => {
+                builder = builder.preserve_devices(true).preserve_specials(true);
+            }
+            't' => {
+                builder = builder.preserve_times(true);
+            }
+            'p' => {
+                builder = builder.preserve_perms(true);
+            }
+            'r' => {
+                builder = builder.recursive(true);
+            }
+            'z' => {
+                builder = builder.compress(true);
+            }
+            'c' => {
+                builder = builder.checksum_mode(true);
+            }
+            'u' => {
+                builder = builder.update(true);
+            }
+            'n' => {
+                builder = builder.dry_run(true);
+            }
+            'W' => {
+                builder = builder.whole_file(true);
+            }
+            'x' => {
+                builder = builder.one_file_system(true);
+            }
+            'S' => {
+                builder = builder.sparse(true);
+            }
             'v' => {
                 // Verbosity is cumulative but we just set it once here.
                 // Multiple v's are handled by the Verbosity enum already
@@ -209,13 +241,27 @@ pub fn parse_server_args(args: &[String], module_path: std::path::PathBuf, am_se
     // Parse long-form options.
     for opt in &long_opts {
         match *opt {
-            "--inplace" => { builder = builder.inplace(true); }
-            "--numeric-ids" => { builder = builder.numeric_ids(true); }
-            "--append" => { builder = builder.append(true); }
-            "--delete-before" => { builder = builder.delete(DeleteMode::Before); }
-            "--delete-during" => { builder = builder.delete(DeleteMode::During); }
-            "--delete-after" => { builder = builder.delete(DeleteMode::After); }
-            "--delete-excluded" => { builder = builder.delete(DeleteMode::Excluded); }
+            "--inplace" => {
+                builder = builder.inplace(true);
+            }
+            "--numeric-ids" => {
+                builder = builder.numeric_ids(true);
+            }
+            "--append" => {
+                builder = builder.append(true);
+            }
+            "--delete-before" => {
+                builder = builder.delete(DeleteMode::Before);
+            }
+            "--delete-during" => {
+                builder = builder.delete(DeleteMode::During);
+            }
+            "--delete-after" => {
+                builder = builder.delete(DeleteMode::After);
+            }
+            "--delete-excluded" => {
+                builder = builder.delete(DeleteMode::Excluded);
+            }
             _ => {}
         }
     }
@@ -550,18 +596,14 @@ async fn run_pull(
         }
     } else {
         // Pipelined receiver loop: generator and receiver run concurrently.
-        let file_ops: Arc<dyn wire_transfer::FileOps> =
-            Arc::new(LocalFileOps::new(Arc::clone(&fs), dest.clone(), options.clone()));
+        let file_ops: Arc<dyn wire_transfer::FileOps> = Arc::new(LocalFileOps::new(
+            Arc::clone(&fs),
+            dest.clone(),
+            options.clone(),
+        ));
 
         let (dr, mo) = wire_transfer::receiver_loop_pipelined(
-            demux_read,
-            mplex_out,
-            &entries,
-            &entry_ndx,
-            file_ops,
-            protocol,
-            &mut stats,
-            progress,
+            demux_read, mplex_out, &entries, &entry_ndx, file_ops, protocol, &mut stats, progress,
         )
         .await?;
         demux_read = dr;

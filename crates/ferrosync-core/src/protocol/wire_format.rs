@@ -72,6 +72,7 @@ pub struct WireFormat {
 
     // -- Diagnostics only --
     /// Kept for handshake logging and error messages. Not for branching.
+    #[allow(dead_code)]
     pub(crate) negotiated_version: u8,
 }
 
