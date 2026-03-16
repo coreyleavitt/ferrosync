@@ -757,11 +757,50 @@ fn create_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Windows: increase working set so VirtualLock succeeds
+// ---------------------------------------------------------------------------
+
+/// Increase the process working set on Windows so that `VirtualLock` calls
+/// (used by russh-cryptovec to keep SSH key material out of the page file)
+/// do not fail with `ERROR_WORKING_SET_QUOTA` (0x5ad).
+///
+/// The default minimum working set (~200 KB on 4 KB pages) leaves almost no
+/// headroom for locked pages.  We add 512 KB, which comfortably covers the
+/// handful of small crypto buffers russh allocates during an SSH session.
+#[cfg(windows)]
+fn raise_working_set() {
+    use windows_sys::Win32::System::Memory::GetProcessWorkingSetSizeEx;
+    use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    const EXTRA: usize = 512 * 1024;
+
+    unsafe {
+        let handle = GetCurrentProcess();
+        let mut min_ws: usize = 0;
+        let mut max_ws: usize = 0;
+        let mut flags: u32 = 0;
+
+        if GetProcessWorkingSetSizeEx(handle, &mut min_ws, &mut max_ws, &mut flags) == 0 {
+            return;
+        }
+
+        let new_min = min_ws + EXTRA;
+        let new_max = max_ws.max(new_min + EXTRA);
+        let _ = SetProcessWorkingSetSizeEx(handle, new_min, new_max, flags);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    #[cfg(windows)]
+    raise_working_set();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
