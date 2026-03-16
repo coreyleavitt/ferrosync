@@ -379,8 +379,10 @@ async fn run_push(
 
     // Both sides enable MUX after handshake (proto >= 30).
     // C ref: io_start_multiplex_out (main.c:1146)
-    let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
-    let demux_handle = tokio::spawn(demux_task(reader, demux_write));
+    //
+    // Uses an unbounded channel instead of a bounded duplex pipe to prevent
+    // bidirectional deadlock on large transfers. See start_demux docs.
+    let (mut demux_read, demux_handle) = start_demux(reader);
     let mut mplex_out = MplexWriter::new(writer);
 
     // Send filter list (MUX-framed) -- CONDITIONAL.
@@ -528,8 +530,8 @@ async fn run_pull(
 
     let proto_ver = protocol.version;
 
-    let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
-    let demux_handle = tokio::spawn(demux_task(reader, demux_write));
+    // Uses unbounded channel demux to prevent bidirectional deadlock.
+    let (mut demux_read, demux_handle) = start_demux(reader);
     let mut mplex_out = MplexWriter::new(writer);
 
     // Send filter list -- always for pull.
@@ -749,8 +751,8 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
     Ok(entries)
 }
 
-// Re-export the shared demux_task for use within this module.
-use crate::protocol::multiplex::demux_task;
+// Use the unbounded-channel demux to prevent bidirectional I/O deadlock.
+use crate::protocol::multiplex::start_demux;
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -9,8 +9,12 @@
 //! Multiplexing is disabled during the initial handshake and enabled once
 //! both sides have exchanged protocol versions.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::sync::mpsc;
 
 use crate::error::ProtocolError;
 
@@ -388,21 +392,116 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
 }
 
 // ---------------------------------------------------------------------------
-// Shared demux task and control message handler
+// Unbounded channel-based demux (replaces bounded duplex pipe)
 // ---------------------------------------------------------------------------
 
-/// Background task that reads multiplexed frames from the wire and forwards
-/// MSG_DATA payloads to a pipe. Control messages are logged/handled separately.
+/// An `AsyncRead` adapter that reads from an unbounded channel of `Bytes`.
 ///
-/// This allows protocol code to read from the pipe as a plain `AsyncRead`
-/// stream, transparently demultiplexing data from control messages.
-pub(crate) async fn demux_task<R: AsyncRead + Unpin>(reader: R, mut pipe: tokio::io::DuplexStream) {
+/// Paired with a background demux task that sends MSG_DATA payloads through
+/// the channel. Because the channel is unbounded, the demux task never blocks,
+/// which prevents the bidirectional deadlock that occurs with a bounded
+/// `tokio::io::duplex` pipe:
+///
+/// ```text
+/// Old (deadlocked):
+///   sender writes large response -> SSH write blocks (remote not reading)
+///     -> remote trying to send next NDX -> SSH read not drained
+///       -> demux_task fills duplex pipe (bounded) -> stops reading SSH
+///         -> DEADLOCK
+///
+/// New (unbounded channel):
+///   sender writes large response -> SSH write blocks
+///     -> demux_task keeps draining SSH reads into unbounded channel
+///       -> remote can send next NDX -> remote reads our response
+///         -> SSH write unblocks -> progress
+/// ```
+pub struct ChannelReader {
+    rx: mpsc::UnboundedReceiver<Bytes>,
+    /// Current partially-consumed chunk from the channel.
+    current: Option<Bytes>,
+    /// Read offset into `current`.
+    offset: usize,
+}
+
+impl ChannelReader {
+    fn new(rx: mpsc::UnboundedReceiver<Bytes>) -> Self {
+        Self {
+            rx,
+            current: None,
+            offset: 0,
+        }
+    }
+}
+
+impl AsyncRead for ChannelReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+
+        loop {
+            // Serve from the current partially-consumed chunk first.
+            if let Some(ref data) = this.current {
+                let remaining = data.len() - this.offset;
+                let n = remaining.min(buf.remaining());
+                buf.put_slice(&data[this.offset..this.offset + n]);
+                this.offset += n;
+                if this.offset >= data.len() {
+                    this.current = None;
+                    this.offset = 0;
+                }
+                return Poll::Ready(Ok(()));
+            }
+
+            // Try to receive the next chunk from the channel.
+            match this.rx.poll_recv(cx) {
+                Poll::Ready(Some(data)) => {
+                    this.current = Some(data);
+                    this.offset = 0;
+                    // Loop back to serve from this chunk.
+                }
+                Poll::Ready(None) => {
+                    // Channel closed (demux task finished) = EOF.
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+/// Start a background demux task and return a `ChannelReader` for reading
+/// demultiplexed DATA payloads.
+///
+/// The demux task reads MUX frames from the wire, sends MSG_DATA payloads
+/// through an unbounded channel, and logs/handles control messages. Because
+/// the channel is unbounded, the task never blocks on sends, ensuring the
+/// SSH read side is always drained regardless of how fast the consumer reads.
+///
+/// Returns `(ChannelReader, JoinHandle)`. The `ChannelReader` implements
+/// `AsyncRead` and can be used anywhere `R: AsyncRead + Unpin` is expected.
+pub fn start_demux<R: AsyncRead + Unpin + Send + 'static>(
+    reader: R,
+) -> (ChannelReader, tokio::task::JoinHandle<()>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(demux_channel_task(reader, tx));
+    (ChannelReader::new(rx), handle)
+}
+
+/// Background demux task that sends DATA payloads to an unbounded channel.
+async fn demux_channel_task<R: AsyncRead + Unpin>(
+    reader: R,
+    tx: mpsc::UnboundedSender<Bytes>,
+) {
     let mut mplex = MplexReader::new(reader);
 
     loop {
         match mplex.read_message().await {
             Ok(MplexMessage::Data(data)) => {
-                if AsyncWriteExt::write_all(&mut pipe, &data).await.is_err() {
+                if tx.send(data).is_err() {
+                    // Receiver dropped -- consumer is done.
                     break;
                 }
             }
