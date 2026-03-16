@@ -552,11 +552,7 @@ async fn test_e2e_pull_many_files_delta() {
         for (j, b) in basis.iter_mut().enumerate() {
             *b = ((i + j) % 256) as u8;
         }
-        std::fs::write(
-            client_dir.path().join(format!("delta_{i:02}.bin")),
-            &basis,
-        )
-        .unwrap();
+        std::fs::write(client_dir.path().join(format!("delta_{i:02}.bin")), &basis).unwrap();
 
         // Create modified version on server.
         let mut modified = basis.clone();
@@ -576,11 +572,8 @@ async fn test_e2e_pull_many_files_delta() {
                 + 200,
             0,
         );
-        filetime::set_file_mtime(
-            server_dir.path().join(format!("delta_{i:02}.bin")),
-            future,
-        )
-        .unwrap();
+        filetime::set_file_mtime(server_dir.path().join(format!("delta_{i:02}.bin")), future)
+            .unwrap();
     }
 
     let (addr, shutdown) = start_test_server(server_dir.path(), true).await;

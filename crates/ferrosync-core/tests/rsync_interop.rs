@@ -109,17 +109,19 @@ impl Transport for RsyncServerTransport {
                     message: format!("failed to spawn rsync: {e}"),
                 })?;
 
-            let stdin = child.stdin.take().ok_or_else(|| {
-                TransportError::ConnectionFailed {
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| TransportError::ConnectionFailed {
                     message: "failed to open rsync stdin".to_string(),
-                }
-            })?;
+                })?;
 
-            let stdout = child.stdout.take().ok_or_else(|| {
-                TransportError::ConnectionFailed {
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| TransportError::ConnectionFailed {
                     message: "failed to open rsync stdout".to_string(),
-                }
-            })?;
+                })?;
 
             // Monitor child in background for diagnostics.
             tokio::spawn(async move {
@@ -136,10 +138,7 @@ impl Transport for RsyncServerTransport {
                 }
             });
 
-            Ok(TransportStreams::new(
-                Box::new(stdout),
-                Box::new(stdin),
-            ))
+            Ok(TransportStreams::new(Box::new(stdout), Box::new(stdin)))
         })
     }
 }
@@ -244,10 +243,7 @@ async fn test_interop_push_single_file() {
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => {}
@@ -293,10 +289,7 @@ async fn test_interop_push_directory_recursive() {
 
     assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"top\n");
     assert_eq!(std::fs::read(dst.join("a/mid.txt")).unwrap(), b"mid\n");
-    assert_eq!(
-        std::fs::read(dst.join("a/b/deep.txt")).unwrap(),
-        b"deep\n"
-    );
+    assert_eq!(std::fs::read(dst.join("a/b/deep.txt")).unwrap(), b"deep\n");
 }
 
 #[tokio::test]
@@ -408,7 +401,10 @@ async fn test_interop_flist_preserves_mtime() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    assert_eq!(actual_mtime, 1700000000, "mtime should be preserved through flist encoding");
+    assert_eq!(
+        actual_mtime, 1700000000,
+        "mtime should be preserved through flist encoding"
+    );
 }
 
 #[tokio::test]
@@ -455,7 +451,10 @@ async fn test_interop_flist_preserves_permissions() {
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(mode, 0o755, "permissions should be preserved through flist encoding");
+        assert_eq!(
+            mode, 0o755,
+            "permissions should be preserved through flist encoding"
+        );
     }
 }
 
@@ -530,10 +529,7 @@ async fn test_interop_push_archive_mode() {
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => {}
@@ -569,10 +565,7 @@ async fn test_interop_pull_archive_mode() {
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => {}
@@ -620,10 +613,7 @@ async fn test_interop_ssh_push_single_file() {
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => {}
@@ -658,10 +648,7 @@ async fn test_interop_ssh_push_archive_mode() {
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => {}
@@ -697,10 +684,7 @@ async fn test_interop_ssh_pull_single_file() {
     let fs = Box::new(UnixFileSystem::new());
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => {}

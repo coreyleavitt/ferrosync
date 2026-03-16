@@ -185,7 +185,10 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
         tracing::trace!(
             tag = tag_byte,
             payload_len,
-            hdr_hex = format!("{:02x} {:02x} {:02x} {:02x}", hdr[0], hdr[1], hdr[2], hdr[3]),
+            hdr_hex = format!(
+                "{:02x} {:02x} {:02x} {:02x}",
+                hdr[0], hdr[1], hdr[2], hdr[3]
+            ),
             "mplex: read_message header"
         );
 
@@ -492,10 +495,7 @@ pub fn start_demux<R: AsyncRead + Unpin + Send + 'static>(
 }
 
 /// Background demux task that sends DATA payloads to an unbounded channel.
-async fn demux_channel_task<R: AsyncRead + Unpin>(
-    reader: R,
-    tx: mpsc::UnboundedSender<Bytes>,
-) {
+async fn demux_channel_task<R: AsyncRead + Unpin>(reader: R, tx: mpsc::UnboundedSender<Bytes>) {
     let mut mplex = MplexReader::new(reader);
 
     loop {

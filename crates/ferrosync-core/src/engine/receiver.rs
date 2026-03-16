@@ -207,9 +207,9 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
         match token::recv_token(r).await? {
             Token::Data(data) => {
                 hasher.update(&data);
-                writer.write_all(&data).map_err(|e| {
-                    ProtocolError::Io(std::sync::Arc::new(e))
-                })?;
+                writer
+                    .write_all(&data)
+                    .map_err(|e| ProtocolError::Io(std::sync::Arc::new(e)))?;
                 bytes_written += data.len() as u64;
             }
             Token::BlockMatch(idx) => {
@@ -228,9 +228,9 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
                 if offset < basis_data.len() {
                     let slice = &basis_data[offset..end];
                     hasher.update(slice);
-                    writer.write_all(slice).map_err(|e| {
-                        ProtocolError::Io(std::sync::Arc::new(e))
-                    })?;
+                    writer
+                        .write_all(slice)
+                        .map_err(|e| ProtocolError::Io(std::sync::Arc::new(e)))?;
                     bytes_written += slice.len() as u64;
                 }
             }

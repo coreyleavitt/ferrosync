@@ -164,12 +164,8 @@ impl IncrementalChecksum {
                 IncrementalChecksum::Md5(md5::Md5::new())
             }
             ChecksumType::Blake3 => IncrementalChecksum::Blake3(Box::new(blake3::Hasher::new())),
-            ChecksumType::Xxh3 => {
-                IncrementalChecksum::Xxh3(xxhash_rust::xxh3::Xxh3::new())
-            }
-            ChecksumType::Xxh128 => {
-                IncrementalChecksum::Xxh128(xxhash_rust::xxh3::Xxh3::new())
-            }
+            ChecksumType::Xxh3 => IncrementalChecksum::Xxh3(xxhash_rust::xxh3::Xxh3::new()),
+            ChecksumType::Xxh128 => IncrementalChecksum::Xxh128(xxhash_rust::xxh3::Xxh3::new()),
             ChecksumType::None => IncrementalChecksum::None(checksum_type.digest_len()),
         }
     }
