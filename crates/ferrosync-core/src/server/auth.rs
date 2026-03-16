@@ -37,10 +37,6 @@ pub enum AuthError {
     InvalidResponse,
 }
 
-/// Length of the raw challenge in bytes (before base64 encoding).
-#[allow(dead_code)]
-const CHALLENGE_BYTES: usize = 16;
-
 /// Maximum password length (matches rsync's zero-padding size).
 const MAX_PASSWORD_LEN: usize = 64;
 
@@ -219,7 +215,8 @@ fn base64_encode(data: &[u8]) -> String {
                 result.push('=');
                 result.push('=');
             }
-            _ => unreachable!(),
+            // chunks(3) only yields slices of length 1, 2, or 3.
+            _ => unreachable!("chunks(3) produced an empty slice"),
         }
     }
 

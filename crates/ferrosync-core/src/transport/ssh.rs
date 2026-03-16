@@ -390,7 +390,8 @@ impl client::Handler for SshClientHandler {
                     host: self.host.clone(),
                 }
                 .into()),
-                KnownHostsPolicy::AcceptAll => unreachable!(),
+                // AcceptAll is handled by the early return above.
+                KnownHostsPolicy::AcceptAll => Ok(true),
             };
         }
 
@@ -421,7 +422,8 @@ impl client::Handler for SshClientHandler {
                         host: self.host.clone(),
                     }
                     .into()),
-                    KnownHostsPolicy::AcceptAll => unreachable!(),
+                    // AcceptAll is handled by the early return above.
+                    KnownHostsPolicy::AcceptAll => Ok(true),
                 }
             }
             Err(_) => {
@@ -693,7 +695,7 @@ mod tests {
     #[tokio::test]
     async fn test_connect_localhost() {
         if std::env::var("FERROSYNC_SSH_TEST").as_deref() != Ok("1") {
-            eprintln!("skipping SSH integration test (set FERROSYNC_SSH_TEST=1)");
+            tracing::info!("skipping SSH integration test (set FERROSYNC_SSH_TEST=1)");
             return;
         }
 
@@ -715,7 +717,7 @@ mod tests {
                 drop(streams);
             }
             Err(e) => {
-                eprintln!("SSH connection to localhost failed (expected in CI): {e}");
+                tracing::warn!("SSH connection to localhost failed (expected in CI): {e}");
             }
         }
     }

@@ -153,9 +153,6 @@ pub(crate) enum MplexMessage {
 /// Reads 4-byte headers and dispatches messages by type.
 pub(crate) struct MplexReader<R> {
     inner: R,
-    /// Remaining bytes of the current MSG_DATA payload.
-    #[allow(dead_code)]
-    data_remaining: u32,
     /// Buffered excess bytes from a Data message that didn't fit in the
     /// caller's buffer during `read_data`. Read from this before `self.inner`.
     buffered_data: Option<Bytes>,
@@ -167,7 +164,6 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
     pub fn new(inner: R) -> Self {
         Self {
             inner,
-            data_remaining: 0,
             buffered_data: None,
             buffered_offset: 0,
         }
@@ -439,6 +435,11 @@ impl AsyncRead for ChannelReader {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        // Zero-length reads should return immediately without side effects.
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
         let this = self.get_mut();
 
         loop {
