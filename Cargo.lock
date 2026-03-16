@@ -993,6 +993,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-test",
  "tracing",
+ "tracing-subscriber",
  "webpki-roots 0.26.11",
  "xxhash-rust",
  "zstd",

@@ -220,8 +220,8 @@ impl ServerSession {
         let proto_ver = protocol.version;
 
         // Enable multiplexing: demux incoming, mux outgoing.
-        let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
-        let demux_handle = tokio::spawn(demux_task(reader, demux_write));
+        // Uses unbounded channel demux to prevent bidirectional deadlock.
+        let (mut demux_read, demux_handle) = start_demux(reader);
         let mut mplex_out = MplexWriter::new(writer);
 
         // Read and discard filter list from client.
@@ -313,8 +313,8 @@ impl ServerSession {
         let proto_ver = protocol.version;
 
         // Enable multiplexing.
-        let (demux_write, mut demux_read) = tokio::io::duplex(64 * 1024);
-        let demux_handle = tokio::spawn(demux_task(reader, demux_write));
+        // Uses unbounded channel demux to prevent bidirectional deadlock.
+        let (mut demux_read, demux_handle) = start_demux(reader);
         let mut mplex_out = MplexWriter::new(writer);
 
         // Read and discard the client's filter list -- CONDITIONAL.
@@ -516,8 +516,8 @@ fn build_module_entries(
     Ok(entries)
 }
 
-// Use the shared demux_task from protocol::multiplex.
-use crate::protocol::multiplex::demux_task;
+// Use the unbounded-channel demux to prevent bidirectional I/O deadlock.
+use crate::protocol::multiplex::start_demux;
 
 #[cfg(test)]
 mod tests {
