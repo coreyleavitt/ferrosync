@@ -511,6 +511,80 @@ async fn test_transfer_symlink() {
 }
 
 #[tokio::test]
+async fn test_transfer_many_small_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create 100 small files.
+    for i in 0..100 {
+        let content = format!("file number {i}\n");
+        std::fs::write(src.join(format!("f_{i:03}.txt")), content.as_bytes()).unwrap();
+    }
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    for i in 0..100 {
+        let expected = format!("file number {i}\n");
+        let actual = std::fs::read(dst.join(format!("f_{i:03}.txt"))).unwrap();
+        assert_eq!(actual, expected.as_bytes(), "mismatch for f_{i:03}.txt");
+    }
+}
+
+#[tokio::test]
+async fn test_transfer_many_files_delta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // Create basis files at dest and modified versions at source.
+    for i in 0..30 {
+        let mut basis = vec![0u8; 4096];
+        for (j, b) in basis.iter_mut().enumerate() {
+            *b = ((i * 7 + j) % 256) as u8;
+        }
+        std::fs::write(dst.join(format!("d_{i:02}.bin")), &basis).unwrap();
+
+        let mut modified = basis;
+        modified[1024] = 0xFF;
+        modified[1025] = 0xFE;
+        std::fs::write(src.join(format!("d_{i:02}.bin")), &modified).unwrap();
+    }
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .checksum_mode(true)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    for i in 0..30 {
+        let mut expected = vec![0u8; 4096];
+        for (j, b) in expected.iter_mut().enumerate() {
+            *b = ((i * 7 + j) % 256) as u8;
+        }
+        expected[1024] = 0xFF;
+        expected[1025] = 0xFE;
+        let actual = std::fs::read(dst.join(format!("d_{i:02}.bin"))).unwrap();
+        assert_eq!(actual, expected, "mismatch for d_{i:02}.bin");
+    }
+}
+
+#[tokio::test]
 async fn test_transfer_special_characters_in_filenames() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");

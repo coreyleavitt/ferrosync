@@ -11,6 +11,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::io::AsyncRead;
 
@@ -322,10 +323,11 @@ impl<T: Transport> SyncSession<T> {
         // Keep streams alive so background_task is not aborted.
         let _streams_guard = streams;
 
+        let fs: Arc<dyn FileSystem> = fs.into();
         if am_sender {
             run_push(reader, writer, &protocol, &options, &*fs, &mut progress).await
         } else {
-            run_pull(reader, writer, &protocol, &options, &*fs, &mut progress).await
+            run_pull(reader, writer, &protocol, &options, fs, &mut progress).await
         }
     }
 }
@@ -485,7 +487,7 @@ async fn run_pull(
     writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     protocol: &NegotiatedProtocol,
     options: &TransferOptions,
-    fs: &dyn FileSystem,
+    fs: Arc<dyn FileSystem>,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
@@ -551,20 +553,23 @@ async fn run_pull(
             }
         }
     } else {
-        // Receiver loop via wire_transfer.
-        let file_ops = LocalFileOps::new(fs, &dest, options);
+        // Pipelined receiver loop: generator and receiver run concurrently.
+        let file_ops: Arc<dyn wire_transfer::FileOps> =
+            Arc::new(LocalFileOps::new(Arc::clone(&fs), dest.clone(), options.clone()));
 
-        wire_transfer::receiver_loop(
-            &mut demux_read,
-            &mut mplex_out,
+        let (dr, mo) = wire_transfer::receiver_loop_pipelined(
+            demux_read,
+            mplex_out,
             &entries,
             &entry_ndx,
-            &file_ops,
+            file_ops,
             protocol,
             &mut stats,
             progress,
         )
         .await?;
+        demux_read = dr;
+        mplex_out = mo;
 
         // Handle symlinks (after file transfers).
         for entry in &entries {

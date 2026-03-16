@@ -173,6 +173,89 @@ pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
     Ok(output)
 }
 
+/// Receive tokens and reconstruct a file, writing output to a writer.
+///
+/// Same delta reconstruction as [`recv_file_delta`] but writes data
+/// incrementally to `writer` instead of buffering in memory. The file
+/// checksum is computed incrementally as data is written.
+///
+/// Returns the number of bytes written.
+pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
+    r: &mut R,
+    basis_data: &[u8],
+    blength: usize,
+    _seed: i32,
+    checksum_type: ChecksumType,
+    writer: &mut W,
+) -> Result<u64> {
+    let mut hasher = checksum::IncrementalChecksum::new(checksum_type);
+    let mut bytes_written = 0u64;
+
+    let block_count = if blength > 0 && !basis_data.is_empty() {
+        basis_data.len().div_ceil(blength)
+    } else {
+        0
+    };
+    #[allow(clippy::manual_is_multiple_of)]
+    let remainder = if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
+        basis_data.len() % blength
+    } else {
+        blength
+    };
+
+    loop {
+        match token::recv_token(r).await? {
+            Token::Data(data) => {
+                hasher.update(&data);
+                writer.write_all(&data).map_err(|e| {
+                    ProtocolError::Io(std::sync::Arc::new(e))
+                })?;
+                bytes_written += data.len() as u64;
+            }
+            Token::BlockMatch(idx) => {
+                let idx = idx as usize;
+                let offset = idx * blength;
+                let len = if block_count > 0
+                    && idx == block_count - 1
+                    && remainder > 0
+                    && remainder < blength
+                {
+                    remainder
+                } else {
+                    blength
+                };
+                let end = (offset + len).min(basis_data.len());
+                if offset < basis_data.len() {
+                    let slice = &basis_data[offset..end];
+                    hasher.update(slice);
+                    writer.write_all(slice).map_err(|e| {
+                        ProtocolError::Io(std::sync::Arc::new(e))
+                    })?;
+                    bytes_written += slice.len() as u64;
+                }
+            }
+            Token::EndOfFile => break,
+        }
+    }
+
+    // Read and verify file-level checksum.
+    let digest_len = checksum_type.digest_len();
+    let mut received_checksum = vec![0u8; digest_len];
+    r.read_exact(&mut received_checksum)
+        .await
+        .map_err(ProtocolError::from)?;
+
+    let computed_checksum = hasher.finalize();
+    if received_checksum != computed_checksum {
+        return Err(ProtocolError::ChecksumMismatch {
+            expected: hex_encode(&received_checksum),
+            actual: hex_encode(&computed_checksum),
+        });
+    }
+
+    Ok(bytes_written)
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut s, b| {
@@ -333,5 +416,145 @@ mod tests {
         let mut cursor = Cursor::new(&buf);
         let idx = recv_file_index(&mut cursor).await.unwrap();
         assert_eq!(idx, None);
+    }
+
+    #[tokio::test]
+    async fn test_recv_file_delta_to_writer_new_file() {
+        let source = b"hello world, this is new data!";
+        let seed = 42;
+        let sums = sum::compute_signatures(
+            b"",
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
+
+        let mut buf = Vec::new();
+        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let idx = recv_file_index(&mut cursor).await.unwrap();
+        assert_eq!(idx, Some(0));
+
+        let blength = if sums.head.blength > 0 {
+            sums.head.blength as usize
+        } else {
+            700
+        };
+
+        let mut output = Vec::new();
+        let bytes = recv_file_delta_to_writer(
+            &mut cursor,
+            b"",
+            blength,
+            seed,
+            ChecksumType::Md5,
+            &mut output,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output, source);
+        assert_eq!(bytes, source.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn test_recv_file_delta_to_writer_modified_file() {
+        let mut basis = vec![0u8; 5000];
+        for (i, b) in basis.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
+        }
+        let mut source = basis.clone();
+        source[2500] = 0xFF;
+        source[2501] = 0xFF;
+
+        let seed = 7;
+        let sums = sum::compute_signatures(
+            &basis,
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
+
+        let mut buf = Vec::new();
+        sender::send_file_delta_with_sums(&mut buf, 3, &source, &sums, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
+
+        let mut cursor = Cursor::new(&buf);
+        let idx = recv_file_index(&mut cursor).await.unwrap();
+        assert_eq!(idx, Some(3));
+
+        let blength = if sums.head.blength > 0 {
+            sums.head.blength as usize
+        } else {
+            700
+        };
+
+        let mut output = Vec::new();
+        recv_file_delta_to_writer(
+            &mut cursor,
+            &basis,
+            blength,
+            seed,
+            ChecksumType::Md5,
+            &mut output,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output, source);
+    }
+
+    #[tokio::test]
+    async fn test_recv_file_delta_to_writer_matches_buffered() {
+        // Verify streaming and buffered paths produce identical results.
+        let source = b"data that exercises both code paths for correctness";
+        let seed = 99;
+        let sums = sum::compute_signatures(
+            b"",
+            seed,
+            ChecksumType::Blake3,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
+
+        let mut buf = Vec::new();
+        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, seed, ChecksumType::Blake3)
+            .await
+            .unwrap();
+
+        // Buffered path.
+        let mut cursor1 = Cursor::new(&buf);
+        let _ = recv_file_index(&mut cursor1).await.unwrap();
+        let blength = if sums.head.blength > 0 {
+            sums.head.blength as usize
+        } else {
+            700
+        };
+        let buffered = recv_file_delta(&mut cursor1, b"", blength, seed, ChecksumType::Blake3)
+            .await
+            .unwrap();
+
+        // Streaming path.
+        let mut cursor2 = Cursor::new(&buf);
+        let _ = recv_file_index(&mut cursor2).await.unwrap();
+        let mut streamed = Vec::new();
+        recv_file_delta_to_writer(
+            &mut cursor2,
+            b"",
+            blength,
+            seed,
+            ChecksumType::Blake3,
+            &mut streamed,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(buffered, streamed);
     }
 }
