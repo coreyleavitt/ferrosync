@@ -24,6 +24,13 @@ use ferrosync_core::transport::ssh::{KnownHostsPolicy, SshTransport, SshTranspor
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+}
+
 fn ssh_test_enabled() -> bool {
     std::env::var("FERROSYNC_SSH_TEST").map_or(false, |v| v == "1")
 }
@@ -38,6 +45,7 @@ macro_rules! skip_if_no_ssh {
             eprintln!("skipping: FERROSYNC_SSH_TEST not set");
             return;
         }
+        init_tracing();
     };
 }
 
