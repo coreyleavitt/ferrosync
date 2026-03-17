@@ -76,4 +76,4 @@ ferrosync-core = { path = "crates/ferrosync-core" }
 # Grows the working set on demand instead of failing.
 # Upstream issue: https://github.com/Eugeny/russh/issues/504
 [patch.crates-io]
-russh-cryptovec = { git = "https://github.com/coreyleavitt/russh.git", rev = "69b35fd" }
+russh-cryptovec = { git = "https://github.com/coreyleavitt/russh.git", rev = "2641081" }
