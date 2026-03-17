@@ -1015,7 +1015,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "ferrosync-cli"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "clap",
  "ferrosync-core",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "ferrosync-core"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "blake3",
  "bytes",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "ferrosync-py"
-version = "0.3.0-beta.2"
+version = "0.3.0-beta.3"
 dependencies = [
  "ferrosync-core",
  "pyo3",
