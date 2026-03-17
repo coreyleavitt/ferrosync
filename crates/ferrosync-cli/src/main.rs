@@ -769,60 +769,11 @@ fn create_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Windows: increase working set so VirtualLock succeeds
-// ---------------------------------------------------------------------------
-
-/// Increase the process working set on Windows so that `VirtualLock` calls
-/// (used by russh-cryptovec to keep SSH key material out of the page file)
-/// do not fail with `ERROR_WORKING_SET_QUOTA` (0x5ad).
-///
-/// The default minimum working set (~200 KB on 4 KB pages) leaves almost no
-/// headroom for locked pages. We add 2 MB, which comfortably covers the
-/// crypto buffers russh allocates during an SSH session.
-#[cfg(windows)]
-fn raise_working_set() {
-    use windows_sys::Win32::System::Memory::{
-        GetProcessWorkingSetSizeEx, SetProcessWorkingSetSizeEx,
-        QUOTA_LIMITS_HARDWS_MIN_ENABLE,
-    };
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-    const EXTRA: usize = 2 * 1024 * 1024; // 2 MB
-
-    unsafe {
-        let handle = GetCurrentProcess();
-        let mut min_ws: usize = 0;
-        let mut max_ws: usize = 0;
-        let mut flags: u32 = 0;
-
-        if GetProcessWorkingSetSizeEx(handle, &mut min_ws, &mut max_ws, &mut flags) == 0 {
-            eprintln!("warning: GetProcessWorkingSetSizeEx failed");
-            return;
-        }
-
-        let new_min = min_ws + EXTRA;
-        let new_max = max_ws.max(new_min + EXTRA);
-        let new_flags = flags | QUOTA_LIMITS_HARDWS_MIN_ENABLE;
-
-        if SetProcessWorkingSetSizeEx(handle, new_min, new_max, new_flags) == 0 {
-            // Fall back without the hard-min flag (requires SeLockMemoryPrivilege).
-            if SetProcessWorkingSetSizeEx(handle, new_min, new_max, flags) == 0 {
-                eprintln!("warning: SetProcessWorkingSetSizeEx failed");
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    #[cfg(windows)]
-    raise_working_set();
-
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

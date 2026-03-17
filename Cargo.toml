@@ -71,3 +71,9 @@ tokio-test = "0.4"
 
 # Internal crates
 ferrosync-core = { path = "crates/ferrosync-core" }
+
+# Patch russh-cryptovec to fix VirtualLock ERROR_WORKING_SET_QUOTA on Windows.
+# Grows the working set on demand instead of failing.
+# Upstream issue: https://github.com/Eugeny/russh/issues/504
+[patch.crates-io]
+russh-cryptovec = { git = "https://github.com/coreyleavitt/russh.git", rev = "ec0a7e4" }

@@ -1022,7 +1022,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2848,8 +2847,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fb0ed583ff0f6b4aa44c7867dd7108df01b30571ee9423e250b4cc939f8c6cf"
+source = "git+https://github.com/coreyleavitt/russh.git?rev=ec0a7e4#ec0a7e4d2cad159091a3c2879585a5038af5fdae"
 dependencies = [
  "libc",
  "log",
