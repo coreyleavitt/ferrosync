@@ -2847,7 +2847,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.52.0"
-source = "git+https://github.com/coreyleavitt/russh.git?rev=ec0a7e4#ec0a7e4d2cad159091a3c2879585a5038af5fdae"
+source = "git+https://github.com/coreyleavitt/russh.git?rev=69b35fd#69b35fd3b67c736f576fea2fabd1afb4518e0941"
 dependencies = [
  "libc",
  "log",
