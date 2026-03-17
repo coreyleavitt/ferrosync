@@ -589,7 +589,7 @@ mod tests {
             rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).expect("gen");
 
         let cert_pem = key_pair.cert.pem().into_bytes();
-        let key_pem = key_pair.key_pair.serialize_pem().into_bytes();
+        let key_pem = key_pair.signing_key.serialize_pem().into_bytes();
 
         let config = TlsDaemonConfig {
             client_cert: Some(cert_pem),
