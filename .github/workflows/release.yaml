@@ -152,9 +152,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: ferrosync-macos-aarch64
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: ferrosync-macos-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: ferrosync-windows-x86_64
