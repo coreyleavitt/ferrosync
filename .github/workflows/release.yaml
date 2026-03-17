@@ -4,15 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Version bump type'
+        description: 'Version bump type (use "none" to only increment prerelease number)'
         required: true
         type: choice
         options:
+          - none
           - patch
           - minor
           - major
+          - stable
       prerelease:
-        description: 'Prerelease label (or none for stable)'
+        description: 'Prerelease label (or none for stable release)'
         required: true
         default: 'no'
         type: choice
@@ -50,37 +52,44 @@ jobs:
           CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "Current version: $CURRENT"
 
-          # Strip any existing prerelease/build suffix for bumping.
+          # Parse current version.
           BASE=$(echo "$CURRENT" | sed 's/-.*//')
           MAJOR=$(echo "$BASE" | cut -d. -f1)
           MINOR=$(echo "$BASE" | cut -d. -f2)
           PATCH=$(echo "$BASE" | cut -d. -f3)
+          CURRENT_PRE_TYPE=$(echo "$CURRENT" | sed -n 's/.*-\([a-z]*\)\.\([0-9]*\)$/\1/p')
+          CURRENT_PRE_NUM=$(echo "$CURRENT" | sed -n 's/.*-\([a-z]*\)\.\([0-9]*\)$/\2/p')
 
-          # Apply bump.
+          # Validate inputs.
+          if [ "$BUMP" = "none" ] && [ "$PRERELEASE" = "no" ]; then
+            echo "::error::bump=none requires a prerelease label"
+            exit 1
+          fi
+          if [ "$BUMP" = "stable" ] && [ -z "$CURRENT_PRE_TYPE" ]; then
+            echo "::error::bump=stable requires a current prerelease version"
+            exit 1
+          fi
+
+          # Apply version bump.
           case "$BUMP" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
             patch) PATCH=$((PATCH + 1)) ;;
+            stable|none) ;; # keep base version as-is
           esac
 
           VERSION="${MAJOR}.${MINOR}.${PATCH}"
 
           # Apply prerelease suffix.
-          if [ "$PRERELEASE" != "no" ]; then
-            # Check if current version already has this prerelease type.
-            CURRENT_PRE=$(echo "$CURRENT" | sed -n 's/.*-\([a-z]*\)\.\{0,1\}\([0-9]*\)$/\1 \2/p')
-            CURRENT_PRE_TYPE=$(echo "$CURRENT_PRE" | cut -d' ' -f1)
-            CURRENT_PRE_NUM=$(echo "$CURRENT_PRE" | cut -d' ' -f2)
-
-            if [ "$CURRENT_PRE_TYPE" = "$PRERELEASE" ] && [ "${MAJOR}.${MINOR}.${PATCH}" = "$(echo "$CURRENT" | sed 's/-.*//')" ] && [ "$BUMP" = "patch" ]; then
-              # Same base + same prerelease type + patch bump = increment prerelease number.
-              PATCH=$(echo "$CURRENT" | sed 's/-.*//' | cut -d. -f3)
-              VERSION="${MAJOR}.${MINOR}.${PATCH}"
-              PRE_NUM=$((${CURRENT_PRE_NUM:-0} + 1))
-            else
-              PRE_NUM=1
-            fi
+          if [ "$BUMP" = "stable" ] || [ "$PRERELEASE" = "no" ]; then
+            : # stable release, no suffix
+          elif [ "$BUMP" = "none" ] && [ "$CURRENT_PRE_TYPE" = "$PRERELEASE" ]; then
+            # Same prerelease type, just increment the number.
+            PRE_NUM=$((${CURRENT_PRE_NUM:-0} + 1))
             VERSION="${VERSION}-${PRERELEASE}.${PRE_NUM}"
+          else
+            # New prerelease series.
+            VERSION="${VERSION}-${PRERELEASE}.1"
           fi
 
           echo "New version: $VERSION"
@@ -155,8 +164,9 @@ jobs:
         with:
           ref: ${{ needs.prepare-version.outputs.commit_sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.94.0"
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
