@@ -778,15 +778,17 @@ fn create_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
 /// do not fail with `ERROR_WORKING_SET_QUOTA` (0x5ad).
 ///
 /// The default minimum working set (~200 KB on 4 KB pages) leaves almost no
-/// headroom for locked pages.  We add 512 KB, which comfortably covers the
-/// handful of small crypto buffers russh allocates during an SSH session.
+/// headroom for locked pages. We add 2 MB, which comfortably covers the
+/// crypto buffers russh allocates during an SSH session.
 #[cfg(windows)]
 fn raise_working_set() {
-    use windows_sys::Win32::System::Memory::GetProcessWorkingSetSizeEx;
-    use windows_sys::Win32::System::Memory::SetProcessWorkingSetSizeEx;
+    use windows_sys::Win32::System::Memory::{
+        GetProcessWorkingSetSizeEx, SetProcessWorkingSetSizeEx,
+        QUOTA_LIMITS_HARDWS_MIN_ENABLE,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
-    const EXTRA: usize = 512 * 1024;
+    const EXTRA: usize = 2 * 1024 * 1024; // 2 MB
 
     unsafe {
         let handle = GetCurrentProcess();
@@ -795,12 +797,20 @@ fn raise_working_set() {
         let mut flags: u32 = 0;
 
         if GetProcessWorkingSetSizeEx(handle, &mut min_ws, &mut max_ws, &mut flags) == 0 {
+            eprintln!("warning: GetProcessWorkingSetSizeEx failed");
             return;
         }
 
         let new_min = min_ws + EXTRA;
         let new_max = max_ws.max(new_min + EXTRA);
-        let _ = SetProcessWorkingSetSizeEx(handle, new_min, new_max, flags);
+        let new_flags = flags | QUOTA_LIMITS_HARDWS_MIN_ENABLE;
+
+        if SetProcessWorkingSetSizeEx(handle, new_min, new_max, new_flags) == 0 {
+            // Fall back without the hard-min flag (requires SeLockMemoryPrivilege).
+            if SetProcessWorkingSetSizeEx(handle, new_min, new_max, flags) == 0 {
+                eprintln!("warning: SetProcessWorkingSetSizeEx failed");
+            }
+        }
     }
 }
 
