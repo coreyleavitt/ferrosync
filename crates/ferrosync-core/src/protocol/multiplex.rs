@@ -312,13 +312,23 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
 // ---------------------------------------------------------------------------
 
 /// Multiplexes messages onto an rsync output stream.
+///
+/// Wraps the underlying writer in a `BufWriter` to coalesce small writes
+/// (e.g., per-token delta data) into larger TCP segments. Data is only
+/// pushed to the transport on explicit `flush()` calls.
 pub struct MplexWriter<W> {
-    inner: W,
+    inner: tokio::io::BufWriter<W>,
 }
+
+/// Write buffer size for the multiplexer. Two DATA_CHUNK_SIZE frames fit
+/// comfortably, allowing multiple messages to coalesce before flushing.
+const MPLEX_BUF_SIZE: usize = DATA_CHUNK_SIZE * 2;
 
 impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     pub fn new(inner: W) -> Self {
-        Self { inner }
+        Self {
+            inner: tokio::io::BufWriter::with_capacity(MPLEX_BUF_SIZE, inner),
+        }
     }
 
     /// Write a multiplexed message with the given code and payload.
@@ -380,7 +390,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
 
     /// Consume the writer and return the inner stream.
     pub fn into_inner(self) -> W {
-        self.inner
+        self.inner.into_inner()
     }
 
     /// Shut down the underlying writer (send EOF).
@@ -575,6 +585,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut writer = MplexWriter::new(&mut buf);
         writer.write_data(b"hello world").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
         match reader.read_message().await.unwrap() {
@@ -588,6 +600,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut writer = MplexWriter::new(&mut buf);
         writer.write_info("test message").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
         match reader.read_message().await.unwrap() {
@@ -601,6 +615,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut writer = MplexWriter::new(&mut buf);
         writer.write_error("something failed").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
         match reader.read_message().await.unwrap() {
@@ -625,6 +641,8 @@ mod tests {
             let mut buf = Vec::new();
             let mut writer = MplexWriter::new(&mut buf);
             writer.write_index(code, idx).await.unwrap();
+            writer.flush().await.unwrap();
+            drop(writer);
 
             let mut reader = MplexReader::new(Cursor::new(&buf));
             let msg = reader.read_message().await.unwrap();
@@ -646,6 +664,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut writer = MplexWriter::new(&mut buf);
         writer.write_data(&payload).await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
 
@@ -670,6 +690,8 @@ mod tests {
         writer.write_data(b"part1").await.unwrap();
         writer.write_info("progress: 50%").await.unwrap();
         writer.write_data(b"part2").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
 
@@ -694,6 +716,8 @@ mod tests {
 
         writer.write_info("skip me").await.unwrap();
         writer.write_data(b"the data").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
         let mut data_buf = [0u8; 64];
@@ -719,6 +743,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut writer = MplexWriter::new(&mut buf);
         writer.write_data(b"hello world!").await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
 
@@ -744,6 +770,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut writer = MplexWriter::new(&mut buf);
         writer.write_message(MsgCode::Noop, &[]).await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
 
         let mut reader = MplexReader::new(Cursor::new(&buf));
         match reader.read_message().await.unwrap() {
