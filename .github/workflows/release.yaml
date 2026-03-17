@@ -36,7 +36,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       commit_sha: ${{ steps.version.outputs.commit_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -151,7 +151,7 @@ jobs:
             artifact: ferrosync-windows-x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare-version.outputs.commit_sha }}
 
@@ -182,7 +182,7 @@ jobs:
           (Get-FileHash ${{ matrix.artifact }}.zip -Algorithm SHA256).Hash.ToLower() + "  ${{ matrix.artifact }}.zip" | Out-File -Encoding ascii ${{ matrix.artifact }}.zip.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -196,7 +196,7 @@ jobs:
     needs: [prepare-version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
