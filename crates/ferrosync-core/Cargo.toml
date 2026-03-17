@@ -12,7 +12,6 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-fast_rsync = { workspace = true }
 fastcdc = { workspace = true }
 md-5 = { workspace = true }
 md4 = { workspace = true }

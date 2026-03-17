@@ -24,7 +24,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Delta algorithm
-fast_rsync = "0.2"
 fastcdc = "3"
 
 # Hashing
