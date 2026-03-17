@@ -36,7 +36,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Compression
 flate2 = "1"
 zstd = "0.13"
-lz4_flex = "0.11"
+lz4_flex = "0.13"
 
 # SSH transport (native, pure Rust)
 russh = "0.57"
@@ -46,15 +46,15 @@ ssh2-config = "0.7"
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 rustls-pki-types = "1"
 
 # Noise protocol
-snow = "0.9"
+snow = "0.10"
 
 # QUIC transport
 quinn = "0.11"
-rcgen = "0.13"
+rcgen = "0.14"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -63,7 +63,7 @@ clap = { version = "4", features = ["derive"] }
 pyo3 = { version = "0.28", features = ["extension-module"] }
 
 # Benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # Testing
 tempfile = "3"

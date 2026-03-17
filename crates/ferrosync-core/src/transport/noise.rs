@@ -453,14 +453,31 @@ impl NoiseDaemonTransport {
                 message: format!("invalid Noise protocol name: {e}"),
             }
         })?)
-        .local_private_key(&config.local_private_key);
+        .local_private_key(&config.local_private_key)
+        .map_err(|e| TransportError::ConnectionFailed {
+            message: format!("Noise key setup failed: {e}"),
+        })?;
 
         if let Some(ref remote_pk) = config.remote_public_key {
-            builder = builder.remote_public_key(remote_pk);
+            builder = builder.remote_public_key(remote_pk).map_err(|e| {
+                TransportError::ConnectionFailed {
+                    message: format!("Noise remote key setup failed: {e}"),
+                }
+            })?;
         }
 
         if let Some(ref psk) = config.psk {
-            builder = builder.psk(0, psk);
+            let psk_array: &[u8; 32] =
+                psk.as_slice()
+                    .try_into()
+                    .map_err(|_| TransportError::ConnectionFailed {
+                        message: "Noise PSK must be exactly 32 bytes".to_string(),
+                    })?;
+            builder = builder
+                .psk(0, psk_array)
+                .map_err(|e| TransportError::ConnectionFailed {
+                    message: format!("Noise PSK setup failed: {e}"),
+                })?;
         }
 
         let mut handshake =
@@ -616,6 +633,7 @@ mod tests {
         let (private_key, _public_key) = generate_keypair().unwrap();
         let result = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
             .local_private_key(&private_key)
+            .unwrap()
             .build_initiator();
         assert!(result.is_ok());
     }
@@ -627,7 +645,9 @@ mod tests {
 
         let result = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
+            .unwrap()
             .remote_public_key(&remote_pub)
+            .unwrap()
             .build_initiator();
         assert!(result.is_ok());
     }
@@ -641,11 +661,13 @@ mod tests {
 
         let mut initiator = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
+            .unwrap()
             .build_initiator()
             .unwrap();
 
         let mut responder = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
             .local_private_key(&resp_priv)
+            .unwrap()
             .build_responder()
             .unwrap();
 
@@ -690,12 +712,15 @@ mod tests {
 
         let mut initiator = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
+            .unwrap()
             .remote_public_key(&resp_pub)
+            .unwrap()
             .build_initiator()
             .unwrap();
 
         let mut responder = Builder::new(NoisePattern::IK.protocol_name().parse().unwrap())
             .local_private_key(&resp_priv)
+            .unwrap()
             .build_responder()
             .unwrap();
 
@@ -734,6 +759,7 @@ mod tests {
 
             let mut responder = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
                 .local_private_key(&resp_priv)
+                .unwrap()
                 .build_responder()
                 .unwrap();
 
@@ -764,6 +790,7 @@ mod tests {
 
         let mut initiator = Builder::new(NoisePattern::XX.protocol_name().parse().unwrap())
             .local_private_key(&init_priv)
+            .unwrap()
             .build_initiator()
             .unwrap();
 

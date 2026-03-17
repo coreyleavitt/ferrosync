@@ -331,7 +331,7 @@ mod tests {
 
         let cert_der = rustls::pki_types::CertificateDer::from(certified_key.cert.der().to_vec());
         let key_der =
-            rustls::pki_types::PrivatePkcs8KeyDer::from(certified_key.key_pair.serialize_der());
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certified_key.signing_key.serialize_der());
 
         // Set up server config with explicit crypto provider.
         let provider = Arc::new(rustls::crypto::ring::default_provider());
