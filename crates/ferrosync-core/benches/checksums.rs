@@ -1,7 +1,17 @@
 //! Benchmarks for checksum algorithms: MD4, MD5, BLAKE3, XXH3, XXH128.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use ferrosync_core::delta::ProtocolContext;
 use ferrosync_core::protocol::handshake::ChecksumType;
+
+fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {
+    ProtocolContext {
+        seed,
+        checksum_type: ct,
+        char_offset: 0,
+        proper_seed_order: true,
+    }
+}
 
 fn generate_data(size: usize) -> Vec<u8> {
     (0..size)
@@ -33,7 +43,7 @@ fn bench_checksum2(c: &mut Criterion) {
 
         for &(name, alg) in &algorithms {
             group.bench_with_input(BenchmarkId::new(name, size), &data, |b, data| {
-                b.iter(|| ferrosync_core::delta::checksum::checksum2(data, 42, alg, true));
+                b.iter(|| ferrosync_core::delta::checksum::checksum2(data, &ctx(42, alg)));
             });
         }
     }
@@ -60,7 +70,7 @@ fn bench_file_checksum(c: &mut Criterion) {
 
         for &(name, alg) in &algorithms {
             group.bench_with_input(BenchmarkId::new(name, size), &data, |b, data| {
-                b.iter(|| ferrosync_core::delta::checksum::file_checksum(data, 42, alg));
+                b.iter(|| ferrosync_core::delta::checksum::file_checksum(data, &ctx(42, alg)));
             });
         }
     }
