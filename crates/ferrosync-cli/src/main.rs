@@ -597,13 +597,16 @@ async fn run_sync(
             };
             let opts = flags.into_transfer_options(source, dest);
             let mut progress = build_progress_tracker(verbose);
-            let seed = 0; // No wire handshake, use deterministic seed.
-            let checksum_type = ferrosync_core::protocol::handshake::ChecksumType::Blake3;
+            let ctx = ferrosync_core::delta::ProtocolContext {
+                seed: 0, // No wire handshake, use deterministic seed.
+                checksum_type: ferrosync_core::protocol::handshake::ChecksumType::Blake3,
+                char_offset: 0,
+                proper_seed_order: true,
+            };
             let result = ferrosync_core::engine::transfer::execute_transfer(
                 &*fs,
                 &opts,
-                seed,
-                checksum_type,
+                &ctx,
                 &mut progress,
             )
             .await?;
