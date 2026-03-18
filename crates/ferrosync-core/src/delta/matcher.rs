@@ -1,40 +1,42 @@
 //! Block matching algorithm for delta transfer.
 //!
 //! Given a set of block signatures from the basis file and the source file
-//! data, the matcher finds matching blocks and emits a sequence of match
-//! and literal-data operations.
+//! data, the matcher finds matching blocks and emits a sequence of
+//! algorithm-agnostic diff operations.
 //!
 //! The algorithm:
 //! 1. Build a hash table from the rolling checksums of the basis blocks.
 //! 2. Slide a window over the source data, computing the rolling checksum.
 //! 3. On a hash table hit, verify with the strong checksum.
-//! 4. Emit `BlockMatch` for verified matches, `Data` for unmatched regions.
+//! 4. Emit `Copy(BasisRef)` for verified matches, `Literal` for unmatched regions.
 
 use std::collections::HashMap;
 use std::io::Read;
 
 use super::checksum::{self, RollingChecksum};
+use super::ops::{BasisRef, DiffOp, OwnedDiffOp};
 use super::sum::SumStruct;
 use crate::delta::ProtocolContext;
 
-/// An operation emitted by the block matcher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MatchOp<'a> {
-    /// Literal data (bytes from source that don't match any basis block).
-    Data(&'a [u8]),
-    /// Matched block (index into the basis file's block signatures).
-    BlockMatch(i32),
+/// Compute the byte length of a matched block, accounting for a shorter
+/// last block when the basis size is not a multiple of the block length.
+fn block_byte_length(idx: usize, blength: usize, block_count: usize, remainder: usize) -> u32 {
+    if block_count > 0 && idx == block_count - 1 && remainder > 0 && remainder < blength {
+        remainder as u32
+    } else {
+        blength as u32
+    }
 }
 
 /// Find matching blocks between source data and basis file signatures.
 ///
-/// Returns a sequence of `MatchOp` values representing the delta between
+/// Returns a sequence of [`DiffOp`] values representing the delta between
 /// the basis (described by `sums`) and the `source` data.
 pub fn match_blocks<'a>(
     source: &'a [u8],
     sums: &SumStruct,
     ctx: &ProtocolContext,
-) -> Vec<MatchOp<'a>> {
+) -> Vec<DiffOp<'a>> {
     let mut ops = Vec::new();
 
     if source.is_empty() {
@@ -42,12 +44,14 @@ pub fn match_blocks<'a>(
     }
 
     if sums.head.count <= 0 || sums.head.blength <= 0 {
-        ops.push(MatchOp::Data(source));
+        ops.push(DiffOp::Literal(source));
         return ops;
     }
 
     let blength = sums.head.blength as usize;
     let s2length = sums.head.s2length as usize;
+    let block_count = sums.head.count as usize;
+    let remainder = sums.head.remainder as usize;
 
     let hash_table = build_hash_table(&sums.sums);
     let mut rolling = RollingChecksum::new(ctx.char_offset);
@@ -56,7 +60,7 @@ pub fn match_blocks<'a>(
 
     // Need at least blength bytes for a full block scan.
     if source.len() < blength {
-        ops.push(MatchOp::Data(source));
+        ops.push(DiffOp::Literal(source));
         return ops;
     }
 
@@ -80,9 +84,14 @@ pub fn match_blocks<'a>(
                 if sums.sums[idx].sum2 == strong_truncated {
                     // Flush pending literal data.
                     if literal_start < pos {
-                        ops.push(MatchOp::Data(&source[literal_start..pos]));
+                        ops.push(DiffOp::Literal(&source[literal_start..pos]));
                     }
-                    ops.push(MatchOp::BlockMatch(idx as i32));
+                    let block_offset = (idx as u64) * (blength as u64);
+                    let block_len = block_byte_length(idx, blength, block_count, remainder);
+                    ops.push(DiffOp::Copy(BasisRef {
+                        offset: block_offset,
+                        length: block_len,
+                    }));
                     pos += blength;
                     literal_start = pos;
                     matched = true;
@@ -107,7 +116,7 @@ pub fn match_blocks<'a>(
 
     // Flush remaining literal data.
     if literal_start < source.len() {
-        ops.push(MatchOp::Data(&source[literal_start..]));
+        ops.push(DiffOp::Literal(&source[literal_start..]));
     }
 
     ops
@@ -122,60 +131,6 @@ fn build_hash_table(sums: &[super::sum::SumEntry]) -> HashMap<u32, Vec<usize>> {
     table
 }
 
-/// Apply a sequence of match operations to reconstruct a file from the
-/// basis data.
-pub fn apply_ops(basis: &[u8], ops: &[MatchOp<'_>], blength: usize, remainder: usize) -> Vec<u8> {
-    let mut output = Vec::new();
-    let block_count = if blength > 0 && !basis.is_empty() {
-        basis.len().div_ceil(blength)
-    } else {
-        0
-    };
-
-    for op in ops {
-        match op {
-            MatchOp::Data(data) => {
-                output.extend_from_slice(data);
-            }
-            MatchOp::BlockMatch(idx) => {
-                let idx = *idx as usize;
-                if idx >= block_count || blength == 0 {
-                    continue;
-                }
-                let offset = idx * blength;
-                let len = if block_count > 0
-                    && idx == block_count - 1
-                    && remainder > 0
-                    && remainder < blength
-                {
-                    remainder
-                } else {
-                    blength
-                };
-                let end = (offset + len).min(basis.len());
-                if offset < basis.len() {
-                    output.extend_from_slice(&basis[offset..end]);
-                }
-            }
-        }
-    }
-
-    output
-}
-
-/// An owned match operation for streaming delta generation.
-///
-/// Unlike [`MatchOp`] which borrows data from a source slice, `OwnedMatchOp`
-/// owns its literal data, making it suitable for use across chunk boundaries
-/// in streaming mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OwnedMatchOp {
-    /// Literal data (bytes from source that don't match any basis block).
-    Data(Vec<u8>),
-    /// Matched block (index into the basis file's block signatures).
-    BlockMatch(i32),
-}
-
 /// Default chunk size for streaming matching (256 KiB).
 pub const DEFAULT_STREAM_CHUNK: usize = 256 * 1024;
 
@@ -183,7 +138,7 @@ pub const DEFAULT_STREAM_CHUNK: usize = 256 * 1024;
 ///
 /// Unlike [`match_blocks`] which requires the entire source in memory,
 /// `StreamingMatcher` reads from a [`Read`] source in chunks, emitting
-/// match operations as they are discovered. The rolling checksum state
+/// diff operations as they are discovered. The rolling checksum state
 /// carries across chunk boundaries, producing identical results to the
 /// batch algorithm.
 pub struct StreamingMatcher {
@@ -192,6 +147,8 @@ pub struct StreamingMatcher {
     sum2_entries: Vec<Vec<u8>>,
     blength: usize,
     s2length: usize,
+    block_count: usize,
+    remainder: usize,
     ctx: ProtocolContext,
     chunk_size: usize,
     no_sums: bool,
@@ -221,6 +178,8 @@ impl StreamingMatcher {
             sums.head.blength as usize
         };
         let s2length = sums.head.s2length as usize;
+        let block_count = sums.head.count as usize;
+        let remainder = sums.head.remainder as usize;
         let hash_table = build_hash_table(&sums.sums);
         let sum2_entries: Vec<Vec<u8>> = sums.sums.iter().map(|e| e.sum2.clone()).collect();
 
@@ -233,6 +192,8 @@ impl StreamingMatcher {
             sum2_entries,
             blength,
             s2length,
+            block_count,
+            remainder,
             ctx: *ctx,
             chunk_size,
             no_sums,
@@ -250,7 +211,7 @@ impl StreamingMatcher {
     /// Process the next chunk of source data.
     ///
     /// Reads up to `chunk_size` fresh bytes from `reader`, feeds them into
-    /// `checksum` for whole-file verification, and returns any match
+    /// `checksum` for whole-file verification, and returns any diff
     /// operations discovered in this chunk.
     ///
     /// Returns `(ops, done)` where `done` is true when the reader is
@@ -259,7 +220,7 @@ impl StreamingMatcher {
         &mut self,
         reader: &mut dyn Read,
         checksum: &mut checksum::IncrementalChecksum,
-    ) -> std::io::Result<(Vec<OwnedMatchOp>, bool)> {
+    ) -> std::io::Result<(Vec<OwnedDiffOp>, bool)> {
         let mut ops = Vec::new();
 
         // Step 1: Fill the buffer.
@@ -290,7 +251,7 @@ impl StreamingMatcher {
 
             // Flush any literal data that will be discarded by the shift.
             if self.literal_start < shift_by {
-                ops.push(OwnedMatchOp::Data(
+                ops.push(OwnedDiffOp::Literal(
                     self.buf[self.literal_start..shift_by].to_vec(),
                 ));
                 self.literal_start = shift_by;
@@ -322,13 +283,13 @@ impl StreamingMatcher {
 
         if self.no_sums {
             if self.buf_len > 0 {
-                ops.push(OwnedMatchOp::Data(self.buf[..self.buf_len].to_vec()));
+                ops.push(OwnedDiffOp::Literal(self.buf[..self.buf_len].to_vec()));
             }
             return Ok((ops, self.exhausted));
         }
 
         if self.buf_len < self.blength {
-            ops.push(OwnedMatchOp::Data(self.buf[..self.buf_len].to_vec()));
+            ops.push(OwnedDiffOp::Literal(self.buf[..self.buf_len].to_vec()));
             return Ok((ops, true));
         }
 
@@ -357,11 +318,17 @@ impl StreamingMatcher {
                     if self.sum2_entries[idx] == strong_truncated {
                         // Flush pending literal data.
                         if self.literal_start < self.pos {
-                            ops.push(OwnedMatchOp::Data(
+                            ops.push(OwnedDiffOp::Literal(
                                 self.buf[self.literal_start..self.pos].to_vec(),
                             ));
                         }
-                        ops.push(OwnedMatchOp::BlockMatch(idx as i32));
+                        let block_offset = (idx as u64) * (self.blength as u64);
+                        let block_len =
+                            block_byte_length(idx, self.blength, self.block_count, self.remainder);
+                        ops.push(OwnedDiffOp::Copy(BasisRef {
+                            offset: block_offset,
+                            length: block_len,
+                        }));
                         self.pos += self.blength;
                         self.literal_start = self.pos;
                         matched = true;
@@ -393,7 +360,7 @@ impl StreamingMatcher {
         // Step 5: Final flush or continue.
         if self.exhausted {
             if self.literal_start < self.buf_len {
-                ops.push(OwnedMatchOp::Data(
+                ops.push(OwnedDiffOp::Literal(
                     self.buf[self.literal_start..self.buf_len].to_vec(),
                 ));
             }
@@ -419,6 +386,7 @@ fn read_fill(reader: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::ops::{apply_diffops, apply_owned_diffops};
     use crate::delta::sum::compute_signatures;
     use crate::delta::ProtocolContext;
     use crate::protocol::handshake::ChecksumType;
@@ -436,7 +404,7 @@ mod tests {
 
         let match_count = ops
             .iter()
-            .filter(|op| matches!(op, MatchOp::BlockMatch(_)))
+            .filter(|op| matches!(op, DiffOp::Copy(_)))
             .count();
         assert!(
             match_count > 0,
@@ -446,7 +414,7 @@ mod tests {
         let literal_bytes: usize = ops
             .iter()
             .filter_map(|op| match op {
-                MatchOp::Data(d) => Some(d.len()),
+                DiffOp::Literal(d) => Some(d.len()),
                 _ => None,
             })
             .sum();
@@ -466,14 +434,14 @@ mod tests {
 
         let match_count = ops
             .iter()
-            .filter(|op| matches!(op, MatchOp::BlockMatch(_)))
+            .filter(|op| matches!(op, DiffOp::Copy(_)))
             .count();
         assert_eq!(match_count, 0);
 
         let literal_bytes: usize = ops
             .iter()
             .filter_map(|op| match op {
-                MatchOp::Data(d) => Some(d.len()),
+                DiffOp::Literal(d) => Some(d.len()),
                 _ => None,
             })
             .sum();
@@ -487,12 +455,7 @@ mod tests {
         let sums = compute_signatures(&data, &c);
         let ops = match_blocks(&data, &sums, &c);
 
-        let reconstructed = apply_ops(
-            &data,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_diffops(&data, &ops);
         assert_eq!(reconstructed, data);
     }
 
@@ -510,12 +473,7 @@ mod tests {
         let sums = compute_signatures(&basis, &c);
         let ops = match_blocks(&source, &sums, &c);
 
-        let reconstructed = apply_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -534,7 +492,7 @@ mod tests {
         let sums = compute_signatures(b"", &c);
         let ops = match_blocks(b"hello", &sums, &c);
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], MatchOp::Data(b"hello"));
+        assert_eq!(ops[0], DiffOp::Literal(b"hello"));
     }
 
     #[test]
@@ -544,13 +502,13 @@ mod tests {
         let sums = compute_signatures(&basis, &c);
         let ops = match_blocks(b"tiny", &sums, &c);
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], MatchOp::Data(b"tiny"));
+        assert_eq!(ops[0], DiffOp::Literal(b"tiny"));
     }
 
     #[test]
     fn test_apply_ops_all_literal() {
-        let ops = vec![MatchOp::Data(b"all new data")];
-        let result = apply_ops(b"", &ops, 700, 0);
+        let ops = vec![DiffOp::Literal(b"all new data")];
+        let result = apply_diffops(b"", &ops);
         assert_eq!(result, b"all new data");
     }
 
@@ -569,12 +527,7 @@ mod tests {
         source.extend(&basis[700..]);
 
         let ops = match_blocks(&source, &sums, &c);
-        let reconstructed = apply_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -582,49 +535,12 @@ mod tests {
     // StreamingMatcher tests
     // -----------------------------------------------------------------------
 
-    fn apply_owned_ops(
-        basis: &[u8],
-        ops: &[OwnedMatchOp],
-        blength: usize,
-        remainder: usize,
-    ) -> Vec<u8> {
-        let mut output = Vec::new();
-        let block_count = if blength > 0 && !basis.is_empty() {
-            basis.len().div_ceil(blength)
-        } else {
-            0
-        };
-        for op in ops {
-            match op {
-                OwnedMatchOp::Data(data) => output.extend_from_slice(data),
-                OwnedMatchOp::BlockMatch(idx) => {
-                    let idx = *idx as usize;
-                    let offset = idx * blength;
-                    let len = if block_count > 0
-                        && idx == block_count - 1
-                        && remainder > 0
-                        && remainder < blength
-                    {
-                        remainder
-                    } else {
-                        blength
-                    };
-                    let end = (offset + len).min(basis.len());
-                    if offset < basis.len() {
-                        output.extend_from_slice(&basis[offset..end]);
-                    }
-                }
-            }
-        }
-        output
-    }
-
     fn streaming_match_all(
         source: &[u8],
         sums: &super::super::sum::SumStruct,
         c: &ProtocolContext,
         chunk_size: usize,
-    ) -> Vec<OwnedMatchOp> {
+    ) -> Vec<OwnedDiffOp> {
         use std::io::Cursor;
         let mut cursor = Cursor::new(source);
         let mut matcher = StreamingMatcher::new(sums, c, chunk_size);
@@ -646,12 +562,7 @@ mod tests {
         let data = vec![42u8; 5000];
         let sums = compute_signatures(&data, &c);
         let ops = streaming_match_all(&data, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(
-            &data,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_owned_diffops(&data, &ops);
         assert_eq!(reconstructed, data);
     }
 
@@ -662,12 +573,7 @@ mod tests {
         let source = vec![0xFFu8; 5000];
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_owned_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -684,12 +590,7 @@ mod tests {
 
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_owned_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -699,12 +600,7 @@ mod tests {
         let basis = vec![0u8; 1000];
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(b"", &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_owned_diffops(&basis, &ops);
         assert_eq!(reconstructed, b"");
     }
 
@@ -714,12 +610,7 @@ mod tests {
         let basis = vec![0u8; 5000];
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(b"tiny", &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_owned_diffops(&basis, &ops);
         assert_eq!(reconstructed, b"tiny");
     }
 
@@ -728,7 +619,7 @@ mod tests {
         let c = ctx(0, ChecksumType::Md5);
         let sums = compute_signatures(b"", &c);
         let ops = streaming_match_all(b"hello", &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(b"", &ops, 0, 0);
+        let reconstructed = apply_owned_diffops(b"", &ops);
         assert_eq!(reconstructed, b"hello");
     }
 
@@ -745,11 +636,10 @@ mod tests {
 
         let sums = compute_signatures(&basis, &c);
         let blength = sums.head.blength as usize;
-        let remainder = sums.head.remainder as usize;
 
         for chunk_size in [1024, blength + 1, 256 * 1024] {
             let ops = streaming_match_all(&source, &sums, &c, chunk_size);
-            let reconstructed = apply_owned_ops(&basis, &ops, blength, remainder);
+            let reconstructed = apply_owned_diffops(&basis, &ops);
             assert_eq!(
                 reconstructed, source,
                 "failed with chunk_size={}",
@@ -773,12 +663,7 @@ mod tests {
         source.extend(&basis[700..]);
 
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(
-            &basis,
-            &ops,
-            sums.head.blength as usize,
-            sums.head.remainder as usize,
-        );
+        let reconstructed = apply_owned_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -792,7 +677,7 @@ mod tests {
             .collect();
         let sums = compute_signatures(b"", &c);
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_ops(b"", &ops, 0, 0);
+        let reconstructed = apply_owned_diffops(b"", &ops);
         assert_eq!(reconstructed.len(), source.len());
         assert_eq!(reconstructed, source);
     }

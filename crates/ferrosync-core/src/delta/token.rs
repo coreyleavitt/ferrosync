@@ -25,6 +25,7 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use super::ops::{DiffOp, OwnedDiffOp};
 use crate::error::ProtocolError;
 use crate::protocol::compress::{Compressor, CompressorType, Decompressor};
 use crate::protocol::varint;
@@ -573,6 +574,46 @@ pub async fn recv_token_compressed<R: AsyncRead + Unpin>(
     // TOKEN_LONG: read absolute index.
     let block_index = varint::read_int(r).await?;
     Ok(Token::BlockMatch(block_index))
+}
+
+// ---------------------------------------------------------------------------
+// DiffOp -> wire token helpers
+// ---------------------------------------------------------------------------
+
+/// Write a sequence of borrowed diff operations as rsync wire tokens.
+///
+/// Translates `DiffOp::Copy` back to block indices using `blength`, then
+/// writes uncompressed data/block-match tokens followed by EOF.
+pub async fn write_diffops_as_tokens<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    ops: &[DiffOp<'_>],
+    blength: u32,
+) -> Result<()> {
+    for op in ops {
+        match op {
+            DiffOp::Literal(data) => send_data(w, data).await?,
+            DiffOp::Copy(bref) => send_block_match(w, bref.block_index(blength)).await?,
+        }
+    }
+    send_eof(w).await
+}
+
+/// Write a sequence of owned diff operations as rsync wire tokens.
+///
+/// Same as [`write_diffops_as_tokens`] but for owned operations from
+/// streaming matchers.
+pub async fn write_owned_diffops_as_tokens<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    ops: &[OwnedDiffOp],
+    blength: u32,
+) -> Result<()> {
+    for op in ops {
+        match op {
+            OwnedDiffOp::Literal(data) => send_data(w, data).await?,
+            OwnedDiffOp::Copy(bref) => send_block_match(w, bref.block_index(blength)).await?,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

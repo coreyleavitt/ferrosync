@@ -9,7 +9,8 @@ use std::io::Read;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::delta::checksum;
-use crate::delta::matcher::{self, MatchOp, OwnedMatchOp, StreamingMatcher};
+use crate::delta::matcher::{self, StreamingMatcher};
+use crate::delta::ops::DiffOp;
 use crate::delta::sum::{self, SumStruct};
 use crate::delta::token;
 use crate::delta::ProtocolContext;
@@ -43,7 +44,7 @@ pub async fn send_file_delta<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     varint::write_int(token_writer, file_index).await?;
 
     // Write tokens + checksum.
-    write_tokens_and_checksum(token_writer, &ops, source_data, ctx).await
+    write_tokens_and_checksum(token_writer, &ops, source_data, &sums, ctx).await
 }
 
 /// Signal end of sender output (no more files).
@@ -63,7 +64,7 @@ pub async fn send_file_delta_with_sums<W: AsyncWrite + Unpin>(
 
     varint::write_int(token_writer, file_index).await?;
 
-    write_tokens_and_checksum(token_writer, &ops, source_data, ctx).await
+    write_tokens_and_checksum(token_writer, &ops, source_data, sums, ctx).await
 }
 
 /// Process a single file with compressed token output.
@@ -77,16 +78,17 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
 ) -> Result<()> {
     let sums = sum::read_sums(sig_reader).await?;
     let ops = matcher::match_blocks(source_data, &sums, ctx);
+    let blength = sums.head.blength as u32;
 
     varint::write_int(token_writer, file_index).await?;
 
     for op in &ops {
         match op {
-            MatchOp::Data(data) => {
+            DiffOp::Literal(data) => {
                 token::send_data_compressed(token_writer, data, compressor).await?;
             }
-            MatchOp::BlockMatch(idx) => {
-                token::send_block_match_compressed(token_writer, *idx).await?;
+            DiffOp::Copy(bref) => {
+                token::send_block_match_compressed(token_writer, bref.block_index(blength)).await?;
             }
         }
     }
@@ -114,6 +116,7 @@ pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
     ctx: &ProtocolContext,
     chunk_size: usize,
 ) -> Result<()> {
+    let blength = sums.head.blength as u32;
     varint::write_int(token_writer, file_index).await?;
 
     let mut smatcher = StreamingMatcher::new(sums, ctx, chunk_size);
@@ -123,14 +126,7 @@ pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
         let (ops, done) = smatcher
             .process_chunk(reader, &mut file_hash)
             .map_err(ProtocolError::from)?;
-        for op in &ops {
-            match op {
-                OwnedMatchOp::Data(data) => token::send_data(token_writer, data).await?,
-                OwnedMatchOp::BlockMatch(idx) => {
-                    token::send_block_match(token_writer, *idx).await?
-                }
-            }
-        }
+        token::write_owned_diffops_as_tokens(token_writer, &ops, blength).await?;
         if done {
             break;
         }
@@ -149,17 +145,13 @@ pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
 /// Write tokens and file-level checksum.
 async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     w: &mut W,
-    ops: &[MatchOp<'_>],
+    ops: &[DiffOp<'_>],
     source_data: &[u8],
+    sums: &SumStruct,
     ctx: &ProtocolContext,
 ) -> Result<()> {
-    for op in ops {
-        match op {
-            MatchOp::Data(data) => token::send_data(w, data).await?,
-            MatchOp::BlockMatch(idx) => token::send_block_match(w, *idx).await?,
-        }
-    }
-    token::send_eof(w).await?;
+    let blength = sums.head.blength as u32;
+    token::write_diffops_as_tokens(w, ops, blength).await?;
 
     let file_sum = checksum::file_checksum(source_data, ctx);
     w.write_all(&file_sum).await.map_err(ProtocolError::from)?;

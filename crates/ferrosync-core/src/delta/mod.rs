@@ -14,11 +14,18 @@
 pub mod checksum;
 pub mod chunker;
 pub mod matcher;
+pub mod ops;
 pub mod sum;
 pub mod token;
 
+pub use ops::{BasisRef, DiffOp, OwnedDiffOp};
+
+use std::io::Read;
+
 use crate::protocol::handshake::{ChecksumType, NegotiatedProtocol};
 use crate::protocol::wire_format::IntCodec;
+
+use self::sum::SumStruct;
 
 /// Protocol parameters needed for delta computation.
 ///
@@ -57,5 +64,55 @@ impl ProtocolContext {
             char_offset: checksum::CHAR_OFFSET_V30,
             proper_seed_order: true,
         }
+    }
+}
+
+/// Trait for batch delta computation.
+///
+/// Implementations produce algorithm-agnostic [`DiffOp`] sequences from a
+/// source buffer and basis signatures.
+pub trait DeltaComputer {
+    /// Compute diff operations for the given source against basis signatures.
+    fn compute<'a>(
+        &self,
+        source: &'a [u8],
+        sums: &SumStruct,
+        ctx: &ProtocolContext,
+    ) -> Vec<DiffOp<'a>>;
+}
+
+/// Trait for streaming delta computation (large files).
+///
+/// Implementations process source data incrementally, emitting owned diff
+/// operations that survive across chunk boundaries.
+pub trait StreamingDeltaComputer {
+    fn process_chunk(
+        &mut self,
+        reader: &mut dyn Read,
+        checksum: &mut checksum::IncrementalChecksum,
+    ) -> std::io::Result<(Vec<OwnedDiffOp>, bool)>;
+}
+
+/// Rsync fixed-block matcher implementing [`DeltaComputer`].
+pub struct RsyncMatcher;
+
+impl DeltaComputer for RsyncMatcher {
+    fn compute<'a>(
+        &self,
+        source: &'a [u8],
+        sums: &SumStruct,
+        ctx: &ProtocolContext,
+    ) -> Vec<DiffOp<'a>> {
+        matcher::match_blocks(source, sums, ctx)
+    }
+}
+
+impl StreamingDeltaComputer for matcher::StreamingMatcher {
+    fn process_chunk(
+        &mut self,
+        reader: &mut dyn Read,
+        checksum: &mut checksum::IncrementalChecksum,
+    ) -> std::io::Result<(Vec<OwnedDiffOp>, bool)> {
+        self.process_chunk(reader, checksum)
     }
 }

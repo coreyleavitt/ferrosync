@@ -39,7 +39,7 @@ zstd = "0.13"
 lz4_flex = "0.13"
 
 # SSH transport (native, pure Rust)
-russh = "0.57"
+russh = "0.58"
 ssh2-config = "0.7"
 
 # TLS transport
@@ -72,9 +72,3 @@ tokio-test = "0.4"
 # Internal crates
 ferrosync-core = { path = "crates/ferrosync-core" }
 
-# Patch russh-cryptovec to fix VirtualLock ERROR_WORKING_SET_QUOTA on Windows.
-# Grows the working set on demand instead of failing.
-# Upstream issue: https://github.com/Eugeny/russh/issues/504
-[patch.crates-io]
-russh-cryptovec = { git = "https://github.com/coreyleavitt/russh.git", branch = "ferrosync-patched" }
-russh = { git = "https://github.com/coreyleavitt/russh.git", branch = "ferrosync-patched" }

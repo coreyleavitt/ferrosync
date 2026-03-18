@@ -4,7 +4,7 @@
 //! for various file sizes and similarity levels.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use ferrosync_core::delta::{checksum, matcher, sum, ProtocolContext};
+use ferrosync_core::delta::{checksum, matcher, ops, sum, ProtocolContext};
 use ferrosync_core::protocol::handshake::ChecksumType;
 
 fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {
@@ -125,14 +125,12 @@ fn bench_apply_ops(c: &mut Criterion) {
         let basis = generate_data(size);
         let source = generate_modified(&basis, 10);
         let sums = sum::compute_signatures(&basis, &ctx(42, ChecksumType::Md5));
-        let ops = matcher::match_blocks(&source, &sums, &ctx(42, ChecksumType::Md5));
-        let blength = sums.head.blength as usize;
-        let remainder = sums.head.remainder as usize;
+        let diff_ops = matcher::match_blocks(&source, &sums, &ctx(42, ChecksumType::Md5));
 
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(BenchmarkId::from_parameter(size), &ops, |b, ops| {
-            b.iter(|| matcher::apply_ops(&basis, ops, blength, remainder));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &diff_ops, |b, ops| {
+            b.iter(|| ops::apply_diffops(&basis, ops));
         });
     }
 

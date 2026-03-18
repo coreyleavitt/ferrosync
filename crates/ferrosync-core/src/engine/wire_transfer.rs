@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
+use crate::delta::ops::{DiffOp, OwnedDiffOp};
 use crate::delta::{checksum, matcher, sum, token, ProtocolContext};
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::receiver;
@@ -559,19 +560,21 @@ where
                     .map_err(WireError::Io)?;
                 for op in &ops {
                     match op {
-                        matcher::OwnedMatchOp::Data(data) => {
+                        OwnedDiffOp::Literal(data) => {
                             let mut tok_buf = Vec::with_capacity(data.len() + 4);
                             token::send_data(&mut tok_buf, data).await?;
                             mplex_out.write_data(&tok_buf).await?;
                             literal_bytes += data.len() as u64;
                         }
-                        matcher::OwnedMatchOp::BlockMatch(block_idx) => {
+                        OwnedDiffOp::Copy(bref) => {
                             let mut tok_buf = Vec::with_capacity(8);
-                            token::send_block_match(&mut tok_buf, *block_idx).await?;
+                            token::send_block_match(
+                                &mut tok_buf,
+                                bref.block_index(sums.head.blength as u32),
+                            )
+                            .await?;
                             mplex_out.write_data(&tok_buf).await?;
-                            if sums.head.blength > 0 {
-                                matched_bytes += sums.head.blength as u64;
-                            }
+                            matched_bytes += bref.length as u64;
                         }
                     }
                 }
@@ -594,19 +597,21 @@ where
 
             for op in &ops {
                 match op {
-                    matcher::MatchOp::Data(data) => {
+                    DiffOp::Literal(data) => {
                         let mut tok_buf = Vec::with_capacity(data.len() + 4);
                         token::send_data(&mut tok_buf, data).await?;
                         mplex_out.write_data(&tok_buf).await?;
                         literal_bytes += data.len() as u64;
                     }
-                    matcher::MatchOp::BlockMatch(block_idx) => {
+                    DiffOp::Copy(bref) => {
                         let mut tok_buf = Vec::with_capacity(8);
-                        token::send_block_match(&mut tok_buf, *block_idx).await?;
+                        token::send_block_match(
+                            &mut tok_buf,
+                            bref.block_index(sums.head.blength as u32),
+                        )
+                        .await?;
                         mplex_out.write_data(&tok_buf).await?;
-                        if sums.head.blength > 0 {
-                            matched_bytes += sums.head.blength as u64;
-                        }
+                        matched_bytes += bref.length as u64;
                     }
                 }
             }
