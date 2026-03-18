@@ -881,15 +881,15 @@ fn sync_files(
                 None => ProgressTracker::new(),
             };
 
-            let result = transfer::execute_transfer(
-                &fs,
-                &rust_opts,
-                checksum_seed,
-                rust_checksum,
-                &mut progress,
-            )
-            .await
-            .map_err(to_py_err)?;
+            let ctx = ferrosync_core::delta::ProtocolContext {
+                seed: checksum_seed,
+                checksum_type: rust_checksum,
+                char_offset: 0,
+                proper_seed_order: true,
+            };
+            let result = transfer::execute_transfer(&fs, &rust_opts, &ctx, &mut progress)
+                .await
+                .map_err(to_py_err)?;
 
             Ok(SyncResult {
                 stats: result.stats,
