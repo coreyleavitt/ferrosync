@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["full"] }
 
 # Byte handling
 bytes = "1"
+memmap2 = "0.9"
 
 # Error handling
 thiserror = "2"

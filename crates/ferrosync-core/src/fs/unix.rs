@@ -263,6 +263,30 @@ impl FileSystem for UnixFileSystem {
             .map(|_| ())
     }
 
+    fn map_file(&self, path: &Path) -> Result<super::FileData> {
+        let meta = std::fs::metadata(path).map_err(|e| Self::map_io_err(path, e))?;
+        let len = meta.len() as i64;
+        if len == 0 {
+            return Ok(super::FileData::Empty);
+        }
+        if len < super::MMAP_THRESHOLD {
+            let data = std::fs::read(path).map_err(|e| Self::map_io_err(path, e))?;
+            return Ok(super::FileData::Vec(data));
+        }
+        let file = std::fs::File::open(path).map_err(|e| Self::map_io_err(path, e))?;
+        // SAFETY: The file is not truncated while mapped. In rsync's protocol,
+        // the sender reads its own source files (not modified during transfer),
+        // and the receiver's basis file is overwritten via temp + atomic rename.
+        match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(mmap) => Ok(super::FileData::Mmap(mmap)),
+            Err(_) => {
+                // Fallback to read if mmap fails (e.g. some FUSE mounts).
+                let data = std::fs::read(path).map_err(|e| Self::map_io_err(path, e))?;
+                Ok(super::FileData::Vec(data))
+            }
+        }
+    }
+
     fn read_file_stream(&self, path: &Path) -> Result<Box<dyn std::io::Read + Send>> {
         let file = std::fs::File::open(path).map_err(|e| Self::map_io_err(path, e))?;
         Ok(Box::new(std::io::BufReader::new(file)))

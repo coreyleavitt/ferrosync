@@ -15,7 +15,7 @@ use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::receiver;
 use crate::error::ProtocolError;
 use crate::filelist::entry::{FileEntry, S_IFMT, S_IFREG};
-use crate::fs::FileSystem;
+use crate::fs::{FileData, FileSystem};
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::protocol::multiplex::MplexWriter;
 use crate::protocol::varint;
@@ -71,7 +71,7 @@ impl From<WireError> for crate::FerrosyncError {
 /// Server send uses module path to locate files.
 pub trait FileReader: Send + Sync {
     /// Read the source data for a file entry.
-    fn read_file(&self, entry: &FileEntry) -> std::result::Result<Vec<u8>, crate::error::FsError>;
+    fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError>;
 }
 
 /// Reads source files from local filesystem using TransferOptions paths.
@@ -87,7 +87,7 @@ impl<'a> LocalFileReader<'a> {
 }
 
 impl FileReader for LocalFileReader<'_> {
-    fn read_file(&self, entry: &FileEntry) -> std::result::Result<Vec<u8>, crate::error::FsError> {
+    fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError> {
         let name_str = String::from_utf8_lossy(&entry.name);
         for source in self.source_paths {
             let path = if self.source_paths.len() == 1
@@ -100,11 +100,11 @@ impl FileReader for LocalFileReader<'_> {
             } else {
                 source.clone()
             };
-            if let Ok(data) = self.fs.read_file(&path) {
+            if let Ok(data) = self.fs.map_file(&path) {
                 return Ok(data);
             }
         }
-        Ok(Vec::new())
+        Ok(FileData::Empty)
     }
 }
 
@@ -121,10 +121,10 @@ impl<'a> ModuleFileReader<'a> {
 }
 
 impl FileReader for ModuleFileReader<'_> {
-    fn read_file(&self, entry: &FileEntry) -> std::result::Result<Vec<u8>, crate::error::FsError> {
+    fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError> {
         let name_str = String::from_utf8_lossy(&entry.name);
         let path = self.module_path.join(name_str.as_ref());
-        Ok(self.fs.read_file(&path).unwrap_or_default())
+        Ok(self.fs.map_file(&path).unwrap_or_default())
     }
 }
 
@@ -138,7 +138,7 @@ impl FileReader for ModuleFileReader<'_> {
 /// and skip decisions. Server receive uses module path.
 pub trait FileOps: Send + Sync {
     /// Read the existing basis file at the destination (for delta).
-    fn read_basis(&self, entry: &FileEntry) -> Vec<u8>;
+    fn read_basis(&self, entry: &FileEntry) -> FileData;
 
     /// Write the reconstructed file data to the destination.
     fn write_file(
@@ -146,6 +146,18 @@ pub trait FileOps: Send + Sync {
         entry: &FileEntry,
         data: &[u8],
     ) -> std::result::Result<(), crate::FerrosyncError>;
+
+    /// Create a buffered writer for streaming file reconstruction.
+    ///
+    /// The file is written to a temporary path and moved into place by
+    /// `finish_file`. This avoids partial files on failure.
+    fn create_writer(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError>;
+
+    /// Finalize a file written via `create_writer` (move temp to dest, set metadata).
+    fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError>;
 
     /// Set file metadata (times, ownership, permissions) after writing.
     fn set_metadata(&self, entry: &FileEntry);
@@ -181,9 +193,9 @@ impl LocalFileOps {
 }
 
 impl FileOps for LocalFileOps {
-    fn read_basis(&self, entry: &FileEntry) -> Vec<u8> {
+    fn read_basis(&self, entry: &FileEntry) -> FileData {
         let dest_path = self.dest_path(entry);
-        self.fs.read_file(&dest_path).unwrap_or_default()
+        self.fs.map_file(&dest_path).unwrap_or_default()
     }
 
     fn write_file(
@@ -199,6 +211,24 @@ impl FileOps for LocalFileOps {
             entry,
             &self.options,
         )
+    }
+
+    fn create_writer(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
+        let dest_path = self.dest_path(entry);
+        let mode = if self.options.preserve_perms() {
+            Some(entry.mode & 0o7777)
+        } else {
+            None
+        };
+        Ok(self.fs.write_file_stream(&dest_path, mode)?)
+    }
+
+    fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError> {
+        self.set_metadata(entry);
+        Ok(())
     }
 
     fn set_metadata(&self, entry: &FileEntry) {
@@ -261,9 +291,9 @@ impl ModuleFileOps {
 }
 
 impl FileOps for ModuleFileOps {
-    fn read_basis(&self, entry: &FileEntry) -> Vec<u8> {
+    fn read_basis(&self, entry: &FileEntry) -> FileData {
         let dest_path = self.dest_path(entry);
-        self.fs.read_file(&dest_path).unwrap_or_default()
+        self.fs.map_file(&dest_path).unwrap_or_default()
     }
 
     fn write_file(
@@ -273,6 +303,19 @@ impl FileOps for ModuleFileOps {
     ) -> std::result::Result<(), crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
         Ok(self.fs.write_file(&dest_path, data, None)?)
+    }
+
+    fn create_writer(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
+        let dest_path = self.dest_path(entry);
+        Ok(self.fs.write_file_stream(&dest_path, None)?)
+    }
+
+    fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError> {
+        self.set_metadata(entry);
+        Ok(())
     }
 
     fn set_metadata(&self, _entry: &FileEntry) {
@@ -635,24 +678,22 @@ where
         };
 
         // Read tokens, reconstruct file via streaming writer, verify checksum.
-        let mut output = Vec::new();
+        let mut writer = file_ops.create_writer(entry)?;
         let bytes_written = receiver::recv_file_delta_to_writer(
             demux_read,
             &basis_data,
             blength,
             seed,
             checksum_type,
-            &mut output,
+            &mut writer,
         )
         .await?;
 
         let literal_bytes = bytes_written;
 
-        // Write reconstructed file.
-        file_ops.write_file(entry, &output)?;
-
-        // Set metadata.
-        file_ops.set_metadata(entry);
+        // Finalize: atomic rename happens on drop, then set metadata.
+        drop(writer);
+        file_ops.finish_file(entry)?;
 
         stats.files_transferred += 1;
         stats.total_size += entry.len as u64;
@@ -679,7 +720,7 @@ enum GeneratorItem {
     /// A file is being requested from the sender.
     File {
         entry_idx: usize,
-        basis_data: Vec<u8>,
+        basis_data: FileData,
         blength: usize,
     },
     /// All phases are complete.
@@ -863,22 +904,22 @@ where
                 };
 
                 // Reconstruct file via streaming writer.
-                let mut output = Vec::new();
+                let mut writer = file_ops.create_writer(entry)?;
                 let bytes_written = receiver::recv_file_delta_to_writer(
                     &mut demux_read,
                     &basis_data,
                     blength_actual,
                     seed,
                     checksum_type,
-                    &mut output,
+                    &mut writer,
                 )
                 .await?;
 
                 let literal_bytes = bytes_written;
 
-                // Write reconstructed file.
-                file_ops.write_file(entry, &output)?;
-                file_ops.set_metadata(entry);
+                // Finalize: atomic rename happens on drop, then set metadata.
+                drop(writer);
+                file_ops.finish_file(entry)?;
 
                 stats.files_transferred += 1;
                 stats.total_size += entry.len as u64;

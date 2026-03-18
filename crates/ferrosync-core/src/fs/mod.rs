@@ -10,8 +10,10 @@ pub mod unix;
 #[cfg(windows)]
 pub mod windows;
 
+mod file_data;
 mod metadata;
 
+pub use file_data::FileData;
 pub use metadata::FileMetadata;
 
 use std::io::{Read, Write};
@@ -112,6 +114,20 @@ pub trait FileSystem: Send + Sync {
     /// Copy a file from `src` to `dst`.
     fn copy_file(&self, src: &Path, dst: &Path) -> Result<()>;
 
+    /// Return the file contents as a `FileData`, using mmap for large files.
+    ///
+    /// Files smaller than [`MMAP_THRESHOLD`] are read into a `Vec`. Empty
+    /// files return `FileData::Empty`. The default implementation always
+    /// reads into a `Vec`; platform implementations override with mmap.
+    fn map_file(&self, path: &Path) -> Result<FileData> {
+        let data = self.read_file(path)?;
+        if data.is_empty() {
+            Ok(FileData::Empty)
+        } else {
+            Ok(FileData::Vec(data))
+        }
+    }
+
     /// Return a streaming reader for the file at `path`.
     ///
     /// Enables reading large files without loading them entirely into memory.
@@ -137,6 +153,10 @@ pub trait FileSystem: Send + Sync {
 /// Threshold in bytes above which streaming I/O is preferred over buffered
 /// whole-file reads/writes. Currently set to 64 MiB.
 pub const STREAMING_THRESHOLD: i64 = 64 * 1024 * 1024;
+
+/// Threshold in bytes below which `map_file` uses a heap buffer instead of
+/// mmap. Below 32 KiB the mmap setup cost outweighs the copy.
+pub const MMAP_THRESHOLD: i64 = 32 * 1024;
 
 /// Collects writes into an in-memory buffer.
 ///

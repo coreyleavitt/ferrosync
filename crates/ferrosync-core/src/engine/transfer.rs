@@ -293,8 +293,8 @@ async fn execute_transfer_impl(
 
         // Checksum mode: compare file-level checksums.
         if options.checksum_mode() {
-            if let Ok(dest_data) = fs.read_file(&dest_path) {
-                let src_data = fs.read_file(&item.source_path)?;
+            if let Ok(dest_data) = fs.map_file(&dest_path) {
+                let src_data = fs.map_file(&item.source_path)?;
                 let src_sum = checksum::file_checksum(&src_data, seed, checksum_type);
                 let dst_sum = checksum::file_checksum(&dest_data, seed, checksum_type);
                 if src_sum == dst_sum {
@@ -337,12 +337,12 @@ async fn execute_transfer_impl(
         }
 
         // Read basis file (if it exists on the receiver side).
-        let basis_data = fs.read_file(&dest_path).unwrap_or_default();
+        let basis_data = fs.map_file(&dest_path).unwrap_or_default();
 
         // --append: if dest exists and source is longer, only transfer the tail.
         if options.append() && !basis_data.is_empty() {
             let dest_len = basis_data.len();
-            let source_data = fs.read_file(&item.source_path)?;
+            let source_data = fs.map_file(&item.source_path)?;
             if source_data.len() > dest_len {
                 let append_data = &source_data[dest_len..];
                 let mode = if options.preserve_perms() {
@@ -377,14 +377,18 @@ async fn execute_transfer_impl(
         }
 
         // Read the source file on-demand for the transfer.
-        let source_data = fs.read_file(&item.source_path)?;
+        let source_data = fs.map_file(&item.source_path)?;
 
         // Transfer via delta pipeline.
-        let result_data = if options.whole_file() || basis_data.is_empty() {
+        //
+        // `delta_data` holds the result when we go through the delta path;
+        // in the whole-file path we reuse `source_data` directly.
+        let delta_data;
+        let result_data: &[u8] = if options.whole_file() || basis_data.is_empty() {
             // Whole-file mode or no basis: use the data directly.
-            source_data
+            &source_data
         } else if options.compress() {
-            pipeline::transfer_file_compressed(
+            delta_data = pipeline::transfer_file_compressed(
                 &source_data,
                 &basis_data,
                 seed,
@@ -392,11 +396,14 @@ async fn execute_transfer_impl(
                 options.compress_level(),
             )
             .await
-            .map_err(crate::FerrosyncError::Protocol)?
+            .map_err(crate::FerrosyncError::Protocol)?;
+            &delta_data
         } else {
-            pipeline::transfer_file(&source_data, &basis_data, seed, checksum_type)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?
+            delta_data =
+                pipeline::transfer_file(&source_data, &basis_data, seed, checksum_type)
+                    .await
+                    .map_err(crate::FerrosyncError::Protocol)?;
+            &delta_data
         };
 
         let literal_bytes = result_data.len() as u64;
@@ -424,7 +431,7 @@ async fn execute_transfer_impl(
         file_decision::write_file_with_options(
             fs,
             &write_path,
-            &result_data,
+            result_data,
             &item.entry,
             options,
         )?;
