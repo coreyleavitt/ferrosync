@@ -126,7 +126,7 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
 /// Write tokens and file-level checksum.
 async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     w: &mut W,
-    ops: &[MatchOp],
+    ops: &[MatchOp<'_>],
     source_data: &[u8],
     seed: i32,
     checksum_type: ChecksumType,

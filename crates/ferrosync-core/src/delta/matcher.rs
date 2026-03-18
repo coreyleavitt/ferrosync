@@ -17,10 +17,10 @@ use super::sum::SumStruct;
 use crate::protocol::handshake::ChecksumType;
 
 /// An operation emitted by the block matcher.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MatchOp {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOp<'a> {
     /// Literal data (bytes from source that don't match any basis block).
-    Data(Vec<u8>),
+    Data(&'a [u8]),
     /// Matched block (index into the basis file's block signatures).
     BlockMatch(i32),
 }
@@ -34,14 +34,14 @@ pub enum MatchOp {
 ///   31 for older protocols).
 /// - `proper_seed_order`: if true, seed is hashed before data in the strong
 ///   checksum (protocol >= 30 with `CF_CHKSUM_SEED_FIX`).
-pub fn match_blocks(
-    source: &[u8],
+pub fn match_blocks<'a>(
+    source: &'a [u8],
     sums: &SumStruct,
     seed: i32,
     checksum_type: ChecksumType,
     char_offset: u32,
     proper_seed_order: bool,
-) -> Vec<MatchOp> {
+) -> Vec<MatchOp<'a>> {
     let mut ops = Vec::new();
 
     if source.is_empty() {
@@ -49,7 +49,7 @@ pub fn match_blocks(
     }
 
     if sums.head.count <= 0 || sums.head.blength <= 0 {
-        ops.push(MatchOp::Data(source.to_vec()));
+        ops.push(MatchOp::Data(source));
         return ops;
     }
 
@@ -63,7 +63,7 @@ pub fn match_blocks(
 
     // Need at least blength bytes for a full block scan.
     if source.len() < blength {
-        ops.push(MatchOp::Data(source.to_vec()));
+        ops.push(MatchOp::Data(source));
         return ops;
     }
 
@@ -87,7 +87,7 @@ pub fn match_blocks(
                 if sums.sums[idx].sum2 == strong_truncated {
                     // Flush pending literal data.
                     if literal_start < pos {
-                        ops.push(MatchOp::Data(source[literal_start..pos].to_vec()));
+                        ops.push(MatchOp::Data(&source[literal_start..pos]));
                     }
                     ops.push(MatchOp::BlockMatch(idx as i32));
                     pos += blength;
@@ -114,7 +114,7 @@ pub fn match_blocks(
 
     // Flush remaining literal data.
     if literal_start < source.len() {
-        ops.push(MatchOp::Data(source[literal_start..].to_vec()));
+        ops.push(MatchOp::Data(&source[literal_start..]));
     }
 
     ops
@@ -131,7 +131,7 @@ fn build_hash_table(sums: &[super::sum::SumEntry]) -> HashMap<u32, Vec<usize>> {
 
 /// Apply a sequence of match operations to reconstruct a file from the
 /// basis data.
-pub fn apply_ops(basis: &[u8], ops: &[MatchOp], blength: usize, remainder: usize) -> Vec<u8> {
+pub fn apply_ops(basis: &[u8], ops: &[MatchOp<'_>], blength: usize, remainder: usize) -> Vec<u8> {
     let mut output = Vec::new();
     let block_count = if blength > 0 && !basis.is_empty() {
         basis.len().div_ceil(blength)
@@ -282,7 +282,7 @@ mod tests {
 
         // Should be all literal.
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], MatchOp::Data(b"hello".to_vec()));
+        assert_eq!(ops[0], MatchOp::Data(b"hello"));
     }
 
     #[test]
@@ -292,12 +292,12 @@ mod tests {
         // Source is smaller than one block.
         let ops = match_blocks(b"tiny", &sums, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], MatchOp::Data(b"tiny".to_vec()));
+        assert_eq!(ops[0], MatchOp::Data(b"tiny"));
     }
 
     #[test]
     fn test_apply_ops_all_literal() {
-        let ops = vec![MatchOp::Data(b"all new data".to_vec())];
+        let ops = vec![MatchOp::Data(b"all new data")];
         let result = apply_ops(b"", &ops, 700, 0);
         assert_eq!(result, b"all new data");
     }
