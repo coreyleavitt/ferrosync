@@ -274,13 +274,18 @@ impl StreamingMatcher {
                 self.exhausted = true;
             }
             self.initialized = true;
+        } else if self.no_sums || self.blength == 0 {
+            // No sums: just read the next chunk of literal data.
+            let bytes_read = read_fill(reader, &mut self.buf[..self.chunk_size])?;
+            self.buf_len = bytes_read;
+            if bytes_read > 0 {
+                checksum.update(&self.buf[..bytes_read]);
+            }
+            if bytes_read < self.chunk_size {
+                self.exhausted = true;
+            }
         } else {
             // Subsequent calls: shift the overlap and read fresh data.
-            if self.no_sums || self.blength == 0 {
-                // No sums means we already flushed everything on first call.
-                return Ok((ops, true));
-            }
-
             let shift_by = self.buf_len.saturating_sub(self.blength);
 
             // Flush any literal data that will be discarded by the shift.
@@ -315,7 +320,14 @@ impl StreamingMatcher {
             return Ok((ops, true));
         }
 
-        if self.no_sums || self.buf_len < self.blength {
+        if self.no_sums {
+            if self.buf_len > 0 {
+                ops.push(OwnedMatchOp::Data(self.buf[..self.buf_len].to_vec()));
+            }
+            return Ok((ops, self.exhausted));
+        }
+
+        if self.buf_len < self.blength {
             ops.push(OwnedMatchOp::Data(self.buf[..self.buf_len].to_vec()));
             return Ok((ops, true));
         }
@@ -767,6 +779,21 @@ mod tests {
             sums.head.blength as usize,
             sums.head.remainder as usize,
         );
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
+    fn test_streaming_no_basis_large_file() {
+        // Regression: streaming with no basis (no_sums=true) must read the
+        // entire source, not just the first chunk.
+        let c = ctx(0, ChecksumType::Md5);
+        let source: Vec<u8> = (0..DEFAULT_STREAM_CHUNK * 3 + 1000)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let sums = compute_signatures(b"", &c);
+        let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(b"", &ops, 0, 0);
+        assert_eq!(reconstructed.len(), source.len());
         assert_eq!(reconstructed, source);
     }
 }
