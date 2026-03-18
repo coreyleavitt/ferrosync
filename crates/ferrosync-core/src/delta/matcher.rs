@@ -11,6 +11,7 @@
 //! 4. Emit `BlockMatch` for verified matches, `Data` for unmatched regions.
 
 use std::collections::HashMap;
+use std::io::Read;
 
 use super::checksum::{self, RollingChecksum};
 use super::sum::SumStruct;
@@ -167,6 +168,266 @@ pub fn apply_ops(basis: &[u8], ops: &[MatchOp<'_>], blength: usize, remainder: u
     output
 }
 
+/// An owned match operation for streaming delta generation.
+///
+/// Unlike [`MatchOp`] which borrows data from a source slice, `OwnedMatchOp`
+/// owns its literal data, making it suitable for use across chunk boundaries
+/// in streaming mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedMatchOp {
+    /// Literal data (bytes from source that don't match any basis block).
+    Data(Vec<u8>),
+    /// Matched block (index into the basis file's block signatures).
+    BlockMatch(i32),
+}
+
+/// Default chunk size for streaming matching (256 KiB).
+pub const DEFAULT_STREAM_CHUNK: usize = 256 * 1024;
+
+/// Streaming block matcher that processes source data incrementally.
+///
+/// Unlike [`match_blocks`] which requires the entire source in memory,
+/// `StreamingMatcher` reads from a [`Read`] source in chunks, emitting
+/// match operations as they are discovered. The rolling checksum state
+/// carries across chunk boundaries, producing identical results to the
+/// batch algorithm.
+pub struct StreamingMatcher {
+    // Configuration (immutable after construction).
+    hash_table: HashMap<u32, Vec<usize>>,
+    sum2_entries: Vec<Vec<u8>>,
+    blength: usize,
+    s2length: usize,
+    seed: i32,
+    checksum_type: ChecksumType,
+    proper_seed_order: bool,
+    chunk_size: usize,
+    no_sums: bool,
+
+    // Mutable state across process_chunk calls.
+    rolling: RollingChecksum,
+    buf: Vec<u8>,
+    buf_len: usize,
+    pos: usize,
+    literal_start: usize,
+    initialized: bool,
+    exhausted: bool,
+    need_rolling_init: bool,
+}
+
+impl StreamingMatcher {
+    /// Create a new streaming matcher from basis block signatures.
+    ///
+    /// - `sums`: block signatures from the basis file.
+    /// - `seed`: checksum seed for strong checksum verification.
+    /// - `checksum_type`: algorithm used for strong checksums.
+    /// - `char_offset`: rolling checksum character offset.
+    /// - `proper_seed_order`: whether seed precedes data in strong checksum.
+    /// - `chunk_size`: number of fresh bytes to read per `process_chunk` call.
+    pub fn new(
+        sums: &SumStruct,
+        seed: i32,
+        checksum_type: ChecksumType,
+        char_offset: u32,
+        proper_seed_order: bool,
+        chunk_size: usize,
+    ) -> Self {
+        let no_sums = sums.head.count <= 0 || sums.head.blength <= 0;
+        let blength = if no_sums {
+            0
+        } else {
+            sums.head.blength as usize
+        };
+        let s2length = sums.head.s2length as usize;
+        let hash_table = build_hash_table(&sums.sums);
+        let sum2_entries: Vec<Vec<u8>> = sums.sums.iter().map(|e| e.sum2.clone()).collect();
+
+        // Buffer must hold at least blength + chunk_size bytes so we can
+        // keep the overlap window and read fresh data.
+        let buf_capacity = blength + chunk_size;
+
+        Self {
+            hash_table,
+            sum2_entries,
+            blength,
+            s2length,
+            seed,
+            checksum_type,
+            proper_seed_order,
+            chunk_size,
+            no_sums,
+            rolling: RollingChecksum::new(char_offset),
+            buf: vec![0u8; buf_capacity],
+            buf_len: 0,
+            pos: 0,
+            literal_start: 0,
+            initialized: false,
+            exhausted: false,
+            need_rolling_init: true,
+        }
+    }
+
+    /// Process the next chunk of source data.
+    ///
+    /// Reads up to `chunk_size` fresh bytes from `reader`, feeds them into
+    /// `checksum` for whole-file verification, and returns any match
+    /// operations discovered in this chunk.
+    ///
+    /// Returns `(ops, done)` where `done` is true when the reader is
+    /// exhausted and all remaining data has been flushed.
+    pub fn process_chunk(
+        &mut self,
+        reader: &mut dyn Read,
+        checksum: &mut checksum::IncrementalChecksum,
+    ) -> std::io::Result<(Vec<OwnedMatchOp>, bool)> {
+        let mut ops = Vec::new();
+
+        // Step 1: Fill the buffer.
+        if !self.initialized {
+            // First call: read up to chunk_size bytes starting at offset 0.
+            let bytes_read = read_fill(reader, &mut self.buf[..self.chunk_size])?;
+            self.buf_len = bytes_read;
+            if bytes_read > 0 {
+                checksum.update(&self.buf[..bytes_read]);
+            }
+            if bytes_read < self.chunk_size {
+                self.exhausted = true;
+            }
+            self.initialized = true;
+        } else {
+            // Subsequent calls: shift the overlap and read fresh data.
+            if self.no_sums || self.blength == 0 {
+                // No sums means we already flushed everything on first call.
+                return Ok((ops, true));
+            }
+
+            let shift_by = self.buf_len.saturating_sub(self.blength);
+
+            // Flush any literal data that will be discarded by the shift.
+            if self.literal_start < shift_by {
+                ops.push(OwnedMatchOp::Data(
+                    self.buf[self.literal_start..shift_by].to_vec(),
+                ));
+                self.literal_start = shift_by;
+            }
+
+            // Shift the overlap window to the front of the buffer.
+            self.buf.copy_within(shift_by..self.buf_len, 0);
+            self.pos -= shift_by;
+            self.literal_start -= shift_by;
+
+            // Read fresh data after the overlap.
+            let bytes_read = read_fill(
+                reader,
+                &mut self.buf[self.blength..self.blength + self.chunk_size],
+            )?;
+            if bytes_read > 0 {
+                checksum.update(&self.buf[self.blength..self.blength + bytes_read]);
+            }
+            self.buf_len = self.blength + bytes_read;
+            if bytes_read < self.chunk_size {
+                self.exhausted = true;
+            }
+        }
+
+        // Step 2: Early returns.
+        if self.buf_len == 0 {
+            return Ok((ops, true));
+        }
+
+        if self.no_sums || self.buf_len < self.blength {
+            ops.push(OwnedMatchOp::Data(self.buf[..self.buf_len].to_vec()));
+            return Ok((ops, true));
+        }
+
+        // Step 3: Initialize rolling checksum on the very first window.
+        // For the first chunk we always need this. For subsequent chunks,
+        // the rolling state carries over -- unless pos landed at 0 after
+        // a match that exactly consumed the overlap, in which case
+        // need_rolling_init was set.
+        if self.need_rolling_init {
+            self.rolling
+                .compute(&self.buf[self.pos..self.pos + self.blength]);
+            self.need_rolling_init = false;
+        }
+
+        // Step 4: Match loop.
+        while self.pos + self.blength <= self.buf_len {
+            let digest = self.rolling.digest();
+            let mut matched = false;
+
+            if let Some(candidates) = self.hash_table.get(&digest) {
+                let window = &self.buf[self.pos..self.pos + self.blength];
+                let strong = checksum::checksum2(
+                    window,
+                    self.seed,
+                    self.checksum_type,
+                    self.proper_seed_order,
+                );
+                let strong_truncated = &strong[..self.s2length.min(strong.len())];
+
+                for &idx in candidates {
+                    if self.sum2_entries[idx] == strong_truncated {
+                        // Flush pending literal data.
+                        if self.literal_start < self.pos {
+                            ops.push(OwnedMatchOp::Data(
+                                self.buf[self.literal_start..self.pos].to_vec(),
+                            ));
+                        }
+                        ops.push(OwnedMatchOp::BlockMatch(idx as i32));
+                        self.pos += self.blength;
+                        self.literal_start = self.pos;
+                        matched = true;
+
+                        // Recompute rolling checksum for the next window.
+                        if self.pos + self.blength <= self.buf_len {
+                            self.rolling
+                                .compute(&self.buf[self.pos..self.pos + self.blength]);
+                        } else {
+                            // Next chunk will need to initialize the rolling
+                            // checksum after the buffer is refilled.
+                            self.need_rolling_init = true;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if !matched {
+                let old_byte = self.buf[self.pos];
+                self.pos += 1;
+                if self.pos + self.blength <= self.buf_len {
+                    self.rolling
+                        .roll(old_byte, self.buf[self.pos + self.blength - 1]);
+                }
+            }
+        }
+
+        // Step 5: Final flush or continue.
+        if self.exhausted {
+            if self.literal_start < self.buf_len {
+                ops.push(OwnedMatchOp::Data(
+                    self.buf[self.literal_start..self.buf_len].to_vec(),
+                ));
+            }
+            Ok((ops, true))
+        } else {
+            Ok((ops, false))
+        }
+    }
+}
+
+/// Read as many bytes as possible to fill the buffer, handling short reads.
+fn read_fill(reader: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        match reader.read(&mut buf[total..])? {
+            0 => break,
+            n => total += n,
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +580,204 @@ mod tests {
 
         let ops = match_blocks(&source, &sums, 55, ChecksumType::Md5, CHAR_OFFSET_V30, true);
         let reconstructed = apply_ops(
+            &basis,
+            &ops,
+            sums.head.blength as usize,
+            sums.head.remainder as usize,
+        );
+        assert_eq!(reconstructed, source);
+    }
+
+    // -----------------------------------------------------------------------
+    // StreamingMatcher tests
+    // -----------------------------------------------------------------------
+
+    fn apply_owned_ops(
+        basis: &[u8],
+        ops: &[OwnedMatchOp],
+        blength: usize,
+        remainder: usize,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+        let block_count = if blength > 0 && !basis.is_empty() {
+            basis.len().div_ceil(blength)
+        } else {
+            0
+        };
+        for op in ops {
+            match op {
+                OwnedMatchOp::Data(data) => output.extend_from_slice(data),
+                OwnedMatchOp::BlockMatch(idx) => {
+                    let idx = *idx as usize;
+                    let offset = idx * blength;
+                    let len = if block_count > 0
+                        && idx == block_count - 1
+                        && remainder > 0
+                        && remainder < blength
+                    {
+                        remainder
+                    } else {
+                        blength
+                    };
+                    let end = (offset + len).min(basis.len());
+                    if offset < basis.len() {
+                        output.extend_from_slice(&basis[offset..end]);
+                    }
+                }
+            }
+        }
+        output
+    }
+
+    fn streaming_match_all(
+        source: &[u8],
+        sums: &super::super::sum::SumStruct,
+        seed: i32,
+        checksum_type: ChecksumType,
+        chunk_size: usize,
+    ) -> Vec<OwnedMatchOp> {
+        use std::io::Cursor;
+        let mut cursor = Cursor::new(source);
+        let mut matcher =
+            StreamingMatcher::new(sums, seed, checksum_type, CHAR_OFFSET_V30, true, chunk_size);
+        let mut inc = checksum::IncrementalChecksum::new(checksum_type);
+        let mut all_ops = Vec::new();
+        loop {
+            let (ops, done) = matcher.process_chunk(&mut cursor, &mut inc).unwrap();
+            all_ops.extend(ops);
+            if done {
+                break;
+            }
+        }
+        all_ops
+    }
+
+    #[test]
+    fn test_streaming_matches_batch_identical() {
+        let data = vec![42u8; 5000];
+        let sums = compute_signatures(&data, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = streaming_match_all(&data, &sums, 99, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(
+            &data,
+            &ops,
+            sums.head.blength as usize,
+            sums.head.remainder as usize,
+        );
+        assert_eq!(reconstructed, data);
+    }
+
+    #[test]
+    fn test_streaming_matches_batch_different() {
+        let basis = vec![0u8; 5000];
+        let source = vec![0xFFu8; 5000];
+        let sums = compute_signatures(&basis, 99, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = streaming_match_all(&source, &sums, 99, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(
+            &basis,
+            &ops,
+            sums.head.blength as usize,
+            sums.head.remainder as usize,
+        );
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
+    fn test_streaming_matches_batch_modified() {
+        let mut basis = vec![0u8; 5000];
+        for (i, b) in basis.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
+        }
+        let mut source = basis.clone();
+        source[2500] = 0xFF;
+        source[2501] = 0xFF;
+
+        let sums = compute_signatures(&basis, 42, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = streaming_match_all(&source, &sums, 42, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(
+            &basis,
+            &ops,
+            sums.head.blength as usize,
+            sums.head.remainder as usize,
+        );
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
+    fn test_streaming_empty_source() {
+        let basis = vec![0u8; 1000];
+        let sums = compute_signatures(&basis, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = streaming_match_all(b"", &sums, 0, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(
+            &basis,
+            &ops,
+            sums.head.blength as usize,
+            sums.head.remainder as usize,
+        );
+        assert_eq!(reconstructed, b"");
+    }
+
+    #[test]
+    fn test_streaming_source_smaller_than_block() {
+        let basis = vec![0u8; 5000];
+        let sums = compute_signatures(&basis, 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = streaming_match_all(b"tiny", &sums, 0, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(
+            &basis,
+            &ops,
+            sums.head.blength as usize,
+            sums.head.remainder as usize,
+        );
+        assert_eq!(reconstructed, b"tiny");
+    }
+
+    #[test]
+    fn test_streaming_no_basis() {
+        let sums = compute_signatures(b"", 0, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let ops = streaming_match_all(b"hello", &sums, 0, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(b"", &ops, 0, 0);
+        assert_eq!(reconstructed, b"hello");
+    }
+
+    #[test]
+    fn test_streaming_various_chunk_sizes() {
+        let mut basis = vec![0u8; 5000];
+        for (i, b) in basis.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
+        }
+        let mut source = basis.clone();
+        source[2500] = 0xFF;
+        source[2501] = 0xFF;
+
+        let sums = compute_signatures(&basis, 42, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+        let blength = sums.head.blength as usize;
+        let remainder = sums.head.remainder as usize;
+
+        for chunk_size in [1024, blength + 1, 256 * 1024] {
+            let ops = streaming_match_all(&source, &sums, 42, ChecksumType::Md5, chunk_size);
+            let reconstructed = apply_owned_ops(&basis, &ops, blength, remainder);
+            assert_eq!(
+                reconstructed, source,
+                "failed with chunk_size={}",
+                chunk_size
+            );
+        }
+    }
+
+    #[test]
+    fn test_streaming_inserted_data() {
+        let mut basis = Vec::new();
+        for i in 0..10 {
+            basis.extend(vec![i as u8; 700]);
+        }
+        let sums = compute_signatures(&basis, 55, ChecksumType::Md5, CHAR_OFFSET_V30, true);
+
+        let mut source = Vec::new();
+        source.extend(&basis[..700]);
+        source.extend(b"INSERTED");
+        source.extend(&basis[700..]);
+
+        let ops = streaming_match_all(&source, &sums, 55, ChecksumType::Md5, DEFAULT_STREAM_CHUNK);
+        let reconstructed = apply_owned_ops(
             &basis,
             &ops,
             sums.head.blength as usize,

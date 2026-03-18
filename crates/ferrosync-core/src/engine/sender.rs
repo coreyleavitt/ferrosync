@@ -4,10 +4,12 @@
 //! against the source file using a rolling checksum, and sends delta tokens
 //! (literal data + block match references) to the receiver.
 
+use std::io::Read;
+
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use crate::delta::checksum;
-use crate::delta::matcher::{self, MatchOp};
+use crate::delta::matcher::{self, MatchOp, OwnedMatchOp, StreamingMatcher};
 use crate::delta::sum::{self, SumStruct};
 use crate::delta::token;
 use crate::error::ProtocolError;
@@ -123,6 +125,59 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
     Ok(())
 }
 
+/// Process a single file using streaming I/O: reads from a `Read` source in
+/// chunks instead of requiring the entire file in memory.
+///
+/// Wire format is identical to [`send_file_delta_with_sums`] -- the receiver
+/// cannot distinguish streaming from batch output.
+pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
+    token_writer: &mut W,
+    file_index: i32,
+    reader: &mut dyn Read,
+    sums: &SumStruct,
+    seed: i32,
+    checksum_type: ChecksumType,
+    chunk_size: usize,
+) -> Result<()> {
+    varint::write_int(token_writer, file_index).await?;
+
+    let mut smatcher = StreamingMatcher::new(
+        sums,
+        seed,
+        checksum_type,
+        checksum::CHAR_OFFSET_V30,
+        true,
+        chunk_size,
+    );
+    let mut file_hash = checksum::IncrementalChecksum::new(checksum_type);
+
+    loop {
+        let (ops, done) = smatcher
+            .process_chunk(reader, &mut file_hash)
+            .map_err(ProtocolError::from)?;
+        for op in &ops {
+            match op {
+                OwnedMatchOp::Data(data) => token::send_data(token_writer, data).await?,
+                OwnedMatchOp::BlockMatch(idx) => {
+                    token::send_block_match(token_writer, *idx).await?
+                }
+            }
+        }
+        if done {
+            break;
+        }
+    }
+    token::send_eof(token_writer).await?;
+
+    let file_sum = file_hash.finalize();
+    token_writer
+        .write_all(&file_sum)
+        .await
+        .map_err(ProtocolError::from)?;
+
+    Ok(())
+}
+
 /// Write tokens and file-level checksum.
 async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     w: &mut W,
@@ -218,5 +273,142 @@ mod tests {
         .unwrap();
 
         assert!(!token_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_send_file_delta_streaming_matches_batch() {
+        // Streaming and batch paths should produce identical wire output
+        // for the same source data and signatures.
+        let mut basis = vec![0u8; 5000];
+        for (i, b) in basis.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
+        }
+        let mut source = basis.clone();
+        source[2500] = 0xFF;
+        source[2501] = 0xFF;
+
+        let seed = 42;
+        let sums = sum::compute_signatures(
+            &basis,
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
+
+        // Batch path.
+        let mut batch_buf = Vec::new();
+        send_file_delta_with_sums(&mut batch_buf, 0, &source, &sums, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
+
+        // Streaming path.
+        let mut stream_buf = Vec::new();
+        let mut reader = Cursor::new(&source);
+        send_file_delta_streaming(
+            &mut stream_buf,
+            0,
+            &mut reader,
+            &sums,
+            seed,
+            ChecksumType::Md5,
+            matcher::DEFAULT_STREAM_CHUNK,
+        )
+        .await
+        .unwrap();
+
+        // Both should decode to the same reconstructed content.
+        let batch_data = decode_tokens(&batch_buf).await;
+        let stream_data = decode_tokens(&stream_buf).await;
+        assert_eq!(batch_data, stream_data);
+    }
+
+    #[tokio::test]
+    async fn test_send_file_delta_streaming_new_file() {
+        let source = b"brand new file contents";
+        let sums =
+            sum::compute_signatures(b"", 0, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
+        let seed = 42;
+
+        let mut buf = Vec::new();
+        let mut reader = Cursor::new(source.as_slice());
+        send_file_delta_streaming(
+            &mut buf,
+            0,
+            &mut reader,
+            &sums,
+            seed,
+            ChecksumType::Md5,
+            matcher::DEFAULT_STREAM_CHUNK,
+        )
+        .await
+        .unwrap();
+
+        let data = decode_tokens(&buf).await;
+        assert_eq!(data, source);
+    }
+
+    #[tokio::test]
+    async fn test_send_file_delta_streaming_small_chunks() {
+        let mut basis = vec![0u8; 5000];
+        for (i, b) in basis.iter_mut().enumerate() {
+            *b = (i % 256) as u8;
+        }
+        let source = basis.clone();
+        let seed = 55;
+        let sums = sum::compute_signatures(
+            &basis,
+            seed,
+            ChecksumType::Md5,
+            checksum::CHAR_OFFSET_V30,
+            true,
+        );
+
+        // Batch path for reference.
+        let mut batch_buf = Vec::new();
+        send_file_delta_with_sums(&mut batch_buf, 0, &source, &sums, seed, ChecksumType::Md5)
+            .await
+            .unwrap();
+
+        // Streaming path with a very small chunk size.
+        let mut stream_buf = Vec::new();
+        let mut reader = Cursor::new(&source);
+        send_file_delta_streaming(
+            &mut stream_buf,
+            0,
+            &mut reader,
+            &sums,
+            seed,
+            ChecksumType::Md5,
+            1024,
+        )
+        .await
+        .unwrap();
+
+        // Both should decode to the same token sequence.
+        let batch_data = decode_tokens(&batch_buf).await;
+        let stream_data = decode_tokens(&stream_buf).await;
+        assert_eq!(batch_data, stream_data);
+    }
+
+    /// Decode file_index + tokens + checksum from a sender output buffer,
+    /// returning the reconstructed file content.
+    async fn decode_tokens(buf: &[u8]) -> Vec<u8> {
+        let mut cursor = Cursor::new(buf);
+        let _idx = varint::read_int(&mut cursor).await.unwrap();
+        let mut reconstructed = Vec::new();
+        loop {
+            match token::recv_token(&mut cursor).await.unwrap() {
+                token::Token::Data(d) => reconstructed.extend_from_slice(&d),
+                token::Token::EndOfFile => break,
+                token::Token::BlockMatch(_) => {
+                    // For comparison purposes we just note that a match occurred;
+                    // the actual block data comes from the basis which both paths
+                    // reference identically.
+                    reconstructed.extend_from_slice(b"<MATCH>");
+                }
+            }
+        }
+        reconstructed
     }
 }

@@ -5,6 +5,7 @@
 //! abstract away the differences in file I/O between the two sides.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -72,6 +73,20 @@ impl From<WireError> for crate::FerrosyncError {
 pub trait FileReader: Send + Sync {
     /// Read the source data for a file entry.
     fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError>;
+
+    /// Open a streaming reader for a file entry.
+    ///
+    /// Returns a `Read` handle that reads the file without loading it
+    /// entirely into memory. Used by the streaming sender for large files.
+    fn open_stream(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<Box<dyn Read + Send>, crate::error::FsError> {
+        // Default: fall back to read_file + Cursor.
+        let data = self.read_file(entry)?;
+        let vec: Vec<u8> = data.to_vec();
+        Ok(Box::new(std::io::Cursor::new(vec)))
+    }
 }
 
 /// Reads source files from local filesystem using TransferOptions paths.
@@ -106,6 +121,30 @@ impl FileReader for LocalFileReader<'_> {
         }
         Ok(FileData::Empty)
     }
+
+    fn open_stream(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<Box<dyn Read + Send>, crate::error::FsError> {
+        let name_str = String::from_utf8_lossy(&entry.name);
+        for source in self.source_paths {
+            let path = if self.source_paths.len() == 1
+                && self
+                    .fs
+                    .lstat(source)
+                    .is_ok_and(|m| m.mode & S_IFMT == crate::filelist::entry::S_IFDIR)
+            {
+                source.join(name_str.as_ref())
+            } else {
+                source.clone()
+            };
+            if let Ok(reader) = self.fs.read_file_stream(&path) {
+                return Ok(reader);
+            }
+        }
+        // Empty file fallback
+        Ok(Box::new(std::io::Cursor::new(Vec::new())))
+    }
 }
 
 /// Reads source files from a module directory.
@@ -125,6 +164,18 @@ impl FileReader for ModuleFileReader<'_> {
         let name_str = String::from_utf8_lossy(&entry.name);
         let path = self.module_path.join(name_str.as_ref());
         Ok(self.fs.map_file(&path).unwrap_or_default())
+    }
+
+    fn open_stream(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<Box<dyn Read + Send>, crate::error::FsError> {
+        let name_str = String::from_utf8_lossy(&entry.name);
+        let path = self.module_path.join(name_str.as_ref());
+        match self.fs.read_file_stream(&path) {
+            Ok(reader) => Ok(reader),
+            Err(_) => Ok(Box::new(std::io::Cursor::new(Vec::new()))),
+        }
     }
 }
 
@@ -458,19 +509,6 @@ where
             size: entry.len,
         });
 
-        // Read local source data.
-        let source_data = file_reader.read_file(entry)?;
-
-        // Match blocks and compute delta.
-        let ops = matcher::match_blocks(
-            &source_data,
-            &sums,
-            seed,
-            checksum_type,
-            checksum::CHAR_OFFSET_V30,
-            protocol.proper_seed_order,
-        );
-
         // Stream sender response: NDX + iflags + sum_head (small header),
         // then tokens individually, then file checksum.
         // Each piece goes to the wire as its own MUX frame(s), avoiding
@@ -500,35 +538,95 @@ where
         sum::write_sum_head(&mut hdr, &resp_sum_head).await?;
         mplex_out.write_data(&hdr).await?;
 
-        // 2. Stream delta tokens directly to the wire.
+        // 2. Read source data and stream delta tokens directly to the wire.
         let mut literal_bytes = 0u64;
         let mut matched_bytes = 0u64;
-        for op in &ops {
-            match op {
-                matcher::MatchOp::Data(data) => {
-                    let mut tok_buf = Vec::with_capacity(data.len() + 4);
-                    token::send_data(&mut tok_buf, data).await?;
-                    mplex_out.write_data(&tok_buf).await?;
-                    literal_bytes += data.len() as u64;
+
+        if entry.len >= crate::fs::STREAMING_THRESHOLD {
+            // Streaming path: process in chunks to avoid O(file_size) memory.
+            let mut stream_reader = file_reader.open_stream(entry)?;
+            let mut smatcher = matcher::StreamingMatcher::new(
+                &sums,
+                seed,
+                checksum_type,
+                checksum::CHAR_OFFSET_V30,
+                protocol.proper_seed_order,
+                matcher::DEFAULT_STREAM_CHUNK,
+            );
+            let mut file_hash = checksum::IncrementalChecksum::new(checksum_type);
+
+            loop {
+                let (ops, done) = smatcher
+                    .process_chunk(&mut *stream_reader, &mut file_hash)
+                    .map_err(WireError::Io)?;
+                for op in &ops {
+                    match op {
+                        matcher::OwnedMatchOp::Data(data) => {
+                            let mut tok_buf = Vec::with_capacity(data.len() + 4);
+                            token::send_data(&mut tok_buf, data).await?;
+                            mplex_out.write_data(&tok_buf).await?;
+                            literal_bytes += data.len() as u64;
+                        }
+                        matcher::OwnedMatchOp::BlockMatch(block_idx) => {
+                            let mut tok_buf = Vec::with_capacity(8);
+                            token::send_block_match(&mut tok_buf, *block_idx).await?;
+                            mplex_out.write_data(&tok_buf).await?;
+                            if sums.head.blength > 0 {
+                                matched_bytes += sums.head.blength as u64;
+                            }
+                        }
+                    }
                 }
-                matcher::MatchOp::BlockMatch(block_idx) => {
-                    let mut tok_buf = Vec::with_capacity(8);
-                    token::send_block_match(&mut tok_buf, *block_idx).await?;
-                    mplex_out.write_data(&tok_buf).await?;
-                    if sums.head.blength > 0 {
-                        matched_bytes += sums.head.blength as u64;
+                if done {
+                    break;
+                }
+            }
+            let mut eof_buf = Vec::with_capacity(8);
+            token::send_eof(&mut eof_buf).await?;
+            mplex_out.write_data(&eof_buf).await?;
+
+            let file_sum = file_hash.finalize();
+            mplex_out.write_data(&file_sum).await?;
+            mplex_out.flush().await?;
+        } else {
+            // Existing mmap path for small/medium files.
+            let source_data = file_reader.read_file(entry)?;
+
+            let ops = matcher::match_blocks(
+                &source_data,
+                &sums,
+                seed,
+                checksum_type,
+                checksum::CHAR_OFFSET_V30,
+                protocol.proper_seed_order,
+            );
+
+            for op in &ops {
+                match op {
+                    matcher::MatchOp::Data(data) => {
+                        let mut tok_buf = Vec::with_capacity(data.len() + 4);
+                        token::send_data(&mut tok_buf, data).await?;
+                        mplex_out.write_data(&tok_buf).await?;
+                        literal_bytes += data.len() as u64;
+                    }
+                    matcher::MatchOp::BlockMatch(block_idx) => {
+                        let mut tok_buf = Vec::with_capacity(8);
+                        token::send_block_match(&mut tok_buf, *block_idx).await?;
+                        mplex_out.write_data(&tok_buf).await?;
+                        if sums.head.blength > 0 {
+                            matched_bytes += sums.head.blength as u64;
+                        }
                     }
                 }
             }
-        }
-        let mut eof_buf = Vec::with_capacity(8);
-        token::send_eof(&mut eof_buf).await?;
-        mplex_out.write_data(&eof_buf).await?;
+            let mut eof_buf = Vec::with_capacity(8);
+            token::send_eof(&mut eof_buf).await?;
+            mplex_out.write_data(&eof_buf).await?;
 
-        // 3. File-level checksum.
-        let file_sum = checksum::file_checksum(&source_data, seed, checksum_type);
-        mplex_out.write_data(&file_sum).await?;
-        mplex_out.flush().await?;
+            let file_sum = checksum::file_checksum(&source_data, seed, checksum_type);
+            mplex_out.write_data(&file_sum).await?;
+            mplex_out.flush().await?;
+        }
 
         stats.files_transferred += 1;
         stats.total_size += entry.len as u64;
