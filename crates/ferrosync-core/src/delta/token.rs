@@ -115,7 +115,14 @@ pub async fn send_data<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> Result<
 
 /// Write a block match token to the wire.
 pub async fn send_block_match<W: AsyncWrite + Unpin>(w: &mut W, block_index: i32) -> Result<()> {
-    let token = -(block_index + 1);
+    let token = block_index
+        .checked_add(1)
+        .and_then(|b| b.checked_neg())
+        .ok_or(ProtocolError::WireValueOutOfRange {
+            field: "block_index",
+            value: block_index as i64,
+            max: i32::MAX as i64,
+        })?;
     varint::write_int(w, token).await
 }
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
-use crate::delta::{checksum, matcher, sum, token};
+use crate::delta::{checksum, matcher, sum, token, ProtocolContext};
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::receiver;
 use crate::error::ProtocolError;
@@ -45,8 +45,13 @@ impl From<crate::FerrosyncError> for WireError {
         match e {
             crate::FerrosyncError::Protocol(p) => WireError::Protocol(p),
             crate::FerrosyncError::Fs(f) => WireError::Fs(f),
-            other => WireError::Protocol(ProtocolError::Handshake {
-                message: other.to_string(),
+            // Transport and Filter errors should not occur in wire transfer
+            // context; convert losslessly via the Display representation.
+            crate::FerrosyncError::Transport(t) => WireError::Protocol(ProtocolError::Handshake {
+                message: t.to_string(),
+            }),
+            crate::FerrosyncError::Filter(f) => WireError::Protocol(ProtocolError::Handshake {
+                message: f.to_string(),
             }),
         }
     }
@@ -421,8 +426,7 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let seed = protocol.seed;
-    let checksum_type = protocol.checksum;
+    let ctx = ProtocolContext::from_protocol(protocol);
     let int_codec = protocol.wire.int_codec;
     let wire = &protocol.wire;
 
@@ -545,15 +549,9 @@ where
         if entry.len >= crate::fs::STREAMING_THRESHOLD {
             // Streaming path: process in chunks to avoid O(file_size) memory.
             let mut stream_reader = file_reader.open_stream(entry)?;
-            let mut smatcher = matcher::StreamingMatcher::new(
-                &sums,
-                seed,
-                checksum_type,
-                checksum::CHAR_OFFSET_V30,
-                protocol.proper_seed_order,
-                matcher::DEFAULT_STREAM_CHUNK,
-            );
-            let mut file_hash = checksum::IncrementalChecksum::new(checksum_type);
+            let mut smatcher =
+                matcher::StreamingMatcher::new(&sums, &ctx, matcher::DEFAULT_STREAM_CHUNK);
+            let mut file_hash = checksum::IncrementalChecksum::new(ctx.checksum_type);
 
             loop {
                 let (ops, done) = smatcher
@@ -592,14 +590,7 @@ where
             // Existing mmap path for small/medium files.
             let source_data = file_reader.read_file(entry)?;
 
-            let ops = matcher::match_blocks(
-                &source_data,
-                &sums,
-                seed,
-                checksum_type,
-                checksum::CHAR_OFFSET_V30,
-                protocol.proper_seed_order,
-            );
+            let ops = matcher::match_blocks(&source_data, &sums, &ctx);
 
             for op in &ops {
                 match op {
@@ -623,7 +614,7 @@ where
             token::send_eof(&mut eof_buf).await?;
             mplex_out.write_data(&eof_buf).await?;
 
-            let file_sum = checksum::file_checksum(&source_data, seed, checksum_type);
+            let file_sum = checksum::file_checksum(&source_data, &ctx);
             mplex_out.write_data(&file_sum).await?;
             mplex_out.flush().await?;
         }
@@ -680,8 +671,7 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let seed = protocol.seed;
-    let checksum_type = protocol.checksum;
+    let ctx = ProtocolContext::from_protocol(protocol);
     let int_codec = protocol.wire.int_codec;
     let wire = &protocol.wire;
 
@@ -729,13 +719,7 @@ where
             const ITEM_TRANSFER: u16 = 1 << 15;
             varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
         }
-        let sigs = sum::compute_signatures(
-            &basis_data,
-            seed,
-            checksum_type,
-            checksum::CHAR_OFFSET_V30,
-            protocol.proper_seed_order,
-        );
+        let sigs = sum::compute_signatures(&basis_data, &ctx);
         sum::write_sums(&mut sig_buf, &sigs).await?;
         mplex_out.write_data(&sig_buf).await?;
         mplex_out.flush().await?;
@@ -781,8 +765,7 @@ where
             demux_read,
             &basis_data,
             blength,
-            seed,
-            checksum_type,
+            &ctx,
             &mut writer,
         )
         .await?;
@@ -851,10 +834,8 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let seed = protocol.seed;
-    let checksum_type = protocol.checksum;
+    let ctx = ProtocolContext::from_protocol(protocol);
     let int_codec = protocol.wire.int_codec;
-    let proper_seed_order = protocol.proper_seed_order;
     let has_iflags = protocol.wire.has_iflags;
 
     // Create directories first (same as sequential loop).
@@ -901,13 +882,7 @@ where
             let basis_data = gen_file_ops.read_basis(entry);
 
             // Compute block signatures.
-            let sigs = sum::compute_signatures(
-                &basis_data,
-                seed,
-                checksum_type,
-                checksum::CHAR_OFFSET_V30,
-                proper_seed_order,
-            );
+            let sigs = sum::compute_signatures(&basis_data, &ctx);
 
             let blength = if sigs.head.blength > 0 {
                 sigs.head.blength as usize
@@ -1007,8 +982,7 @@ where
                     &mut demux_read,
                     &basis_data,
                     blength_actual,
-                    seed,
-                    checksum_type,
+                    &ctx,
                     &mut writer,
                 )
                 .await?;

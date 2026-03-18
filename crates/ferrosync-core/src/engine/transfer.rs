@@ -9,12 +9,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::delta::checksum;
+use crate::delta::ProtocolContext;
 use crate::error::FsError;
 use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
 use crate::filter::FilterRuleList;
 use crate::fs::{DirEntry, FileSystem};
 use crate::options::{DeleteMode, TransferOptions};
-use crate::protocol::handshake::{ChecksumType, NegotiatedProtocol};
+use crate::protocol::handshake::NegotiatedProtocol;
 use crate::stats::TransferStats;
 
 use super::file_decision;
@@ -38,14 +39,13 @@ pub struct TransferResult {
 pub async fn execute_transfer(
     fs: &dyn FileSystem,
     options: &TransferOptions,
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
     if let Some(timeout_secs) = options.timeout() {
         match tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            execute_transfer_impl(fs, options, seed, checksum_type, progress),
+            execute_transfer_impl(fs, options, ctx, progress),
         )
         .await
         {
@@ -59,7 +59,7 @@ pub async fn execute_transfer(
             })),
         }
     } else {
-        execute_transfer_impl(fs, options, seed, checksum_type, progress).await
+        execute_transfer_impl(fs, options, ctx, progress).await
     }
 }
 
@@ -74,7 +74,8 @@ pub async fn execute_transfer_protocol(
     protocol: &NegotiatedProtocol,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
-    execute_transfer(fs, options, protocol.seed, protocol.checksum, progress).await
+    let ctx = ProtocolContext::from_protocol(protocol);
+    execute_transfer(fs, options, &ctx, progress).await
 }
 
 /// Execute a transfer consuming file entries from a channel.
@@ -93,13 +94,12 @@ pub async fn execute_transfer_streaming(
     rx: &mut tokio::sync::mpsc::Receiver<FileEntry>,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
-    let seed = protocol.seed;
-    let checksum_type = protocol.checksum;
+    let ctx = ProtocolContext::from_protocol(protocol);
 
     if let Some(timeout_secs) = options.timeout() {
         match tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            execute_transfer_streaming_impl(fs, options, seed, checksum_type, rx, progress),
+            execute_transfer_streaming_impl(fs, options, &ctx, rx, progress),
         )
         .await
         {
@@ -113,15 +113,14 @@ pub async fn execute_transfer_streaming(
             })),
         }
     } else {
-        execute_transfer_streaming_impl(fs, options, seed, checksum_type, rx, progress).await
+        execute_transfer_streaming_impl(fs, options, &ctx, rx, progress).await
     }
 }
 
 async fn execute_transfer_impl(
     fs: &dyn FileSystem,
     options: &TransferOptions,
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
     let mut stats = TransferStats::new();
@@ -295,8 +294,8 @@ async fn execute_transfer_impl(
         if options.checksum_mode() {
             if let Ok(dest_data) = fs.map_file(&dest_path) {
                 let src_data = fs.map_file(&item.source_path)?;
-                let src_sum = checksum::file_checksum(&src_data, seed, checksum_type);
-                let dst_sum = checksum::file_checksum(&dest_data, seed, checksum_type);
+                let src_sum = checksum::file_checksum(&src_data, ctx);
+                let dst_sum = checksum::file_checksum(&dest_data, ctx);
                 if src_sum == dst_sum {
                     stats.files_skipped += 1;
                     progress.emit(ProgressEvent::FileSkipped {
@@ -391,15 +390,14 @@ async fn execute_transfer_impl(
             delta_data = pipeline::transfer_file_compressed(
                 &source_data,
                 &basis_data,
-                seed,
-                checksum_type,
+                ctx,
                 options.compress_level(),
             )
             .await
             .map_err(crate::FerrosyncError::Protocol)?;
             &delta_data
         } else {
-            delta_data = pipeline::transfer_file(&source_data, &basis_data, seed, checksum_type)
+            delta_data = pipeline::transfer_file(&source_data, &basis_data, ctx)
                 .await
                 .map_err(crate::FerrosyncError::Protocol)?;
             &delta_data
@@ -486,8 +484,7 @@ async fn execute_transfer_impl(
 async fn execute_transfer_streaming_impl(
     fs: &dyn FileSystem,
     options: &TransferOptions,
-    _seed: i32,
-    _checksum_type: ChecksumType,
+    _ctx: &ProtocolContext,
     rx: &mut tokio::sync::mpsc::Receiver<FileEntry>,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
@@ -951,7 +948,13 @@ mod tests {
     ) -> TransferResult {
         let fs = UnixFileSystem::new();
         let mut progress = ProgressTracker::new();
-        execute_transfer(&fs, &opts, 42, ChecksumType::Md5, &mut progress)
+        let ctx = ProtocolContext {
+            seed: 42,
+            checksum_type: crate::protocol::handshake::ChecksumType::Md5,
+            char_offset: 0,
+            proper_seed_order: true,
+        };
+        execute_transfer(&fs, &opts, &ctx, &mut progress)
             .await
             .unwrap()
     }
@@ -1599,7 +1602,13 @@ mod tests {
             .build();
 
         let fs = UnixFileSystem::new();
-        execute_transfer(&fs, &opts, 42, ChecksumType::Md5, &mut progress)
+        let ctx = ProtocolContext {
+            seed: 42,
+            checksum_type: crate::protocol::handshake::ChecksumType::Md5,
+            char_offset: 0,
+            proper_seed_order: true,
+        };
+        execute_transfer(&fs, &opts, &ctx, &mut progress)
             .await
             .unwrap();
 
@@ -1611,7 +1620,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_transfer_protocol() {
-        use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::handshake::{
+            compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
+        };
         use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
@@ -1654,7 +1665,9 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_transfer_dry_run() {
         use crate::filelist::entry::S_IFREG;
-        use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::handshake::{
+            compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
+        };
         use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
@@ -1716,7 +1729,9 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_transfer_directories() {
         use crate::filelist::entry::{S_IFDIR, S_IFREG};
-        use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::handshake::{
+            compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
+        };
         use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
@@ -1775,7 +1790,9 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_transfer_with_size_filter() {
         use crate::filelist::entry::S_IFREG;
-        use crate::protocol::handshake::{compat_flags, CompressType, NegotiatedProtocol};
+        use crate::protocol::handshake::{
+            compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
+        };
         use crate::protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();

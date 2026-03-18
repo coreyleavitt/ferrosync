@@ -8,9 +8,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::delta::checksum;
 use crate::delta::token::{self, Token};
+use crate::delta::ProtocolContext;
 use crate::error::ProtocolError;
 use crate::protocol::compress::Decompressor;
-use crate::protocol::handshake::ChecksumType;
 use crate::protocol::varint;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
@@ -44,8 +44,7 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     r: &mut R,
     basis_data: &[u8],
     blength: usize,
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let block_count = if blength > 0 && !basis_data.is_empty() {
@@ -68,7 +67,20 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
             }
             Token::BlockMatch(idx) => {
                 let idx = idx as usize;
-                let offset = idx * blength;
+                if idx >= block_count {
+                    return Err(ProtocolError::WireValueOutOfRange {
+                        field: "block_index",
+                        value: idx as i64,
+                        max: block_count.saturating_sub(1) as i64,
+                    });
+                }
+                let offset =
+                    idx.checked_mul(blength)
+                        .ok_or(ProtocolError::WireValueOutOfRange {
+                            field: "block_offset",
+                            value: idx as i64,
+                            max: i64::MAX,
+                        })?;
                 let len = if block_count > 0
                     && idx == block_count - 1
                     && remainder > 0
@@ -88,13 +100,13 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     }
 
     // Read and verify file-level checksum.
-    let digest_len = checksum_type.digest_len();
+    let digest_len = ctx.checksum_type.digest_len();
     let mut received_checksum = vec![0u8; digest_len];
     r.read_exact(&mut received_checksum)
         .await
         .map_err(ProtocolError::from)?;
 
-    let computed_checksum = checksum::file_checksum(&output, seed, checksum_type);
+    let computed_checksum = checksum::file_checksum(&output, ctx);
     if received_checksum != computed_checksum {
         return Err(ProtocolError::ChecksumMismatch {
             expected: hex_encode(&received_checksum),
@@ -113,8 +125,7 @@ pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
     r: &mut R,
     basis_data: &[u8],
     blength: usize,
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
     decompressor: &mut Decompressor,
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
@@ -137,7 +148,20 @@ pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
             }
             Token::BlockMatch(idx) => {
                 let idx = idx as usize;
-                let offset = idx * blength;
+                if idx >= block_count {
+                    return Err(ProtocolError::WireValueOutOfRange {
+                        field: "block_index",
+                        value: idx as i64,
+                        max: block_count.saturating_sub(1) as i64,
+                    });
+                }
+                let offset =
+                    idx.checked_mul(blength)
+                        .ok_or(ProtocolError::WireValueOutOfRange {
+                            field: "block_offset",
+                            value: idx as i64,
+                            max: i64::MAX,
+                        })?;
                 let len = if block_count > 0
                     && idx == block_count - 1
                     && remainder > 0
@@ -156,13 +180,13 @@ pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
         }
     }
 
-    let digest_len = checksum_type.digest_len();
+    let digest_len = ctx.checksum_type.digest_len();
     let mut received_checksum = vec![0u8; digest_len];
     r.read_exact(&mut received_checksum)
         .await
         .map_err(ProtocolError::from)?;
 
-    let computed_checksum = checksum::file_checksum(&output, seed, checksum_type);
+    let computed_checksum = checksum::file_checksum(&output, ctx);
     if received_checksum != computed_checksum {
         return Err(ProtocolError::ChecksumMismatch {
             expected: hex_encode(&received_checksum),
@@ -184,11 +208,10 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
     r: &mut R,
     basis_data: &[u8],
     blength: usize,
-    _seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
     writer: &mut W,
 ) -> Result<u64> {
-    let mut hasher = checksum::IncrementalChecksum::new(checksum_type);
+    let mut hasher = checksum::IncrementalChecksum::new(ctx.checksum_type);
     let mut bytes_written = 0u64;
 
     let block_count = if blength > 0 && !basis_data.is_empty() {
@@ -214,7 +237,20 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
             }
             Token::BlockMatch(idx) => {
                 let idx = idx as usize;
-                let offset = idx * blength;
+                if idx >= block_count {
+                    return Err(ProtocolError::WireValueOutOfRange {
+                        field: "block_index",
+                        value: idx as i64,
+                        max: block_count.saturating_sub(1) as i64,
+                    });
+                }
+                let offset =
+                    idx.checked_mul(blength)
+                        .ok_or(ProtocolError::WireValueOutOfRange {
+                            field: "block_offset",
+                            value: idx as i64,
+                            max: i64::MAX,
+                        })?;
                 let len = if block_count > 0
                     && idx == block_count - 1
                     && remainder > 0
@@ -239,7 +275,7 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
     }
 
     // Read and verify file-level checksum.
-    let digest_len = checksum_type.digest_len();
+    let digest_len = ctx.checksum_type.digest_len();
     let mut received_checksum = vec![0u8; digest_len];
     r.read_exact(&mut received_checksum)
         .await
@@ -267,25 +303,21 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{sum, token};
+    use crate::delta::{sum, token, ProtocolContext};
     use crate::engine::sender;
+    use crate::protocol::handshake::ChecksumType;
     use std::io::Cursor;
 
     #[tokio::test]
     async fn test_recv_new_file() {
         let source = b"hello world, this is new data!";
         let seed = 42;
-        let sums = sum::compute_signatures(
-            b"",
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(b"", &ctx);
 
         // Sender writes: file_index + tokens + checksum.
         let mut buf = Vec::new();
-        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, seed, ChecksumType::Md5)
+        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -299,7 +331,7 @@ mod tests {
         } else {
             700
         };
-        let result = recv_file_delta(&mut cursor, b"", blength, seed, ChecksumType::Md5)
+        let result = recv_file_delta(&mut cursor, b"", blength, &ctx)
             .await
             .unwrap();
 
@@ -310,16 +342,11 @@ mod tests {
     async fn test_recv_identical_file() {
         let data = vec![0xABu8; 3000];
         let seed = 99;
-        let sums = sum::compute_signatures(
-            &data,
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(&data, &ctx);
 
         let mut buf = Vec::new();
-        sender::send_file_delta_with_sums(&mut buf, 0, &data, &sums, seed, ChecksumType::Md5)
+        sender::send_file_delta_with_sums(&mut buf, 0, &data, &sums, &ctx)
             .await
             .unwrap();
 
@@ -332,7 +359,7 @@ mod tests {
         } else {
             700
         };
-        let result = recv_file_delta(&mut cursor, &data, blength, seed, ChecksumType::Md5)
+        let result = recv_file_delta(&mut cursor, &data, blength, &ctx)
             .await
             .unwrap();
 
@@ -350,16 +377,11 @@ mod tests {
         source[2501] = 0xFF;
 
         let seed = 7;
-        let sums = sum::compute_signatures(
-            &basis,
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(&basis, &ctx);
 
         let mut buf = Vec::new();
-        sender::send_file_delta_with_sums(&mut buf, 3, &source, &sums, seed, ChecksumType::Md5)
+        sender::send_file_delta_with_sums(&mut buf, 3, &source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -372,7 +394,7 @@ mod tests {
         } else {
             700
         };
-        let result = recv_file_delta(&mut cursor, &basis, blength, seed, ChecksumType::Md5)
+        let result = recv_file_delta(&mut cursor, &basis, blength, &ctx)
             .await
             .unwrap();
 
@@ -397,7 +419,8 @@ mod tests {
         let mut cursor = Cursor::new(&buf);
         let _ = recv_file_index(&mut cursor).await.unwrap();
 
-        let result = recv_file_delta(&mut cursor, b"", 700, seed, ChecksumType::Md5).await;
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let result = recv_file_delta(&mut cursor, b"", 700, &ctx).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -422,16 +445,11 @@ mod tests {
     async fn test_recv_file_delta_to_writer_new_file() {
         let source = b"hello world, this is new data!";
         let seed = 42;
-        let sums = sum::compute_signatures(
-            b"",
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(b"", &ctx);
 
         let mut buf = Vec::new();
-        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, seed, ChecksumType::Md5)
+        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -446,16 +464,9 @@ mod tests {
         };
 
         let mut output = Vec::new();
-        let bytes = recv_file_delta_to_writer(
-            &mut cursor,
-            b"",
-            blength,
-            seed,
-            ChecksumType::Md5,
-            &mut output,
-        )
-        .await
-        .unwrap();
+        let bytes = recv_file_delta_to_writer(&mut cursor, b"", blength, &ctx, &mut output)
+            .await
+            .unwrap();
 
         assert_eq!(output, source);
         assert_eq!(bytes, source.len() as u64);
@@ -472,16 +483,11 @@ mod tests {
         source[2501] = 0xFF;
 
         let seed = 7;
-        let sums = sum::compute_signatures(
-            &basis,
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(&basis, &ctx);
 
         let mut buf = Vec::new();
-        sender::send_file_delta_with_sums(&mut buf, 3, &source, &sums, seed, ChecksumType::Md5)
+        sender::send_file_delta_with_sums(&mut buf, 3, &source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -496,16 +502,9 @@ mod tests {
         };
 
         let mut output = Vec::new();
-        recv_file_delta_to_writer(
-            &mut cursor,
-            &basis,
-            blength,
-            seed,
-            ChecksumType::Md5,
-            &mut output,
-        )
-        .await
-        .unwrap();
+        recv_file_delta_to_writer(&mut cursor, &basis, blength, &ctx, &mut output)
+            .await
+            .unwrap();
 
         assert_eq!(output, source);
     }
@@ -515,16 +514,11 @@ mod tests {
         // Verify streaming and buffered paths produce identical results.
         let source = b"data that exercises both code paths for correctness";
         let seed = 99;
-        let sums = sum::compute_signatures(
-            b"",
-            seed,
-            ChecksumType::Blake3,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Blake3);
+        let sums = sum::compute_signatures(b"", &ctx);
 
         let mut buf = Vec::new();
-        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, seed, ChecksumType::Blake3)
+        sender::send_file_delta_with_sums(&mut buf, 0, source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -536,7 +530,7 @@ mod tests {
         } else {
             700
         };
-        let buffered = recv_file_delta(&mut cursor1, b"", blength, seed, ChecksumType::Blake3)
+        let buffered = recv_file_delta(&mut cursor1, b"", blength, &ctx)
             .await
             .unwrap();
 
@@ -544,16 +538,9 @@ mod tests {
         let mut cursor2 = Cursor::new(&buf);
         let _ = recv_file_index(&mut cursor2).await.unwrap();
         let mut streamed = Vec::new();
-        recv_file_delta_to_writer(
-            &mut cursor2,
-            b"",
-            blength,
-            seed,
-            ChecksumType::Blake3,
-            &mut streamed,
-        )
-        .await
-        .unwrap();
+        recv_file_delta_to_writer(&mut cursor2, b"", blength, &ctx, &mut streamed)
+            .await
+            .unwrap();
 
         assert_eq!(buffered, streamed);
     }

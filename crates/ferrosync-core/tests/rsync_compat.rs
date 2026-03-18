@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use ferrosync_core::delta::ProtocolContext;
 use ferrosync_core::engine::progress::ProgressTracker;
 use ferrosync_core::engine::transfer::execute_transfer;
 use ferrosync_core::fs::unix::UnixFileSystem;
@@ -86,9 +87,13 @@ fn collect_files(root: &Path, current: &Path) -> std::collections::BTreeMap<Stri
 async fn run_transfer(opts: &TransferOptions) -> ferrosync_core::Result<()> {
     let fs = UnixFileSystem::new();
     let mut progress = ProgressTracker::new();
-    let seed = 0;
-    let checksum_type = ChecksumType::Blake3;
-    execute_transfer(&fs, opts, seed, checksum_type, &mut progress).await?;
+    let ctx = ProtocolContext {
+        seed: 0,
+        checksum_type: ChecksumType::Blake3,
+        char_offset: 0,
+        proper_seed_order: true,
+    };
+    execute_transfer(&fs, opts, &ctx, &mut progress).await?;
     Ok(())
 }
 

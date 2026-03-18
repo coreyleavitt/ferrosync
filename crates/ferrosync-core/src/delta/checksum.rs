@@ -6,6 +6,7 @@
 //! - **Strong checksum** (checksum2): MD4 (proto < 30) or MD5 (proto >= 30),
 //!   used to verify candidate matches and for whole-file verification.
 
+use crate::delta::ProtocolContext;
 use crate::protocol::handshake::ChecksumType;
 
 /// Maximum digest length for any supported checksum algorithm.
@@ -42,18 +43,13 @@ pub fn checksum1(data: &[u8], char_offset: u32) -> u32 {
 /// When `proper_seed_order` is true (modern rsync, CF_CHKSUM_SEED_FIX),
 /// the seed is hashed before the data. When false (older rsync), the seed
 /// is hashed after the data.
-pub fn checksum2(
-    data: &[u8],
-    seed: i32,
-    checksum_type: ChecksumType,
-    proper_seed_order: bool,
-) -> Vec<u8> {
-    let seed_bytes = seed.to_le_bytes();
-    match checksum_type {
+pub fn checksum2(data: &[u8], ctx: &ProtocolContext) -> Vec<u8> {
+    let seed_bytes = ctx.seed.to_le_bytes();
+    match ctx.checksum_type {
         ChecksumType::Md4 => {
             use md4::{Digest, Md4};
             let mut h = Md4::new();
-            if proper_seed_order {
+            if ctx.proper_seed_order {
                 h.update(seed_bytes);
                 h.update(data);
             } else {
@@ -65,7 +61,7 @@ pub fn checksum2(
         ChecksumType::Md5 => {
             use md5::{Digest, Md5};
             let mut h = Md5::new();
-            if proper_seed_order {
+            if ctx.proper_seed_order {
                 h.update(seed_bytes);
                 h.update(data);
             } else {
@@ -76,7 +72,7 @@ pub fn checksum2(
         }
         ChecksumType::Blake3 => {
             let mut h = blake3::Hasher::new();
-            if proper_seed_order {
+            if ctx.proper_seed_order {
                 h.update(&seed_bytes);
                 h.update(data);
             } else {
@@ -87,14 +83,14 @@ pub fn checksum2(
         }
         ChecksumType::Xxh3 => {
             // XOR seed into the xxh3 seed parameter.
-            let hash = xxhash_rust::xxh3::xxh3_64_with_seed(data, seed as u64);
+            let hash = xxhash_rust::xxh3::xxh3_64_with_seed(data, ctx.seed as u64);
             hash.to_le_bytes().to_vec()
         }
         ChecksumType::Xxh128 => {
-            let hash = xxhash_rust::xxh3::xxh3_128_with_seed(data, seed as u64);
+            let hash = xxhash_rust::xxh3::xxh3_128_with_seed(data, ctx.seed as u64);
             hash.to_le_bytes().to_vec()
         }
-        ChecksumType::None => vec![0; checksum_type.digest_len()],
+        ChecksumType::None => vec![0; ctx.checksum_type.digest_len()],
     }
 }
 
@@ -104,8 +100,8 @@ pub fn checksum2(
 /// NOT include the seed for MD5 and modern MD4. Only old MD4 variants
 /// (not used since protocol 30) hash the seed. This matches rsync's
 /// `sum_init`/`sum_update`/`sum_end` flow.
-pub fn file_checksum(data: &[u8], _seed: i32, checksum_type: ChecksumType) -> Vec<u8> {
-    match checksum_type {
+pub fn file_checksum(data: &[u8], ctx: &ProtocolContext) -> Vec<u8> {
+    match ctx.checksum_type {
         ChecksumType::Md4 => {
             use md4::{Digest, Md4};
             let mut h = Md4::new();
@@ -131,7 +127,7 @@ pub fn file_checksum(data: &[u8], _seed: i32, checksum_type: ChecksumType) -> Ve
             let hash = xxhash_rust::xxh3::xxh3_128(data);
             hash.to_le_bytes().to_vec()
         }
-        ChecksumType::None => vec![0; checksum_type.digest_len()],
+        ChecksumType::None => vec![0; ctx.checksum_type.digest_len()],
     }
 }
 
@@ -269,6 +265,20 @@ impl RollingChecksum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::ProtocolContext;
+
+    fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {
+        ProtocolContext::test_default(seed, ct)
+    }
+
+    fn ctx_old_order(seed: i32, ct: ChecksumType) -> ProtocolContext {
+        ProtocolContext {
+            seed,
+            checksum_type: ct,
+            char_offset: CHAR_OFFSET_V30,
+            proper_seed_order: false,
+        }
+    }
 
     #[test]
     fn test_checksum1_empty() {
@@ -307,14 +317,9 @@ mod tests {
 
     #[test]
     fn test_rolling_slide() {
-        // Compute checksum of "ello " by sliding from "hello" one byte right.
         let data = b"hello world";
         let block_len = 5;
-
-        // Batch checksum of the second window.
         let expected = checksum1(&data[1..1 + block_len], CHAR_OFFSET_V30);
-
-        // Rolling checksum: start at first window, slide forward.
         let mut rolling = RollingChecksum::new(CHAR_OFFSET_V30);
         rolling.compute(&data[..block_len]);
         rolling.roll(data[0], data[block_len]);
@@ -323,48 +328,39 @@ mod tests {
 
     #[test]
     fn test_checksum2_md5() {
-        let c = checksum2(b"test data", 12345, ChecksumType::Md5, true);
+        let c = checksum2(b"test data", &ctx(12345, ChecksumType::Md5));
         assert_eq!(c.len(), ChecksumType::Md5.digest_len());
-        // Verify determinism.
-        assert_eq!(c, checksum2(b"test data", 12345, ChecksumType::Md5, true));
+        assert_eq!(c, checksum2(b"test data", &ctx(12345, ChecksumType::Md5)));
     }
 
     #[test]
     fn test_checksum2_md4() {
-        let c = checksum2(b"test data", 12345, ChecksumType::Md4, true);
+        let c = checksum2(b"test data", &ctx(12345, ChecksumType::Md4));
         assert_eq!(c.len(), ChecksumType::Md4.digest_len());
     }
 
     #[test]
     fn test_checksum2_different_seeds() {
-        let c1 = checksum2(b"same data", 1, ChecksumType::Md5, true);
-        let c2 = checksum2(b"same data", 2, ChecksumType::Md5, true);
+        let c1 = checksum2(b"same data", &ctx(1, ChecksumType::Md5));
+        let c2 = checksum2(b"same data", &ctx(2, ChecksumType::Md5));
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn test_checksum2_seed_order() {
-        // When proper_seed_order is true, seed goes before data.
-        // When false, seed goes after data. Results should differ.
-        let c_proper = checksum2(b"test", 42, ChecksumType::Md5, true);
-        let c_old = checksum2(b"test", 42, ChecksumType::Md5, false);
+        let c_proper = checksum2(b"test", &ctx(42, ChecksumType::Md5));
+        let c_old = checksum2(b"test", &ctx_old_order(42, ChecksumType::Md5));
         assert_ne!(c_proper, c_old);
     }
 
     #[test]
     fn test_file_checksum_no_seed() {
-        // file_checksum does NOT include the seed (unlike checksum2).
         let data = b"file contents";
-        let seed = 42;
-        // With seed, checksum2 differs from seedless file_checksum.
-        assert_ne!(
-            file_checksum(data, seed, ChecksumType::Md5),
-            checksum2(data, seed, ChecksumType::Md5, true),
-        );
-        // file_checksum is plain MD5 of data.
+        let c = &ctx(42, ChecksumType::Md5);
+        assert_ne!(file_checksum(data, c), checksum2(data, c));
         use md5::{Digest, Md5};
         let expected = Md5::digest(data).to_vec();
-        assert_eq!(file_checksum(data, seed, ChecksumType::Md5), expected);
+        assert_eq!(file_checksum(data, c), expected);
     }
 
     // -----------------------------------------------------------------------
@@ -373,16 +369,15 @@ mod tests {
 
     #[test]
     fn test_blake3_file_checksum_empty() {
-        let c = file_checksum(b"", 0, ChecksumType::Blake3);
+        let c = file_checksum(b"", &ctx(0, ChecksumType::Blake3));
         assert_eq!(c.len(), 32);
-        // Known BLAKE3 hash of empty input.
         let expected = blake3::hash(b"");
         assert_eq!(c, expected.as_bytes().as_slice());
     }
 
     #[test]
     fn test_blake3_file_checksum_hello_world() {
-        let c = file_checksum(b"hello world", 0, ChecksumType::Blake3);
+        let c = file_checksum(b"hello world", &ctx(0, ChecksumType::Blake3));
         assert_eq!(c.len(), 32);
         let expected = blake3::hash(b"hello world");
         assert_eq!(c, expected.as_bytes().as_slice());
@@ -390,30 +385,30 @@ mod tests {
 
     #[test]
     fn test_blake3_checksum2_deterministic() {
-        let c1 = checksum2(b"test data", 42, ChecksumType::Blake3, true);
-        let c2 = checksum2(b"test data", 42, ChecksumType::Blake3, true);
+        let c1 = checksum2(b"test data", &ctx(42, ChecksumType::Blake3));
+        let c2 = checksum2(b"test data", &ctx(42, ChecksumType::Blake3));
         assert_eq!(c1.len(), 32);
         assert_eq!(c1, c2);
     }
 
     #[test]
     fn test_blake3_checksum2_seed_order() {
-        let c_proper = checksum2(b"test", 42, ChecksumType::Blake3, true);
-        let c_old = checksum2(b"test", 42, ChecksumType::Blake3, false);
+        let c_proper = checksum2(b"test", &ctx(42, ChecksumType::Blake3));
+        let c_old = checksum2(b"test", &ctx_old_order(42, ChecksumType::Blake3));
         assert_ne!(c_proper, c_old);
     }
 
     #[test]
     fn test_blake3_checksum2_different_seeds() {
-        let c1 = checksum2(b"same", 1, ChecksumType::Blake3, true);
-        let c2 = checksum2(b"same", 2, ChecksumType::Blake3, true);
+        let c1 = checksum2(b"same", &ctx(1, ChecksumType::Blake3));
+        let c2 = checksum2(b"same", &ctx(2, ChecksumType::Blake3));
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn test_blake3_file_checksum_ignores_seed() {
-        let c1 = file_checksum(b"data", 1, ChecksumType::Blake3);
-        let c2 = file_checksum(b"data", 999, ChecksumType::Blake3);
+        let c1 = file_checksum(b"data", &ctx(1, ChecksumType::Blake3));
+        let c2 = file_checksum(b"data", &ctx(999, ChecksumType::Blake3));
         assert_eq!(c1, c2);
     }
 
@@ -423,30 +418,29 @@ mod tests {
 
     #[test]
     fn test_xxh3_checksum2_deterministic() {
-        let c1 = checksum2(b"test data", 42, ChecksumType::Xxh3, true);
-        let c2 = checksum2(b"test data", 42, ChecksumType::Xxh3, true);
+        let c1 = checksum2(b"test data", &ctx(42, ChecksumType::Xxh3));
+        let c2 = checksum2(b"test data", &ctx(42, ChecksumType::Xxh3));
         assert_eq!(c1.len(), 8);
         assert_eq!(c1, c2);
     }
 
     #[test]
     fn test_xxh3_checksum2_known_vector() {
-        // Verify against the xxhash-rust crate directly.
         let hash = xxhash_rust::xxh3::xxh3_64_with_seed(b"hello", 0);
-        let c = checksum2(b"hello", 0, ChecksumType::Xxh3, true);
+        let c = checksum2(b"hello", &ctx(0, ChecksumType::Xxh3));
         assert_eq!(c, hash.to_le_bytes());
     }
 
     #[test]
     fn test_xxh3_checksum2_different_seeds() {
-        let c1 = checksum2(b"same", 1, ChecksumType::Xxh3, true);
-        let c2 = checksum2(b"same", 2, ChecksumType::Xxh3, true);
+        let c1 = checksum2(b"same", &ctx(1, ChecksumType::Xxh3));
+        let c2 = checksum2(b"same", &ctx(2, ChecksumType::Xxh3));
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn test_xxh3_file_checksum() {
-        let c = file_checksum(b"hello world", 0, ChecksumType::Xxh3);
+        let c = file_checksum(b"hello world", &ctx(0, ChecksumType::Xxh3));
         assert_eq!(c.len(), 8);
         let expected = xxhash_rust::xxh3::xxh3_64(b"hello world");
         assert_eq!(c, expected.to_le_bytes());
@@ -454,8 +448,8 @@ mod tests {
 
     #[test]
     fn test_xxh3_file_checksum_ignores_seed() {
-        let c1 = file_checksum(b"data", 1, ChecksumType::Xxh3);
-        let c2 = file_checksum(b"data", 999, ChecksumType::Xxh3);
+        let c1 = file_checksum(b"data", &ctx(1, ChecksumType::Xxh3));
+        let c2 = file_checksum(b"data", &ctx(999, ChecksumType::Xxh3));
         assert_eq!(c1, c2);
     }
 
@@ -465,8 +459,8 @@ mod tests {
 
     #[test]
     fn test_xxh128_checksum2_deterministic() {
-        let c1 = checksum2(b"test data", 42, ChecksumType::Xxh128, true);
-        let c2 = checksum2(b"test data", 42, ChecksumType::Xxh128, true);
+        let c1 = checksum2(b"test data", &ctx(42, ChecksumType::Xxh128));
+        let c2 = checksum2(b"test data", &ctx(42, ChecksumType::Xxh128));
         assert_eq!(c1.len(), 16);
         assert_eq!(c1, c2);
     }
@@ -474,20 +468,20 @@ mod tests {
     #[test]
     fn test_xxh128_checksum2_known_vector() {
         let hash = xxhash_rust::xxh3::xxh3_128_with_seed(b"hello", 0);
-        let c = checksum2(b"hello", 0, ChecksumType::Xxh128, true);
+        let c = checksum2(b"hello", &ctx(0, ChecksumType::Xxh128));
         assert_eq!(c, hash.to_le_bytes());
     }
 
     #[test]
     fn test_xxh128_checksum2_different_seeds() {
-        let c1 = checksum2(b"same", 1, ChecksumType::Xxh128, true);
-        let c2 = checksum2(b"same", 2, ChecksumType::Xxh128, true);
+        let c1 = checksum2(b"same", &ctx(1, ChecksumType::Xxh128));
+        let c2 = checksum2(b"same", &ctx(2, ChecksumType::Xxh128));
         assert_ne!(c1, c2);
     }
 
     #[test]
     fn test_xxh128_file_checksum() {
-        let c = file_checksum(b"hello world", 0, ChecksumType::Xxh128);
+        let c = file_checksum(b"hello world", &ctx(0, ChecksumType::Xxh128));
         assert_eq!(c.len(), 16);
         let expected = xxhash_rust::xxh3::xxh3_128(b"hello world");
         assert_eq!(c, expected.to_le_bytes());
@@ -495,8 +489,8 @@ mod tests {
 
     #[test]
     fn test_xxh128_file_checksum_ignores_seed() {
-        let c1 = file_checksum(b"data", 1, ChecksumType::Xxh128);
-        let c2 = file_checksum(b"data", 999, ChecksumType::Xxh128);
+        let c1 = file_checksum(b"data", &ctx(1, ChecksumType::Xxh128));
+        let c2 = file_checksum(b"data", &ctx(999, ChecksumType::Xxh128));
         assert_eq!(c1, c2);
     }
 
@@ -507,7 +501,7 @@ mod tests {
     #[test]
     fn test_incremental_matches_batch_md5() {
         let data = b"hello world, this is a test of incremental checksumming";
-        let batch = file_checksum(data, 0, ChecksumType::Md5);
+        let batch = file_checksum(data, &ctx(0, ChecksumType::Md5));
         let mut inc = IncrementalChecksum::new(ChecksumType::Md5);
         inc.update(&data[..10]);
         inc.update(&data[10..30]);
@@ -518,7 +512,7 @@ mod tests {
     #[test]
     fn test_incremental_matches_batch_blake3() {
         let data = b"blake3 incremental test data";
-        let batch = file_checksum(data, 0, ChecksumType::Blake3);
+        let batch = file_checksum(data, &ctx(0, ChecksumType::Blake3));
         let mut inc = IncrementalChecksum::new(ChecksumType::Blake3);
         inc.update(&data[..5]);
         inc.update(&data[5..]);
@@ -528,7 +522,7 @@ mod tests {
     #[test]
     fn test_incremental_matches_batch_xxh3() {
         let data = b"xxh3 incremental test data";
-        let batch = file_checksum(data, 0, ChecksumType::Xxh3);
+        let batch = file_checksum(data, &ctx(0, ChecksumType::Xxh3));
         let mut inc = IncrementalChecksum::new(ChecksumType::Xxh3);
         inc.update(&data[..8]);
         inc.update(&data[8..]);
@@ -538,7 +532,7 @@ mod tests {
     #[test]
     fn test_incremental_matches_batch_xxh128() {
         let data = b"xxh128 incremental test data";
-        let batch = file_checksum(data, 0, ChecksumType::Xxh128);
+        let batch = file_checksum(data, &ctx(0, ChecksumType::Xxh128));
         let mut inc = IncrementalChecksum::new(ChecksumType::Xxh128);
         inc.update(&data[..12]);
         inc.update(&data[12..]);
@@ -548,7 +542,7 @@ mod tests {
     #[test]
     fn test_incremental_matches_batch_md4() {
         let data = b"md4 incremental test data";
-        let batch = file_checksum(data, 0, ChecksumType::Md4);
+        let batch = file_checksum(data, &ctx(0, ChecksumType::Md4));
         let mut inc = IncrementalChecksum::new(ChecksumType::Md4);
         inc.update(data);
         assert_eq!(inc.finalize(), batch);
@@ -556,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_incremental_empty_data() {
-        let batch = file_checksum(b"", 0, ChecksumType::Md5);
+        let batch = file_checksum(b"", &ctx(0, ChecksumType::Md5));
         let inc = IncrementalChecksum::new(ChecksumType::Md5);
         assert_eq!(inc.finalize(), batch);
     }

@@ -27,44 +27,30 @@ use crate::stats::TransferStats;
 /// Server-side session error type.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("session I/O error: {0}")]
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error("protocol error: {message}")]
-    Protocol { message: String },
+    #[error(transparent)]
+    Protocol(#[from] ProtocolError),
+
+    #[error(transparent)]
+    Fs(#[from] FsError),
+
+    #[error(transparent)]
+    Wire(#[from] wire_transfer::WireError),
 
     #[error("module path does not exist: {path}")]
     ModulePathNotFound { path: String },
 }
 
-impl From<ProtocolError> for SessionError {
-    fn from(e: ProtocolError) -> Self {
-        SessionError::Protocol {
-            message: e.to_string(),
-        }
-    }
-}
-
-impl From<FsError> for SessionError {
-    fn from(e: FsError) -> Self {
-        SessionError::Protocol {
-            message: e.to_string(),
-        }
-    }
-}
-
 impl From<crate::FerrosyncError> for SessionError {
     fn from(e: crate::FerrosyncError) -> Self {
-        SessionError::Protocol {
-            message: e.to_string(),
-        }
-    }
-}
-
-impl From<wire_transfer::WireError> for SessionError {
-    fn from(e: wire_transfer::WireError) -> Self {
-        SessionError::Protocol {
-            message: e.to_string(),
+        match e {
+            crate::FerrosyncError::Protocol(p) => SessionError::Protocol(p),
+            crate::FerrosyncError::Fs(f) => SessionError::Fs(f),
+            other => SessionError::Protocol(ProtocolError::Handshake {
+                message: other.to_string(),
+            }),
         }
     }
 }
@@ -255,11 +241,7 @@ impl ServerSession {
 
         // Send file list.
         let mut flist_buf = Vec::new();
-        exchange::send_file_list(&mut flist_buf, &entries, protocol, opts)
-            .await
-            .map_err(|e| SessionError::Protocol {
-                message: e.to_string(),
-            })?;
+        exchange::send_file_list(&mut flist_buf, &entries, protocol, opts).await?;
 
         mplex_out.write_data(&flist_buf).await?;
         mplex_out.flush().await?;
@@ -314,12 +296,12 @@ impl ServerSession {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         if module.read_only {
-            return Err(SessionError::Protocol {
+            return Err(SessionError::Protocol(ProtocolError::Handshake {
                 message: format!(
                     "module '{}' is read-only, cannot receive files",
                     module.name
                 ),
-            });
+            }));
         }
 
         // Enable multiplexing.
@@ -341,11 +323,7 @@ impl ServerSession {
         }
 
         // Receive file list from client sender.
-        let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts)
-            .await
-            .map_err(|e| SessionError::Protocol {
-                message: e.to_string(),
-            })?;
+        let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts).await?;
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
 

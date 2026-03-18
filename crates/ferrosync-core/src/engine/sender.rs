@@ -12,9 +12,9 @@ use crate::delta::checksum;
 use crate::delta::matcher::{self, MatchOp, OwnedMatchOp, StreamingMatcher};
 use crate::delta::sum::{self, SumStruct};
 use crate::delta::token;
+use crate::delta::ProtocolContext;
 use crate::error::ProtocolError;
 use crate::protocol::compress::Compressor;
-use crate::protocol::handshake::ChecksumType;
 use crate::protocol::varint;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
@@ -31,27 +31,19 @@ pub async fn send_file_delta<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     token_writer: &mut W,
     file_index: i32,
     source_data: &[u8],
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
 ) -> Result<()> {
     // Read block signatures from the generator.
     let sums = sum::read_sums(sig_reader).await?;
 
     // Match blocks.
-    let ops = matcher::match_blocks(
-        source_data,
-        &sums,
-        seed,
-        checksum_type,
-        checksum::CHAR_OFFSET_V30,
-        true,
-    );
+    let ops = matcher::match_blocks(source_data, &sums, ctx);
 
     // Write file index.
     varint::write_int(token_writer, file_index).await?;
 
     // Write tokens + checksum.
-    write_tokens_and_checksum(token_writer, &ops, source_data, seed, checksum_type).await
+    write_tokens_and_checksum(token_writer, &ops, source_data, ctx).await
 }
 
 /// Signal end of sender output (no more files).
@@ -65,21 +57,13 @@ pub async fn send_file_delta_with_sums<W: AsyncWrite + Unpin>(
     file_index: i32,
     source_data: &[u8],
     sums: &SumStruct,
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
 ) -> Result<()> {
-    let ops = matcher::match_blocks(
-        source_data,
-        sums,
-        seed,
-        checksum_type,
-        checksum::CHAR_OFFSET_V30,
-        true,
-    );
+    let ops = matcher::match_blocks(source_data, sums, ctx);
 
     varint::write_int(token_writer, file_index).await?;
 
-    write_tokens_and_checksum(token_writer, &ops, source_data, seed, checksum_type).await
+    write_tokens_and_checksum(token_writer, &ops, source_data, ctx).await
 }
 
 /// Process a single file with compressed token output.
@@ -88,19 +72,11 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
     token_writer: &mut W,
     file_index: i32,
     source_data: &[u8],
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
     compressor: &mut Compressor,
 ) -> Result<()> {
     let sums = sum::read_sums(sig_reader).await?;
-    let ops = matcher::match_blocks(
-        source_data,
-        &sums,
-        seed,
-        checksum_type,
-        checksum::CHAR_OFFSET_V30,
-        true,
-    );
+    let ops = matcher::match_blocks(source_data, &sums, ctx);
 
     varint::write_int(token_writer, file_index).await?;
 
@@ -116,7 +92,7 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
     }
     token::send_eof_compressed(token_writer).await?;
 
-    let file_sum = checksum::file_checksum(source_data, seed, checksum_type);
+    let file_sum = checksum::file_checksum(source_data, ctx);
     token_writer
         .write_all(&file_sum)
         .await
@@ -135,21 +111,13 @@ pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
     file_index: i32,
     reader: &mut dyn Read,
     sums: &SumStruct,
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
     chunk_size: usize,
 ) -> Result<()> {
     varint::write_int(token_writer, file_index).await?;
 
-    let mut smatcher = StreamingMatcher::new(
-        sums,
-        seed,
-        checksum_type,
-        checksum::CHAR_OFFSET_V30,
-        true,
-        chunk_size,
-    );
-    let mut file_hash = checksum::IncrementalChecksum::new(checksum_type);
+    let mut smatcher = StreamingMatcher::new(sums, ctx, chunk_size);
+    let mut file_hash = checksum::IncrementalChecksum::new(ctx.checksum_type);
 
     loop {
         let (ops, done) = smatcher
@@ -183,8 +151,7 @@ async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     w: &mut W,
     ops: &[MatchOp<'_>],
     source_data: &[u8],
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
 ) -> Result<()> {
     for op in ops {
         match op {
@@ -194,7 +161,7 @@ async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     }
     token::send_eof(w).await?;
 
-    let file_sum = checksum::file_checksum(source_data, seed, checksum_type);
+    let file_sum = checksum::file_checksum(source_data, ctx);
     w.write_all(&file_sum).await.map_err(ProtocolError::from)?;
 
     Ok(())
@@ -204,17 +171,20 @@ async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use crate::delta::sum;
+    use crate::delta::ProtocolContext;
+    use crate::protocol::handshake::ChecksumType;
     use std::io::Cursor;
 
     #[tokio::test]
     async fn test_send_file_delta_new_file() {
         let source = b"brand new file contents";
-        let sums =
-            sum::compute_signatures(b"", 0, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
+        let ctx = ProtocolContext::test_default(0, ChecksumType::Md5);
+        let sums = sum::compute_signatures(b"", &ctx);
         let seed = 42;
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
 
         let mut buf = Vec::new();
-        send_file_delta_with_sums(&mut buf, 0, source, &sums, seed, ChecksumType::Md5)
+        send_file_delta_with_sums(&mut buf, 0, source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -239,7 +209,7 @@ mod tests {
         tokio::io::AsyncReadExt::read_exact(&mut cursor, &mut csum)
             .await
             .unwrap();
-        let expected = checksum::file_checksum(source, seed, ChecksumType::Md5);
+        let expected = checksum::file_checksum(source, &ctx);
         assert_eq!(csum, expected);
     }
 
@@ -248,29 +218,17 @@ mod tests {
         let basis = vec![0xABu8; 3000];
         let source = basis.clone();
         let seed = 99;
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
 
-        let sums = sum::compute_signatures(
-            &basis,
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let sums = sum::compute_signatures(&basis, &ctx);
         let mut sig_buf = Vec::new();
         sum::write_sums(&mut sig_buf, &sums).await.unwrap();
 
         let mut sig_cursor = Cursor::new(&sig_buf);
         let mut token_buf = Vec::new();
-        send_file_delta(
-            &mut sig_cursor,
-            &mut token_buf,
-            0,
-            &source,
-            seed,
-            ChecksumType::Md5,
-        )
-        .await
-        .unwrap();
+        send_file_delta(&mut sig_cursor, &mut token_buf, 0, &source, &ctx)
+            .await
+            .unwrap();
 
         assert!(!token_buf.is_empty());
     }
@@ -288,17 +246,12 @@ mod tests {
         source[2501] = 0xFF;
 
         let seed = 42;
-        let sums = sum::compute_signatures(
-            &basis,
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(&basis, &ctx);
 
         // Batch path.
         let mut batch_buf = Vec::new();
-        send_file_delta_with_sums(&mut batch_buf, 0, &source, &sums, seed, ChecksumType::Md5)
+        send_file_delta_with_sums(&mut batch_buf, 0, &source, &sums, &ctx)
             .await
             .unwrap();
 
@@ -310,8 +263,7 @@ mod tests {
             0,
             &mut reader,
             &sums,
-            seed,
-            ChecksumType::Md5,
+            &ctx,
             matcher::DEFAULT_STREAM_CHUNK,
         )
         .await
@@ -326,9 +278,10 @@ mod tests {
     #[tokio::test]
     async fn test_send_file_delta_streaming_new_file() {
         let source = b"brand new file contents";
-        let sums =
-            sum::compute_signatures(b"", 0, ChecksumType::Md5, checksum::CHAR_OFFSET_V30, true);
+        let ctx_zero = ProtocolContext::test_default(0, ChecksumType::Md5);
+        let sums = sum::compute_signatures(b"", &ctx_zero);
         let seed = 42;
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
 
         let mut buf = Vec::new();
         let mut reader = Cursor::new(source.as_slice());
@@ -337,8 +290,7 @@ mod tests {
             0,
             &mut reader,
             &sums,
-            seed,
-            ChecksumType::Md5,
+            &ctx,
             matcher::DEFAULT_STREAM_CHUNK,
         )
         .await
@@ -356,34 +308,21 @@ mod tests {
         }
         let source = basis.clone();
         let seed = 55;
-        let sums = sum::compute_signatures(
-            &basis,
-            seed,
-            ChecksumType::Md5,
-            checksum::CHAR_OFFSET_V30,
-            true,
-        );
+        let ctx = ProtocolContext::test_default(seed, ChecksumType::Md5);
+        let sums = sum::compute_signatures(&basis, &ctx);
 
         // Batch path for reference.
         let mut batch_buf = Vec::new();
-        send_file_delta_with_sums(&mut batch_buf, 0, &source, &sums, seed, ChecksumType::Md5)
+        send_file_delta_with_sums(&mut batch_buf, 0, &source, &sums, &ctx)
             .await
             .unwrap();
 
         // Streaming path with a very small chunk size.
         let mut stream_buf = Vec::new();
         let mut reader = Cursor::new(&source);
-        send_file_delta_streaming(
-            &mut stream_buf,
-            0,
-            &mut reader,
-            &sums,
-            seed,
-            ChecksumType::Md5,
-            1024,
-        )
-        .await
-        .unwrap();
+        send_file_delta_streaming(&mut stream_buf, 0, &mut reader, &sums, &ctx, 1024)
+            .await
+            .unwrap();
 
         // Both should decode to the same token sequence.
         let batch_data = decode_tokens(&batch_buf).await;

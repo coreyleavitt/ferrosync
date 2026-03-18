@@ -5,10 +5,9 @@
 
 use tokio::io::AsyncWrite;
 
-use crate::delta::checksum;
 use crate::delta::sum::{self, SumStruct};
+use crate::delta::ProtocolContext;
 use crate::error::ProtocolError;
-use crate::protocol::handshake::ChecksumType;
 use crate::protocol::varint;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
@@ -21,20 +20,13 @@ pub async fn send_file_signatures<W: AsyncWrite + Unpin>(
     w: &mut W,
     file_index: i32,
     basis_data: &[u8],
-    seed: i32,
-    checksum_type: ChecksumType,
+    ctx: &ProtocolContext,
 ) -> Result<()> {
     // Write file index.
     varint::write_int(w, file_index).await?;
 
     // Compute and send signatures.
-    let sums = sum::compute_signatures(
-        basis_data,
-        seed,
-        checksum_type,
-        checksum::CHAR_OFFSET_V30,
-        true,
-    );
+    let sums = sum::compute_signatures(basis_data, ctx);
     sum::write_sums(w, &sums).await?;
 
     Ok(())
@@ -65,6 +57,8 @@ pub async fn recv_file_signatures<R: tokio::io::AsyncRead + Unpin>(r: &mut R) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::delta::ProtocolContext;
+    use crate::protocol::handshake::ChecksumType;
     use std::io::Cursor;
 
     #[tokio::test]
@@ -74,9 +68,14 @@ mod tests {
         let checksum_type = ChecksumType::Md5;
 
         let mut buf = Vec::new();
-        send_file_signatures(&mut buf, 0, &basis, seed, checksum_type)
-            .await
-            .unwrap();
+        send_file_signatures(
+            &mut buf,
+            0,
+            &basis,
+            &ProtocolContext::test_default(seed, checksum_type),
+        )
+        .await
+        .unwrap();
         send_generator_done(&mut buf).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
@@ -97,9 +96,14 @@ mod tests {
     #[tokio::test]
     async fn test_empty_basis() {
         let mut buf = Vec::new();
-        send_file_signatures(&mut buf, 5, b"", 0, ChecksumType::Md5)
-            .await
-            .unwrap();
+        send_file_signatures(
+            &mut buf,
+            5,
+            b"",
+            &ProtocolContext::test_default(0, ChecksumType::Md5),
+        )
+        .await
+        .unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let idx = recv_file_index(&mut cursor).await.unwrap();
