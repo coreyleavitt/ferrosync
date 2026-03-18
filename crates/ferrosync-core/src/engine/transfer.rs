@@ -399,10 +399,9 @@ async fn execute_transfer_impl(
             .map_err(crate::FerrosyncError::Protocol)?;
             &delta_data
         } else {
-            delta_data =
-                pipeline::transfer_file(&source_data, &basis_data, seed, checksum_type)
-                    .await
-                    .map_err(crate::FerrosyncError::Protocol)?;
+            delta_data = pipeline::transfer_file(&source_data, &basis_data, seed, checksum_type)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)?;
             &delta_data
         };
 
@@ -428,13 +427,7 @@ async fn execute_transfer_impl(
         };
 
         // Write the file (choosing method based on options).
-        file_decision::write_file_with_options(
-            fs,
-            &write_path,
-            result_data,
-            &item.entry,
-            options,
-        )?;
+        file_decision::write_file_with_options(fs, &write_path, result_data, &item.entry, options)?;
 
         // --partial-dir: move from partial dir to final destination.
         if options.partial_dir().is_some() && write_path != dest_path {
