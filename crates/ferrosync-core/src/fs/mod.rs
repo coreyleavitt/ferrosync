@@ -141,14 +141,8 @@ pub trait FileSystem: Send + Sync {
 
     /// Return a streaming writer for the file at `path`.
     ///
-    /// The writer creates the file (or truncates if it exists). The default
-    /// implementation collects all written bytes into an in-memory buffer.
-    ///
-    /// Platform implementations override this with proper file I/O.
-    fn write_file_stream(&self, path: &Path, _mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
-        let _ = path;
-        Ok(Box::new(BufferedFileWriter::new()))
-    }
+    /// The writer creates the file (or truncates if it exists).
+    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn Write + Send>>;
 }
 
 /// Threshold in bytes above which streaming I/O is preferred over buffered
@@ -158,32 +152,6 @@ pub const STREAMING_THRESHOLD: i64 = 64 * 1024 * 1024;
 /// Threshold in bytes below which `map_file` uses a heap buffer instead of
 /// mmap. Below 32 KiB the mmap setup cost outweighs the copy.
 pub const MMAP_THRESHOLD: i64 = 32 * 1024;
-
-/// Collects writes into an in-memory buffer.
-///
-/// Used by the default [`FileSystem::write_file_stream`] implementation.
-/// Platform-specific implementations override `write_file_stream` with
-/// proper file I/O, so this fallback is rarely used in practice.
-pub(crate) struct BufferedFileWriter {
-    buf: Vec<u8>,
-}
-
-impl BufferedFileWriter {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-}
-
-impl Write for BufferedFileWriter {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.buf.extend_from_slice(data);
-        Ok(data.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 /// A directory entry returned by [`FileSystem::read_dir`].
 #[derive(Debug, Clone)]
