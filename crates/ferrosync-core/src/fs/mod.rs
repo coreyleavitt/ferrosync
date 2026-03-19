@@ -10,6 +10,7 @@ pub mod unix;
 #[cfg(windows)]
 pub mod windows;
 
+mod atomic_writer;
 mod file_data;
 mod metadata;
 

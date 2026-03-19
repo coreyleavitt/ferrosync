@@ -4,12 +4,12 @@ use std::fs::{self, FileTimes, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::os::windows::fs::MetadataExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::FsError;
 use crate::filelist::entry::{S_IFDIR, S_IFREG, WIRE_S_IFLNK};
 
+use super::atomic_writer::{unique_tmp_name, AtomicFileWriter};
 use super::metadata::FileMetadata;
 use super::{DirEntry, FileSystem};
 
@@ -30,15 +30,6 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 /// Windows file attribute: reparse point (symlinks, junctions).
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-
-/// Atomic counter for generating unique temp file names.
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Generate a unique temp file name to avoid collisions from concurrent writes.
-fn unique_tmp_name(suffix: &str) -> String {
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(".ferrosync.{}.{}{}.tmp", std::process::id(), seq, suffix)
-}
 
 /// Standard Windows filesystem implementation.
 #[derive(Debug, Default)]
@@ -397,60 +388,20 @@ impl FileSystem for WindowsFileSystem {
 
         let file = fs::File::create(&tmp_path).map_err(|e| Self::map_io_err(&tmp_path, e))?;
 
-        Ok(Box::new(WindowsAtomicFileWriter {
-            inner: std::io::BufWriter::new(file),
+        fn set_windows_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
+            let readonly = mode & 0o222 == 0;
+            let mut perms = fs::metadata(path)?.permissions();
+            perms.set_readonly(readonly);
+            fs::set_permissions(path, perms)
+        }
+
+        Ok(Box::new(AtomicFileWriter::new(
+            file,
             tmp_path,
             dest_path,
             mode,
-            finished: false,
-        }))
-    }
-}
-
-/// Writer that writes to a temp file and atomically renames on close.
-struct WindowsAtomicFileWriter {
-    inner: std::io::BufWriter<fs::File>,
-    tmp_path: std::path::PathBuf,
-    dest_path: std::path::PathBuf,
-    mode: Option<u32>,
-    finished: bool,
-}
-
-impl std::io::Write for WindowsAtomicFileWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-impl WindowsAtomicFileWriter {
-    fn finish_inner(&mut self) -> std::io::Result<()> {
-        if self.finished {
-            return Ok(());
-        }
-        self.finished = true;
-        self.inner.flush()?;
-
-        if let Some(m) = self.mode {
-            let readonly = m & 0o222 == 0;
-            let mut perms = fs::metadata(&self.tmp_path)?.permissions();
-            perms.set_readonly(readonly);
-            fs::set_permissions(&self.tmp_path, perms)?;
-        }
-
-        fs::rename(&self.tmp_path, &self.dest_path)?;
-        Ok(())
-    }
-}
-
-impl Drop for WindowsAtomicFileWriter {
-    fn drop(&mut self) {
-        if self.finish_inner().is_err() {
-            let _ = fs::remove_file(&self.tmp_path);
-        }
+            set_windows_permissions,
+        )))
     }
 }
 
