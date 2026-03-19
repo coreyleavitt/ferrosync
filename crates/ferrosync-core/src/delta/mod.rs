@@ -18,7 +18,7 @@ pub mod ops;
 pub mod sum;
 pub mod token;
 
-pub use ops::{BasisRef, DiffOp, OwnedDiffOp};
+pub use ops::{BasisRef, DiffOp};
 
 use std::io::Read;
 
@@ -90,7 +90,7 @@ pub trait StreamingDeltaComputer {
         &mut self,
         reader: &mut dyn Read,
         checksum: &mut checksum::IncrementalChecksum,
-    ) -> std::io::Result<(Vec<OwnedDiffOp>, bool)>;
+    ) -> std::io::Result<(Vec<DiffOp<'static>>, bool)>;
 }
 
 /// Rsync fixed-block matcher implementing [`DeltaComputer`].
@@ -112,7 +112,7 @@ impl StreamingDeltaComputer for matcher::StreamingMatcher {
         &mut self,
         reader: &mut dyn Read,
         checksum: &mut checksum::IncrementalChecksum,
-    ) -> std::io::Result<(Vec<OwnedDiffOp>, bool)> {
+    ) -> std::io::Result<(Vec<DiffOp<'static>>, bool)> {
         self.process_chunk(reader, checksum)
     }
 }

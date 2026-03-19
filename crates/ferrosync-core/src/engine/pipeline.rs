@@ -139,7 +139,7 @@ pub async fn transfer_file_compressed(
     let send_handle = tokio::spawn(async move {
         let mut r = gen_read;
         let mut w = send_write;
-        let mut compressor = Compressor::new(compress_level);
+        let compressor = Compressor::new(compress_level);
 
         let result = async {
             let idx = generator::recv_file_index(&mut r).await?;
@@ -148,15 +148,8 @@ pub async fn transfer_file_compressed(
                 return Ok(());
             }
 
-            sender::send_file_delta_compressed(
-                &mut r,
-                &mut w,
-                0,
-                &source_owned,
-                &ctx,
-                &mut compressor,
-            )
-            .await?;
+            sender::send_file_delta_compressed(&mut r, &mut w, 0, &source_owned, &ctx, compressor)
+                .await?;
 
             sender::send_sender_done(&mut w).await?;
             Ok::<(), ProtocolError>(())
@@ -173,7 +166,6 @@ pub async fn transfer_file_compressed(
     let recv_basis = basis_data.to_vec();
     let recv_handle = tokio::spawn(async move {
         let mut r = send_read;
-        let mut decompressor = Decompressor::new();
 
         let idx = receiver::recv_file_index(&mut r).await?;
         if idx.is_none() {
@@ -188,8 +180,9 @@ pub async fn transfer_file_compressed(
             700
         };
 
-        receiver::recv_file_delta_compressed(&mut r, &recv_basis, blength, &ctx, &mut decompressor)
-            .await
+        let decompressor = Decompressor::new();
+        let mut reader = crate::delta::token::CompressedTokenReader::new(decompressor);
+        receiver::recv_file_delta_with(&mut r, &mut reader, &recv_basis, blength, &ctx).await
     });
 
     let (gen_result, send_result, recv_result) =

@@ -7,7 +7,7 @@
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::delta::checksum;
-use crate::delta::token::{self, Token};
+use crate::delta::token::{self, Token, TokenReaderT};
 use crate::delta::ProtocolContext;
 use crate::error::ProtocolError;
 use crate::protocol::compress::Decompressor;
@@ -46,6 +46,51 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     blength: usize,
     ctx: &ProtocolContext,
 ) -> Result<Vec<u8>> {
+    let mut reader = token::PlainTokenReader::new();
+    recv_file_delta_with(r, &mut reader, basis_data, blength, ctx).await
+}
+
+/// Receive tokens with decompression and reconstruct a file.
+///
+/// Same as [`recv_file_delta`] but decompresses data tokens using the
+/// provided decompressor.
+pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
+    r: &mut R,
+    basis_data: &[u8],
+    blength: usize,
+    ctx: &ProtocolContext,
+    decompressor: Decompressor,
+) -> Result<Vec<u8>> {
+    let mut reader = token::CompressedTokenReader::new(decompressor);
+    recv_file_delta_with(r, &mut reader, basis_data, blength, ctx).await
+}
+
+/// Receive tokens and reconstruct a file, writing output to a writer.
+///
+/// Same delta reconstruction as [`recv_file_delta`] but writes data
+/// incrementally to `writer` instead of buffering in memory. The file
+/// checksum is computed incrementally as data is written.
+///
+/// Returns the number of bytes written.
+pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
+    r: &mut R,
+    basis_data: &[u8],
+    blength: usize,
+    ctx: &ProtocolContext,
+    writer: &mut W,
+) -> Result<u64> {
+    let mut reader = token::PlainTokenReader::new();
+    recv_file_delta_to_writer_with(r, &mut reader, basis_data, blength, ctx, writer).await
+}
+
+/// Receive tokens using a pluggable reader and reconstruct a file.
+pub async fn recv_file_delta_with<R: AsyncRead + Unpin>(
+    r: &mut R,
+    reader: &mut impl TokenReaderT,
+    basis_data: &[u8],
+    blength: usize,
+    ctx: &ProtocolContext,
+) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let block_count = if blength > 0 && !basis_data.is_empty() {
         basis_data.len().div_ceil(blength)
@@ -59,9 +104,8 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
         blength
     };
 
-    // Read tokens.
     loop {
-        match token::recv_token(r).await? {
+        match reader.read_token(r).await? {
             Token::Data(data) => {
                 output.extend_from_slice(&data);
             }
@@ -117,95 +161,12 @@ pub async fn recv_file_delta<R: AsyncRead + Unpin>(
     Ok(output)
 }
 
-/// Receive tokens with decompression and reconstruct a file.
-///
-/// Same as [`recv_file_delta`] but decompresses data tokens using the
-/// provided decompressor.
-pub async fn recv_file_delta_compressed<R: AsyncRead + Unpin>(
-    r: &mut R,
-    basis_data: &[u8],
-    blength: usize,
-    ctx: &ProtocolContext,
-    decompressor: &mut Decompressor,
-) -> Result<Vec<u8>> {
-    let mut output = Vec::new();
-    let block_count = if blength > 0 && !basis_data.is_empty() {
-        basis_data.len().div_ceil(blength)
-    } else {
-        0
-    };
-    #[allow(clippy::manual_is_multiple_of)]
-    let remainder = if blength > 0 && !basis_data.is_empty() && basis_data.len() % blength != 0 {
-        basis_data.len() % blength
-    } else {
-        blength
-    };
-
-    loop {
-        match token::recv_token_compressed(r, decompressor).await? {
-            Token::Data(data) => {
-                output.extend_from_slice(&data);
-            }
-            Token::BlockMatch(idx) => {
-                let idx = idx as usize;
-                if idx >= block_count {
-                    return Err(ProtocolError::WireValueOutOfRange {
-                        field: "block_index",
-                        value: idx as i64,
-                        max: block_count.saturating_sub(1) as i64,
-                    });
-                }
-                let offset =
-                    idx.checked_mul(blength)
-                        .ok_or(ProtocolError::WireValueOutOfRange {
-                            field: "block_offset",
-                            value: idx as i64,
-                            max: i64::MAX,
-                        })?;
-                let len = if block_count > 0
-                    && idx == block_count - 1
-                    && remainder > 0
-                    && remainder < blength
-                {
-                    remainder
-                } else {
-                    blength
-                };
-                let end = (offset + len).min(basis_data.len());
-                if offset < basis_data.len() {
-                    output.extend_from_slice(&basis_data[offset..end]);
-                }
-            }
-            Token::EndOfFile => break,
-        }
-    }
-
-    let digest_len = ctx.checksum_type.digest_len();
-    let mut received_checksum = vec![0u8; digest_len];
-    r.read_exact(&mut received_checksum)
-        .await
-        .map_err(ProtocolError::from)?;
-
-    let computed_checksum = checksum::file_checksum(&output, ctx);
-    if received_checksum != computed_checksum {
-        return Err(ProtocolError::ChecksumMismatch {
-            expected: hex_encode(&received_checksum),
-            actual: hex_encode(&computed_checksum),
-        });
-    }
-
-    Ok(output)
-}
-
-/// Receive tokens and reconstruct a file, writing output to a writer.
-///
-/// Same delta reconstruction as [`recv_file_delta`] but writes data
-/// incrementally to `writer` instead of buffering in memory. The file
-/// checksum is computed incrementally as data is written.
+/// Receive tokens using a pluggable reader, writing output to a writer.
 ///
 /// Returns the number of bytes written.
-pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
+pub async fn recv_file_delta_to_writer_with<R: AsyncRead + Unpin, W: std::io::Write>(
     r: &mut R,
+    reader: &mut impl TokenReaderT,
     basis_data: &[u8],
     blength: usize,
     ctx: &ProtocolContext,
@@ -227,7 +188,7 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
     };
 
     loop {
-        match token::recv_token(r).await? {
+        match reader.read_token(r).await? {
             Token::Data(data) => {
                 hasher.update(&data);
                 writer

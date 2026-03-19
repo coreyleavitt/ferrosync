@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use super::checksum::{self, RollingChecksum};
-use super::ops::{BasisRef, DiffOp, OwnedDiffOp};
+use super::ops::{BasisRef, DiffOp};
 use super::sum::SumStruct;
 use crate::delta::ProtocolContext;
 
@@ -44,7 +44,7 @@ pub fn match_blocks<'a>(
     }
 
     if sums.head.count <= 0 || sums.head.blength <= 0 {
-        ops.push(DiffOp::Literal(source));
+        ops.push(DiffOp::literal(source));
         return ops;
     }
 
@@ -60,7 +60,7 @@ pub fn match_blocks<'a>(
 
     // Need at least blength bytes for a full block scan.
     if source.len() < blength {
-        ops.push(DiffOp::Literal(source));
+        ops.push(DiffOp::literal(source));
         return ops;
     }
 
@@ -84,7 +84,7 @@ pub fn match_blocks<'a>(
                 if sums.sums[idx].sum2 == strong_truncated {
                     // Flush pending literal data.
                     if literal_start < pos {
-                        ops.push(DiffOp::Literal(&source[literal_start..pos]));
+                        ops.push(DiffOp::literal(&source[literal_start..pos]));
                     }
                     let block_offset = (idx as u64) * (blength as u64);
                     let block_len = block_byte_length(idx, blength, block_count, remainder);
@@ -116,7 +116,7 @@ pub fn match_blocks<'a>(
 
     // Flush remaining literal data.
     if literal_start < source.len() {
-        ops.push(DiffOp::Literal(&source[literal_start..]));
+        ops.push(DiffOp::literal(&source[literal_start..]));
     }
 
     ops
@@ -220,7 +220,7 @@ impl StreamingMatcher {
         &mut self,
         reader: &mut dyn Read,
         checksum: &mut checksum::IncrementalChecksum,
-    ) -> std::io::Result<(Vec<OwnedDiffOp>, bool)> {
+    ) -> std::io::Result<(Vec<DiffOp<'static>>, bool)> {
         let mut ops = Vec::new();
 
         // Step 1: Fill the buffer.
@@ -251,7 +251,7 @@ impl StreamingMatcher {
 
             // Flush any literal data that will be discarded by the shift.
             if self.literal_start < shift_by {
-                ops.push(OwnedDiffOp::Literal(
+                ops.push(DiffOp::literal_owned(
                     self.buf[self.literal_start..shift_by].to_vec(),
                 ));
                 self.literal_start = shift_by;
@@ -283,13 +283,13 @@ impl StreamingMatcher {
 
         if self.no_sums {
             if self.buf_len > 0 {
-                ops.push(OwnedDiffOp::Literal(self.buf[..self.buf_len].to_vec()));
+                ops.push(DiffOp::literal_owned(self.buf[..self.buf_len].to_vec()));
             }
             return Ok((ops, self.exhausted));
         }
 
         if self.buf_len < self.blength {
-            ops.push(OwnedDiffOp::Literal(self.buf[..self.buf_len].to_vec()));
+            ops.push(DiffOp::literal_owned(self.buf[..self.buf_len].to_vec()));
             return Ok((ops, true));
         }
 
@@ -318,14 +318,14 @@ impl StreamingMatcher {
                     if self.sum2_entries[idx] == strong_truncated {
                         // Flush pending literal data.
                         if self.literal_start < self.pos {
-                            ops.push(OwnedDiffOp::Literal(
+                            ops.push(DiffOp::literal_owned(
                                 self.buf[self.literal_start..self.pos].to_vec(),
                             ));
                         }
                         let block_offset = (idx as u64) * (self.blength as u64);
                         let block_len =
                             block_byte_length(idx, self.blength, self.block_count, self.remainder);
-                        ops.push(OwnedDiffOp::Copy(BasisRef {
+                        ops.push(DiffOp::Copy(BasisRef {
                             offset: block_offset,
                             length: block_len,
                         }));
@@ -360,7 +360,7 @@ impl StreamingMatcher {
         // Step 5: Final flush or continue.
         if self.exhausted {
             if self.literal_start < self.buf_len {
-                ops.push(OwnedDiffOp::Literal(
+                ops.push(DiffOp::literal_owned(
                     self.buf[self.literal_start..self.buf_len].to_vec(),
                 ));
             }
@@ -386,7 +386,7 @@ fn read_fill(reader: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::ops::{apply_diffops, apply_owned_diffops};
+    use crate::delta::ops::apply_diffops;
     use crate::delta::sum::compute_signatures;
     use crate::delta::ProtocolContext;
     use crate::protocol::handshake::ChecksumType;
@@ -414,7 +414,7 @@ mod tests {
         let literal_bytes: usize = ops
             .iter()
             .filter_map(|op| match op {
-                DiffOp::Literal(d) => Some(d.len()),
+                DiffOp::Literal(ref d) => Some(d.len()),
                 _ => None,
             })
             .sum();
@@ -441,7 +441,7 @@ mod tests {
         let literal_bytes: usize = ops
             .iter()
             .filter_map(|op| match op {
-                DiffOp::Literal(d) => Some(d.len()),
+                DiffOp::Literal(ref d) => Some(d.len()),
                 _ => None,
             })
             .sum();
@@ -492,7 +492,7 @@ mod tests {
         let sums = compute_signatures(b"", &c);
         let ops = match_blocks(b"hello", &sums, &c);
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], DiffOp::Literal(b"hello"));
+        assert_eq!(ops[0], DiffOp::literal(b"hello"));
     }
 
     #[test]
@@ -502,12 +502,12 @@ mod tests {
         let sums = compute_signatures(&basis, &c);
         let ops = match_blocks(b"tiny", &sums, &c);
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], DiffOp::Literal(b"tiny"));
+        assert_eq!(ops[0], DiffOp::literal(b"tiny"));
     }
 
     #[test]
     fn test_apply_ops_all_literal() {
-        let ops = vec![DiffOp::Literal(b"all new data")];
+        let ops = vec![DiffOp::literal(b"all new data")];
         let result = apply_diffops(b"", &ops);
         assert_eq!(result, b"all new data");
     }
@@ -540,7 +540,7 @@ mod tests {
         sums: &super::super::sum::SumStruct,
         c: &ProtocolContext,
         chunk_size: usize,
-    ) -> Vec<OwnedDiffOp> {
+    ) -> Vec<DiffOp<'static>> {
         use std::io::Cursor;
         let mut cursor = Cursor::new(source);
         let mut matcher = StreamingMatcher::new(sums, c, chunk_size);
@@ -562,7 +562,7 @@ mod tests {
         let data = vec![42u8; 5000];
         let sums = compute_signatures(&data, &c);
         let ops = streaming_match_all(&data, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(&data, &ops);
+        let reconstructed = apply_diffops(&data, &ops);
         assert_eq!(reconstructed, data);
     }
 
@@ -573,7 +573,7 @@ mod tests {
         let source = vec![0xFFu8; 5000];
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(&basis, &ops);
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -590,7 +590,7 @@ mod tests {
 
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(&basis, &ops);
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -600,7 +600,7 @@ mod tests {
         let basis = vec![0u8; 1000];
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(b"", &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(&basis, &ops);
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, b"");
     }
 
@@ -610,7 +610,7 @@ mod tests {
         let basis = vec![0u8; 5000];
         let sums = compute_signatures(&basis, &c);
         let ops = streaming_match_all(b"tiny", &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(&basis, &ops);
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, b"tiny");
     }
 
@@ -619,7 +619,7 @@ mod tests {
         let c = ctx(0, ChecksumType::Md5);
         let sums = compute_signatures(b"", &c);
         let ops = streaming_match_all(b"hello", &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(b"", &ops);
+        let reconstructed = apply_diffops(b"", &ops);
         assert_eq!(reconstructed, b"hello");
     }
 
@@ -639,7 +639,7 @@ mod tests {
 
         for chunk_size in [1024, blength + 1, 256 * 1024] {
             let ops = streaming_match_all(&source, &sums, &c, chunk_size);
-            let reconstructed = apply_owned_diffops(&basis, &ops);
+            let reconstructed = apply_diffops(&basis, &ops);
             assert_eq!(
                 reconstructed, source,
                 "failed with chunk_size={}",
@@ -663,7 +663,7 @@ mod tests {
         source.extend(&basis[700..]);
 
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(&basis, &ops);
+        let reconstructed = apply_diffops(&basis, &ops);
         assert_eq!(reconstructed, source);
     }
 
@@ -677,7 +677,7 @@ mod tests {
             .collect();
         let sums = compute_signatures(b"", &c);
         let ops = streaming_match_all(&source, &sums, &c, DEFAULT_STREAM_CHUNK);
-        let reconstructed = apply_owned_diffops(b"", &ops);
+        let reconstructed = apply_diffops(b"", &ops);
         assert_eq!(reconstructed.len(), source.len());
         assert_eq!(reconstructed, source);
     }

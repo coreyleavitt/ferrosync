@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
-use crate::delta::ops::{DiffOp, OwnedDiffOp};
+use crate::delta::ops::DiffOp;
+use crate::delta::token::TokenWriter;
 use crate::delta::{checksum, matcher, sum, token, ProtocolContext};
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::receiver;
@@ -547,6 +548,8 @@ where
         let mut literal_bytes = 0u64;
         let mut matched_bytes = 0u64;
 
+        let mut tok_writer = token::PlainTokenWriter::new();
+
         if entry.len >= crate::fs::STREAMING_THRESHOLD {
             // Streaming path: process in chunks to avoid O(file_size) memory.
             let mut stream_reader = file_reader.open_stream(entry)?;
@@ -560,19 +563,20 @@ where
                     .map_err(WireError::Io)?;
                 for op in &ops {
                     match op {
-                        OwnedDiffOp::Literal(data) => {
+                        DiffOp::Literal(ref data) => {
                             let mut tok_buf = Vec::with_capacity(data.len() + 4);
-                            token::send_data(&mut tok_buf, data).await?;
+                            tok_writer.write_data(&mut tok_buf, data).await?;
                             mplex_out.write_data(&tok_buf).await?;
                             literal_bytes += data.len() as u64;
                         }
-                        OwnedDiffOp::Copy(bref) => {
+                        DiffOp::Copy(bref) => {
                             let mut tok_buf = Vec::with_capacity(8);
-                            token::send_block_match(
-                                &mut tok_buf,
-                                bref.block_index(sums.head.blength as u32),
-                            )
-                            .await?;
+                            tok_writer
+                                .write_block_match(
+                                    &mut tok_buf,
+                                    bref.block_index(sums.head.blength as u32),
+                                )
+                                .await?;
                             mplex_out.write_data(&tok_buf).await?;
                             matched_bytes += bref.length as u64;
                         }
@@ -583,7 +587,7 @@ where
                 }
             }
             let mut eof_buf = Vec::with_capacity(8);
-            token::send_eof(&mut eof_buf).await?;
+            tok_writer.write_eof(&mut eof_buf).await?;
             mplex_out.write_data(&eof_buf).await?;
 
             let file_sum = file_hash.finalize();
@@ -599,24 +603,25 @@ where
                 match op {
                     DiffOp::Literal(data) => {
                         let mut tok_buf = Vec::with_capacity(data.len() + 4);
-                        token::send_data(&mut tok_buf, data).await?;
+                        tok_writer.write_data(&mut tok_buf, data).await?;
                         mplex_out.write_data(&tok_buf).await?;
                         literal_bytes += data.len() as u64;
                     }
                     DiffOp::Copy(bref) => {
                         let mut tok_buf = Vec::with_capacity(8);
-                        token::send_block_match(
-                            &mut tok_buf,
-                            bref.block_index(sums.head.blength as u32),
-                        )
-                        .await?;
+                        tok_writer
+                            .write_block_match(
+                                &mut tok_buf,
+                                bref.block_index(sums.head.blength as u32),
+                            )
+                            .await?;
                         mplex_out.write_data(&tok_buf).await?;
                         matched_bytes += bref.length as u64;
                     }
                 }
             }
             let mut eof_buf = Vec::with_capacity(8);
-            token::send_eof(&mut eof_buf).await?;
+            tok_writer.write_eof(&mut eof_buf).await?;
             mplex_out.write_data(&eof_buf).await?;
 
             let file_sum = checksum::file_checksum(&source_data, &ctx);

@@ -25,7 +25,7 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use super::ops::{DiffOp, OwnedDiffOp};
+use super::ops::DiffOp;
 use crate::error::ProtocolError;
 use crate::protocol::compress::{Compressor, CompressorType, Decompressor};
 use crate::protocol::varint;
@@ -170,6 +170,9 @@ pub struct CompressedTokenWriter {
     last_run_end: i32,
     flush_pending: bool,
     compressor: Compressor,
+    /// Buffer for data written via `TokenWriter::write_data`, paired with
+    /// the next block_match or eof to preserve rsync's flush semantics.
+    trait_pending_data: Vec<u8>,
 }
 
 impl CompressedTokenWriter {
@@ -180,6 +183,7 @@ impl CompressedTokenWriter {
             last_run_end: 0,
             flush_pending: false,
             compressor,
+            trait_pending_data: Vec::new(),
         }
     }
 
@@ -437,6 +441,145 @@ impl CompressedTokenReader {
 }
 
 // ---------------------------------------------------------------------------
+// TokenWriter / TokenReaderT traits
+// ---------------------------------------------------------------------------
+
+/// Writes delta tokens to an async stream.
+///
+/// Abstracts over plain (varint) and compressed (flag-byte) wire encodings.
+/// Callers write tokens through this trait; the implementation handles
+/// framing and compression transparently.
+#[allow(async_fn_in_trait)]
+pub trait TokenWriter {
+    async fn write_data<W: AsyncWrite + Unpin>(&mut self, w: &mut W, data: &[u8]) -> Result<()>;
+    async fn write_block_match<W: AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        index: i32,
+    ) -> Result<()>;
+    async fn write_eof<W: AsyncWrite + Unpin>(&mut self, w: &mut W) -> Result<()>;
+}
+
+/// Reads delta tokens from an async stream.
+///
+/// Abstracts over plain (varint) and compressed (flag-byte) wire encodings.
+#[allow(async_fn_in_trait)]
+pub trait TokenReaderT {
+    async fn read_token<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Result<Token>;
+}
+
+// ---------------------------------------------------------------------------
+// Plain (uncompressed) implementations
+// ---------------------------------------------------------------------------
+
+/// Plain (uncompressed) token writer. Stateless.
+#[derive(Default)]
+pub struct PlainTokenWriter;
+
+impl PlainTokenWriter {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl TokenWriter for PlainTokenWriter {
+    async fn write_data<W: AsyncWrite + Unpin>(&mut self, w: &mut W, data: &[u8]) -> Result<()> {
+        send_data(w, data).await
+    }
+    async fn write_block_match<W: AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        index: i32,
+    ) -> Result<()> {
+        send_block_match(w, index).await
+    }
+    async fn write_eof<W: AsyncWrite + Unpin>(&mut self, w: &mut W) -> Result<()> {
+        send_eof(w).await
+    }
+}
+
+/// Plain (uncompressed) token reader. Stateless.
+#[derive(Default)]
+pub struct PlainTokenReader;
+
+impl PlainTokenReader {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl TokenReaderT for PlainTokenReader {
+    async fn read_token<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Result<Token> {
+        recv_token(r).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compressed trait implementations
+// ---------------------------------------------------------------------------
+
+impl TokenWriter for CompressedTokenWriter {
+    async fn write_data<W: AsyncWrite + Unpin>(&mut self, w: &mut W, data: &[u8]) -> Result<()> {
+        // Buffer data until the next block_match or eof arrives,
+        // so send_token can pair literal data with the following token
+        // for correct flush/trailer behavior.
+        if self.trait_pending_data.is_empty() {
+            self.trait_pending_data = data.to_vec();
+        } else {
+            // Multiple consecutive write_data calls: flush prior data
+            // as data-only, buffer the new data.
+            let prev = std::mem::replace(&mut self.trait_pending_data, data.to_vec());
+            self.send_token(w, &prev, -2).await?;
+        }
+        Ok(())
+    }
+    async fn write_block_match<W: AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        index: i32,
+    ) -> Result<()> {
+        let data = std::mem::take(&mut self.trait_pending_data);
+        self.send_token(w, &data, index).await
+    }
+    async fn write_eof<W: AsyncWrite + Unpin>(&mut self, w: &mut W) -> Result<()> {
+        let data = std::mem::take(&mut self.trait_pending_data);
+        self.send_token(w, &data, -1).await
+    }
+}
+
+impl TokenReaderT for CompressedTokenReader {
+    async fn read_token<R: AsyncRead + Unpin>(&mut self, r: &mut R) -> Result<Token> {
+        self.recv_token(r).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DiffOp-to-token free functions (generic over TokenWriter)
+// ---------------------------------------------------------------------------
+
+/// Write a sequence of DiffOps as tokens (no trailing EOF).
+///
+/// Callers are responsible for writing EOF after the last batch of ops.
+pub async fn write_diffops<T: TokenWriter, W: AsyncWrite + Unpin>(
+    writer: &mut T,
+    w: &mut W,
+    ops: &[DiffOp<'_>],
+    blength: u32,
+) -> Result<()> {
+    for op in ops {
+        match op {
+            DiffOp::Literal(data) => writer.write_data(w, data).await?,
+            DiffOp::Copy(bref) => {
+                writer
+                    .write_block_match(w, bref.block_index(blength))
+                    .await?
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Convenience wrappers (backward-compatible API)
 // ---------------------------------------------------------------------------
 
@@ -574,46 +717,6 @@ pub async fn recv_token_compressed<R: AsyncRead + Unpin>(
     // TOKEN_LONG: read absolute index.
     let block_index = varint::read_int(r).await?;
     Ok(Token::BlockMatch(block_index))
-}
-
-// ---------------------------------------------------------------------------
-// DiffOp -> wire token helpers
-// ---------------------------------------------------------------------------
-
-/// Write a sequence of borrowed diff operations as rsync wire tokens.
-///
-/// Translates `DiffOp::Copy` back to block indices using `blength`, then
-/// writes uncompressed data/block-match tokens followed by EOF.
-pub async fn write_diffops_as_tokens<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    ops: &[DiffOp<'_>],
-    blength: u32,
-) -> Result<()> {
-    for op in ops {
-        match op {
-            DiffOp::Literal(data) => send_data(w, data).await?,
-            DiffOp::Copy(bref) => send_block_match(w, bref.block_index(blength)).await?,
-        }
-    }
-    send_eof(w).await
-}
-
-/// Write a sequence of owned diff operations as rsync wire tokens.
-///
-/// Same as [`write_diffops_as_tokens`] but for owned operations from
-/// streaming matchers.
-pub async fn write_owned_diffops_as_tokens<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    ops: &[OwnedDiffOp],
-    blength: u32,
-) -> Result<()> {
-    for op in ops {
-        match op {
-            OwnedDiffOp::Literal(data) => send_data(w, data).await?,
-            OwnedDiffOp::Copy(bref) => send_block_match(w, bref.block_index(blength)).await?,
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1126,5 +1229,143 @@ mod tests {
             }
         }
         assert_eq!(selected, Some(CompressType::Zlibx));
+    }
+
+    // -----------------------------------------------------------------------
+    // TokenWriter / TokenReaderT trait tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_plain_trait_roundtrip() {
+        let mut writer = PlainTokenWriter::new();
+        let mut buf = Vec::new();
+
+        writer.write_data(&mut buf, b"hello").await.unwrap();
+        writer.write_block_match(&mut buf, 3).await.unwrap();
+        writer.write_data(&mut buf, b"world").await.unwrap();
+        writer.write_eof(&mut buf).await.unwrap();
+
+        let mut reader = PlainTokenReader::new();
+        let mut cursor = Cursor::new(&buf);
+
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::Data(b"hello".to_vec()),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::BlockMatch(3),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::Data(b"world".to_vec()),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::EndOfFile,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compressed_trait_roundtrip_zlib() {
+        let compressor = Compressor::new(6);
+        let mut writer = CompressedTokenWriter::new(compressor);
+        let mut buf = Vec::new();
+
+        writer
+            .write_data(&mut buf, b"compressed data")
+            .await
+            .unwrap();
+        writer.write_block_match(&mut buf, 0).await.unwrap();
+        writer.write_eof(&mut buf).await.unwrap();
+
+        let decompressor = Decompressor::new();
+        let mut reader = CompressedTokenReader::new(decompressor);
+        let mut cursor = Cursor::new(&buf);
+
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::Data(b"compressed data".to_vec()),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::BlockMatch(0),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::EndOfFile,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compressed_trait_roundtrip_zstd() {
+        let compressor = Compressor::new_zstd(3).unwrap();
+        let mut writer = CompressedTokenWriter::new(compressor);
+        let mut buf = Vec::new();
+
+        writer
+            .write_data(&mut buf, b"zstd trait data")
+            .await
+            .unwrap();
+        writer.write_block_match(&mut buf, 5).await.unwrap();
+        writer.write_eof(&mut buf).await.unwrap();
+
+        let decompressor = Decompressor::new_zstd().unwrap();
+        let mut reader = CompressedTokenReader::new(decompressor);
+        let mut cursor = Cursor::new(&buf);
+
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::Data(b"zstd trait data".to_vec()),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::BlockMatch(5),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::EndOfFile,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_diffops_through_trait() {
+        use crate::delta::ops::BasisRef;
+
+        let ops = vec![
+            DiffOp::literal(b"hello"),
+            DiffOp::Copy(BasisRef {
+                offset: 0,
+                length: 700,
+            }),
+            DiffOp::literal(b"world"),
+        ];
+
+        let mut writer = PlainTokenWriter::new();
+        let mut buf = Vec::new();
+        write_diffops(&mut writer, &mut buf, &ops, 700)
+            .await
+            .unwrap();
+        writer.write_eof(&mut buf).await.unwrap();
+
+        let mut reader = PlainTokenReader::new();
+        let mut cursor = Cursor::new(&buf);
+
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::Data(b"hello".to_vec()),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::BlockMatch(0),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::Data(b"world".to_vec()),
+        );
+        assert_eq!(
+            reader.read_token(&mut cursor).await.unwrap(),
+            Token::EndOfFile,
+        );
     }
 }

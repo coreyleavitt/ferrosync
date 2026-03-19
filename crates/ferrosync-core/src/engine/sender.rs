@@ -12,7 +12,7 @@ use crate::delta::checksum;
 use crate::delta::matcher::{self, StreamingMatcher};
 use crate::delta::ops::DiffOp;
 use crate::delta::sum::{self, SumStruct};
-use crate::delta::token;
+use crate::delta::token::{self, PlainTokenWriter, TokenWriter};
 use crate::delta::ProtocolContext;
 use crate::error::ProtocolError;
 use crate::protocol::compress::Compressor;
@@ -44,7 +44,8 @@ pub async fn send_file_delta<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     varint::write_int(token_writer, file_index).await?;
 
     // Write tokens + checksum.
-    write_tokens_and_checksum(token_writer, &ops, source_data, &sums, ctx).await
+    let mut writer = PlainTokenWriter::new();
+    write_tokens_and_checksum(&mut writer, token_writer, &ops, source_data, &sums, ctx).await
 }
 
 /// Signal end of sender output (no more files).
@@ -64,7 +65,8 @@ pub async fn send_file_delta_with_sums<W: AsyncWrite + Unpin>(
 
     varint::write_int(token_writer, file_index).await?;
 
-    write_tokens_and_checksum(token_writer, &ops, source_data, sums, ctx).await
+    let mut writer = PlainTokenWriter::new();
+    write_tokens_and_checksum(&mut writer, token_writer, &ops, source_data, sums, ctx).await
 }
 
 /// Process a single file with compressed token output.
@@ -74,33 +76,15 @@ pub async fn send_file_delta_compressed<R: AsyncRead + Unpin, W: AsyncWrite + Un
     file_index: i32,
     source_data: &[u8],
     ctx: &ProtocolContext,
-    compressor: &mut Compressor,
+    compressor: Compressor,
 ) -> Result<()> {
     let sums = sum::read_sums(sig_reader).await?;
     let ops = matcher::match_blocks(source_data, &sums, ctx);
-    let blength = sums.head.blength as u32;
 
     varint::write_int(token_writer, file_index).await?;
 
-    for op in &ops {
-        match op {
-            DiffOp::Literal(data) => {
-                token::send_data_compressed(token_writer, data, compressor).await?;
-            }
-            DiffOp::Copy(bref) => {
-                token::send_block_match_compressed(token_writer, bref.block_index(blength)).await?;
-            }
-        }
-    }
-    token::send_eof_compressed(token_writer).await?;
-
-    let file_sum = checksum::file_checksum(source_data, ctx);
-    token_writer
-        .write_all(&file_sum)
-        .await
-        .map_err(ProtocolError::from)?;
-
-    Ok(())
+    let mut writer = token::CompressedTokenWriter::new(compressor);
+    write_tokens_and_checksum(&mut writer, token_writer, &ops, source_data, &sums, ctx).await
 }
 
 /// Process a single file using streaming I/O: reads from a `Read` source in
@@ -121,17 +105,18 @@ pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
 
     let mut smatcher = StreamingMatcher::new(sums, ctx, chunk_size);
     let mut file_hash = checksum::IncrementalChecksum::new(ctx.checksum_type);
+    let mut writer = PlainTokenWriter::new();
 
     loop {
         let (ops, done) = smatcher
             .process_chunk(reader, &mut file_hash)
             .map_err(ProtocolError::from)?;
-        token::write_owned_diffops_as_tokens(token_writer, &ops, blength).await?;
+        token::write_diffops(&mut writer, token_writer, &ops, blength).await?;
         if done {
             break;
         }
     }
-    token::send_eof(token_writer).await?;
+    writer.write_eof(token_writer).await?;
 
     let file_sum = file_hash.finalize();
     token_writer
@@ -143,7 +128,8 @@ pub async fn send_file_delta_streaming<W: AsyncWrite + Unpin>(
 }
 
 /// Write tokens and file-level checksum.
-async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
+async fn write_tokens_and_checksum<T: TokenWriter, W: AsyncWrite + Unpin>(
+    writer: &mut T,
     w: &mut W,
     ops: &[DiffOp<'_>],
     source_data: &[u8],
@@ -151,7 +137,8 @@ async fn write_tokens_and_checksum<W: AsyncWrite + Unpin>(
     ctx: &ProtocolContext,
 ) -> Result<()> {
     let blength = sums.head.blength as u32;
-    token::write_diffops_as_tokens(w, ops, blength).await?;
+    token::write_diffops(writer, w, ops, blength).await?;
+    writer.write_eof(w).await?;
 
     let file_sum = checksum::file_checksum(source_data, ctx);
     w.write_all(&file_sum).await.map_err(ProtocolError::from)?;
