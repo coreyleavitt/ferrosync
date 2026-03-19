@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::delta::ProtocolContext;
 use crate::error::ProtocolError;
+use crate::protocol::constants::{MAX_BLOCK_LEN, MIN_BLOCK_LEN};
 use crate::protocol::varint;
 
 use super::checksum::{self, MAX_DIGEST_LEN};
@@ -60,9 +61,6 @@ pub struct SumStruct {
 /// Matches rsync's heuristic: roughly sqrt(file_len), clamped to
 /// [700, MAX_BLOCK_SIZE] and rounded to a multiple of 8.
 pub fn compute_block_length(file_len: i64) -> i32 {
-    const MIN_BLOCK_LEN: i32 = 700;
-    const MAX_BLOCK_LEN: i32 = 1 << 17; // 128 KiB
-
     if file_len <= 0 {
         return MIN_BLOCK_LEN;
     }

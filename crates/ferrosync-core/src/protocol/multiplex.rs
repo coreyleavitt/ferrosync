@@ -17,6 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
 use crate::error::ProtocolError;
+use crate::protocol::constants::{DATA_CHUNK_SIZE, MPLEX_BUF_SIZE};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -30,8 +31,6 @@ const MPLEX_BASE: u8 = 7;
 /// Maximum payload size per multiplexed frame (24 bits).
 const MAX_PAYLOAD: u32 = 0x00FF_FFFF;
 
-/// Typical data chunk size (matches rsync's IO_BUFFER_SIZE).
-pub(crate) const DATA_CHUNK_SIZE: usize = 32_768;
 
 // ---------------------------------------------------------------------------
 // Message codes
@@ -319,10 +318,6 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
 pub struct MplexWriter<W> {
     inner: tokio::io::BufWriter<W>,
 }
-
-/// Write buffer size for the multiplexer. Two DATA_CHUNK_SIZE frames fit
-/// comfortably, allowing multiple messages to coalesce before flushing.
-const MPLEX_BUF_SIZE: usize = DATA_CHUNK_SIZE * 2;
 
 impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     pub fn new(inner: W) -> Self {
