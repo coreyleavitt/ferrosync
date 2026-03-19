@@ -104,6 +104,27 @@ impl FileEntry {
     pub fn rdev_minor(&self) -> u32 {
         (self.rdev & 0xFF) as u32
     }
+
+    /// Convert the byte name to a [`PathBuf`], preserving non-UTF-8 on Unix.
+    pub fn path(&self) -> std::path::PathBuf {
+        Self::name_to_pathbuf(&self.name)
+    }
+
+    /// Convert a byte slice to a [`PathBuf`].
+    ///
+    /// On Unix, uses `OsStr::from_bytes` to preserve arbitrary byte sequences.
+    /// On other platforms, uses lossy UTF-8 conversion.
+    pub fn name_to_pathbuf(bytes: &[u8]) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+        }
+        #[cfg(not(unix))]
+        {
+            std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +249,33 @@ mod tests {
         };
         assert_eq!(e.dirname(), None);
         assert_eq!(e.basename(), b"simple.txt");
+    }
+
+    #[test]
+    fn test_path_utf8() {
+        let e = FileEntry {
+            name: b"hello/world.txt".to_vec(),
+            ..Default::default()
+        };
+        assert_eq!(e.path(), std::path::PathBuf::from("hello/world.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_non_utf8_unix() {
+        let e = FileEntry {
+            name: b"hello/\xff\xfe.bin".to_vec(),
+            ..Default::default()
+        };
+        use std::os::unix::ffi::OsStrExt;
+        let expected = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"hello/\xff\xfe.bin"));
+        assert_eq!(e.path(), expected);
+    }
+
+    #[test]
+    fn test_name_to_pathbuf_static() {
+        let p = FileEntry::name_to_pathbuf(b"foo/bar");
+        assert_eq!(p, std::path::PathBuf::from("foo/bar"));
     }
 
     #[test]

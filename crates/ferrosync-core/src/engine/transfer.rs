@@ -172,7 +172,7 @@ async fn execute_transfer_impl(
 
     // Transfer each file.
     for item in &source_entries {
-        let dest_path = dest.join(std::str::from_utf8(&item.entry.name).unwrap_or("?"));
+        let dest_path = dest.join(item.entry.path());
 
         if item.entry.is_dir() {
             if !options.dry_run() {
@@ -501,13 +501,11 @@ async fn execute_transfer_streaming_impl(
     let mut index = 0i32;
 
     while let Some(entry) = rx.recv().await {
-        let name_str = std::str::from_utf8(&entry.name).unwrap_or("?");
-
         if !filters.is_included(&entry.name, entry.is_dir()) {
             continue;
         }
 
-        let dest_path = dest.join(name_str);
+        let dest_path = dest.join(entry.path());
         stats.total_files += 1;
 
         if entry.is_dir() {
@@ -725,7 +723,7 @@ fn collect_directory(
             continue;
         }
 
-        let child_path = dir_path.join(std::str::from_utf8(&dir_entry.name).unwrap_or("?"));
+        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&dir_entry.name));
 
         if is_dir {
             collect_directory(
@@ -847,7 +845,7 @@ fn delete_extraneous(
                 }
             }
 
-            let path = dest.join(std::str::from_utf8(&dest_entry.name).unwrap_or("?"));
+            let path = dest.join(FileEntry::name_to_pathbuf(&dest_entry.name));
             if !dry_run {
                 if dest_entry.metadata.mode & S_IFMT == S_IFDIR {
                     let _ = fs.remove_dir(&path);
@@ -920,7 +918,7 @@ fn delete_extraneous_in_dir(
             }
         }
 
-        let path = dest_dir.join(std::str::from_utf8(&dest_entry.name).unwrap_or("?"));
+        let path = dest_dir.join(FileEntry::name_to_pathbuf(&dest_entry.name));
         if !dry_run {
             if dest_entry.metadata.mode & S_IFMT == S_IFDIR {
                 let _ = fs.remove_dir(&path);

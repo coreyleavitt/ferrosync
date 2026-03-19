@@ -53,9 +53,8 @@ pub fn check_alt_dest(
     src_entry: &FileEntry,
     alt_dirs: &[PathBuf],
 ) -> Option<PathBuf> {
-    let name = std::str::from_utf8(&src_entry.name).ok()?;
     for dir in alt_dirs {
-        let alt_path = dir.join(name);
+        let alt_path = dir.join(src_entry.path());
         if let Ok(meta) = fs.lstat(&alt_path) {
             if meta.len == src_entry.len && meta.mtime == src_entry.mtime {
                 return Some(alt_path);

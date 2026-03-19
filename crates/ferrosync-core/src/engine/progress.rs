@@ -210,15 +210,7 @@ impl ProgressTracker {
 /// On Unix, uses `OsStr::from_encoded_bytes_unchecked` to preserve
 /// arbitrary byte sequences. On other platforms, uses lossy UTF-8 conversion.
 pub fn name_to_pathbuf(bytes: &[u8]) -> PathBuf {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-    }
+    crate::filelist::entry::FileEntry::name_to_pathbuf(bytes)
 }
 
 #[cfg(test)]

@@ -53,7 +53,7 @@ pub fn collect_directory_entries(
             continue;
         }
 
-        let child_path = dir_path.join(std::str::from_utf8(&child.name).unwrap_or("?"));
+        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&child.name));
 
         if is_dir {
             collect_directory_entries(fs, &child_path, &child_name, entries, filters)?;
