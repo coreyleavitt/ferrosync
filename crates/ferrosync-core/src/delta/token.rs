@@ -28,16 +28,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use super::ops::DiffOp;
 use crate::error::ProtocolError;
 use crate::protocol::compress::{Compressor, CompressorType, Decompressor};
+use crate::protocol::constants::MAX_WIRE_ALLOC;
 use crate::protocol::varint;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
-/// Maximum size of a literal data chunk in a single token.
-pub const CHUNK_SIZE: usize = 32 * 1024;
+/// Re-export for backward compatibility.
+pub use crate::protocol::constants::DATA_CHUNK_SIZE;
 
-/// Maximum size for a single wire allocation (256 MiB).
-/// Prevents OOM from malicious or corrupted wire values.
-const MAX_WIRE_ALLOC: usize = 256 * 1024 * 1024;
+/// Legacy alias -- prefer [`DATA_CHUNK_SIZE`].
+#[deprecated(note = "use protocol::constants::DATA_CHUNK_SIZE")]
+pub const CHUNK_SIZE: usize = DATA_CHUNK_SIZE;
 
 // ---------------------------------------------------------------------------
 // Compressed token flag bytes (matches rsync's token.c)
@@ -105,9 +106,9 @@ fn maybe_append_trailer(compressed: &mut Vec<u8>, dtype: CompressorType) {
 
 /// Write literal data tokens to the wire.
 ///
-/// Large data is automatically split into CHUNK_SIZE pieces.
+/// Large data is automatically split into `DATA_CHUNK_SIZE` pieces.
 pub async fn send_data<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> Result<()> {
-    for chunk in data.chunks(CHUNK_SIZE) {
+    for chunk in data.chunks(DATA_CHUNK_SIZE) {
         varint::write_int(w, chunk.len() as i32).await?;
         w.write_all(chunk).await.map_err(ProtocolError::from)?;
     }
@@ -270,7 +271,7 @@ impl CompressedTokenWriter {
         // Compress data in chunks, writing DEFLATED_DATA frames.
         let mut offset = 0;
         while offset < data.len() || (offset == 0 && data.is_empty() && self.flush_pending) {
-            let chunk_end = (offset + CHUNK_SIZE).min(data.len());
+            let chunk_end = (offset + DATA_CHUNK_SIZE).min(data.len());
             let chunk = &data[offset..chunk_end];
             let is_last = chunk_end >= data.len();
 
@@ -395,7 +396,7 @@ impl CompressedTokenReader {
                         // Append the Z_SYNC_FLUSH trailer only for zlib.
                         maybe_append_trailer(&mut compressed, dtype);
 
-                        let decompressed = self.decompressor.decompress(&compressed, CHUNK_SIZE)?;
+                        let decompressed = self.decompressor.decompress(&compressed, DATA_CHUNK_SIZE)?;
                         if !decompressed.is_empty() {
                             return Ok(Token::Data(decompressed));
                         }
@@ -595,7 +596,7 @@ pub async fn send_data_compressed<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     let ctype = compressor.compressor_type();
 
-    for chunk in data.chunks(CHUNK_SIZE) {
+    for chunk in data.chunks(DATA_CHUNK_SIZE) {
         let compressed = compressor.compress(chunk)?;
 
         // Strip Z_SYNC_FLUSH trailer only for zlib.
@@ -688,7 +689,7 @@ pub async fn recv_token_compressed<R: AsyncRead + Unpin>(
         // Append Z_SYNC_FLUSH trailer only for zlib.
         maybe_append_trailer(&mut compressed, dtype);
 
-        let decompressed = decompressor.decompress(&compressed, CHUNK_SIZE)?;
+        let decompressed = decompressor.decompress(&compressed, DATA_CHUNK_SIZE)?;
         return Ok(Token::Data(decompressed));
     }
 
@@ -948,11 +949,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_data_chunking() {
-        let data = vec![0xABu8; CHUNK_SIZE * 2 + 100];
+        let data = vec![0xABu8; DATA_CHUNK_SIZE * 2 + 100];
         let mut buf = Vec::new();
         send_data(&mut buf, &data).await.unwrap();
 
-        // Should produce 3 tokens: CHUNK_SIZE, CHUNK_SIZE, 100
+        // Should produce 3 tokens: DATA_CHUNK_SIZE, DATA_CHUNK_SIZE, 100
         let mut cursor = Cursor::new(&buf);
         let mut reassembled = Vec::new();
         for _ in 0..3 {
