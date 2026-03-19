@@ -2,23 +2,14 @@
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::FsError;
 
+use super::atomic_writer::{unique_tmp_name, AtomicFileWriter};
 use super::metadata::FileMetadata;
 use super::{DirEntry, FileSystem};
 
 type Result<T> = std::result::Result<T, FsError>;
-
-/// Atomic counter for generating unique temp file names.
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Generate a unique temp file name to avoid collisions from concurrent writes.
-fn unique_tmp_name(suffix: &str) -> String {
-    let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(".ferrosync.{}.{}{}.tmp", std::process::id(), seq, suffix)
-}
 
 /// Standard Unix filesystem implementation.
 #[derive(Debug, Default)]
@@ -304,59 +295,17 @@ impl FileSystem for UnixFileSystem {
 
         let file = std::fs::File::create(&tmp_path).map_err(|e| Self::map_io_err(&tmp_path, e))?;
 
-        Ok(Box::new(AtomicFileWriter {
-            inner: std::io::BufWriter::new(file),
+        fn set_unix_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        }
+
+        Ok(Box::new(AtomicFileWriter::new(
+            file,
             tmp_path,
             dest_path,
             mode,
-            finished: false,
-        }))
-    }
-}
-
-/// Writer that writes to a temp file and atomically renames on close.
-struct AtomicFileWriter {
-    inner: std::io::BufWriter<std::fs::File>,
-    tmp_path: std::path::PathBuf,
-    dest_path: std::path::PathBuf,
-    mode: Option<u32>,
-    finished: bool,
-}
-
-impl std::io::Write for AtomicFileWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-impl AtomicFileWriter {
-    fn finish_inner(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
-        if self.finished {
-            return Ok(());
-        }
-        self.finished = true;
-        self.inner.flush()?;
-
-        if let Some(m) = self.mode {
-            std::fs::set_permissions(&self.tmp_path, std::fs::Permissions::from_mode(m))?;
-        }
-
-        std::fs::rename(&self.tmp_path, &self.dest_path)?;
-        Ok(())
-    }
-}
-
-impl Drop for AtomicFileWriter {
-    fn drop(&mut self) {
-        if self.finish_inner().is_err() {
-            // Best-effort cleanup of temp file on failure.
-            let _ = std::fs::remove_file(&self.tmp_path);
-        }
+            set_unix_permissions,
+        )))
     }
 }
 
