@@ -75,11 +75,22 @@ struct RsyncServerTransport {
 
 impl RsyncServerTransport {
     fn new(am_sender: bool, options: &str, cwd: &Path) -> Self {
+        Self::new_with_extra_args(am_sender, options, cwd, &[])
+    }
+
+    fn new_with_extra_args(
+        am_sender: bool,
+        options: &str,
+        cwd: &Path,
+        extra_args: &[String],
+    ) -> Self {
         let mut args = vec!["--server".to_string()];
         if !am_sender {
             args.push("--sender".to_string());
         }
         args.push(options.to_string());
+        // Extra long options (e.g., --link-dest=DIR) go before the path args.
+        args.extend(extra_args.iter().cloned());
         args.push(".".to_string());
         args.push(".".to_string());
 
@@ -694,4 +705,457 @@ async fn test_interop_ssh_pull_single_file() {
 
     let content = std::fs::read(dst.join("hello.txt")).unwrap();
     assert_eq!(content, b"ssh pull test\n");
+}
+
+// ---------------------------------------------------------------------------
+// Link-dest tests (ferrosync pulls from rsync --server --sender)
+//
+// --link-dest is a receiver-side feature: when a file in the source matches
+// (content + mtime) a file in a link-dest directory, the receiver hard-links
+// instead of transferring. All tests here are PULL tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn inode_of(path: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).unwrap().ino()
+}
+
+/// Helper to set mtime on a file to a specific unix timestamp.
+fn set_mtime(path: &std::path::Path, unix_secs: i64) {
+    let ft = filetime::FileTime::from_unix_time(unix_secs, 0);
+    filetime::set_file_mtime(path, ft).unwrap();
+}
+
+#[tokio::test]
+async fn test_interop_pull_link_dest_basic() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let prev = tmp.path().join("prev");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&prev).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("file_a.txt"), "hello\n").unwrap();
+    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
+
+    std::fs::write(prev.join("file_a.txt"), "hello\n").unwrap();
+    set_mtime(&prev.join("file_a.txt"), 1_700_000_000);
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .link_dest(&prev)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("pull failed: {e}"),
+        Err(_) => panic!("pull timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("file_a.txt")).unwrap();
+    assert_eq!(content, b"hello\n");
+
+    assert_eq!(
+        inode_of(&dst.join("file_a.txt")),
+        inode_of(&prev.join("file_a.txt")),
+        "dst/file_a.txt should be hard-linked to prev/file_a.txt"
+    );
+}
+
+#[tokio::test]
+async fn test_interop_pull_link_dest_relative_path() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let current = base.join("current");
+    let new_dir = base.join("new");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::create_dir_all(&new_dir).unwrap();
+
+    std::fs::write(current.join("file.txt"), "content\n").unwrap();
+    set_mtime(&current.join("file.txt"), 1_700_000_000);
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .link_dest("../current")
+        .source(current.clone())
+        .dest(new_dir.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &current);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("pull failed: {e}"),
+        Err(_) => panic!("pull timed out after 10s"),
+    }
+
+    let content = std::fs::read(new_dir.join("file.txt")).unwrap();
+    assert_eq!(content, b"content\n");
+
+    assert_eq!(
+        inode_of(&new_dir.join("file.txt")),
+        inode_of(&current.join("file.txt")),
+        "new/file.txt should be hard-linked to current/file.txt"
+    );
+}
+
+#[tokio::test]
+async fn test_interop_pull_link_dest_multiple_dirs() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let alt1 = tmp.path().join("alt1");
+    let alt2 = tmp.path().join("alt2");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&alt1).unwrap();
+    std::fs::create_dir_all(&alt2).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("file_a.txt"), "aaa\n").unwrap();
+    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
+    std::fs::write(src.join("file_b.txt"), "bbb\n").unwrap();
+    set_mtime(&src.join("file_b.txt"), 1_700_000_000);
+
+    std::fs::write(alt1.join("file_a.txt"), "aaa\n").unwrap();
+    set_mtime(&alt1.join("file_a.txt"), 1_700_000_000);
+
+    std::fs::write(alt2.join("file_b.txt"), "bbb\n").unwrap();
+    set_mtime(&alt2.join("file_b.txt"), 1_700_000_000);
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .link_dest(&alt1)
+        .link_dest(&alt2)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("pull failed: {e}"),
+        Err(_) => panic!("pull timed out after 10s"),
+    }
+
+    assert_eq!(std::fs::read(dst.join("file_a.txt")).unwrap(), b"aaa\n");
+    assert_eq!(std::fs::read(dst.join("file_b.txt")).unwrap(), b"bbb\n");
+
+    assert_eq!(
+        inode_of(&dst.join("file_a.txt")),
+        inode_of(&alt1.join("file_a.txt")),
+        "dst/file_a.txt should be hard-linked from alt1"
+    );
+    assert_eq!(
+        inode_of(&dst.join("file_b.txt")),
+        inode_of(&alt2.join("file_b.txt")),
+        "dst/file_b.txt should be hard-linked from alt2"
+    );
+}
+
+#[tokio::test]
+async fn test_interop_pull_link_dest_mtime_mismatch() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let prev = tmp.path().join("prev");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&prev).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("file.txt"), "same content\n").unwrap();
+    set_mtime(&src.join("file.txt"), 1_700_000_000);
+
+    // Same content but DIFFERENT mtime -- should NOT be hard-linked.
+    std::fs::write(prev.join("file.txt"), "same content\n").unwrap();
+    set_mtime(&prev.join("file.txt"), 1_600_000_000);
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .link_dest(&prev)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("pull failed: {e}"),
+        Err(_) => panic!("pull timed out after 10s"),
+    }
+
+    let content = std::fs::read(dst.join("file.txt")).unwrap();
+    assert_eq!(content, b"same content\n");
+
+    assert_ne!(
+        inode_of(&dst.join("file.txt")),
+        inode_of(&prev.join("file.txt")),
+        "dst/file.txt should NOT be hard-linked when mtime differs"
+    );
+}
+
+#[tokio::test]
+async fn test_interop_pull_link_dest_changed_file() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let prev = tmp.path().join("prev");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&prev).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    // file_a: changed between prev and src
+    std::fs::write(src.join("file_a.txt"), "version 2\n").unwrap();
+    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
+    std::fs::write(prev.join("file_a.txt"), "version 1\n").unwrap();
+    set_mtime(&prev.join("file_a.txt"), 1_600_000_000);
+
+    // file_b: unchanged between prev and src
+    std::fs::write(src.join("file_b.txt"), "same\n").unwrap();
+    set_mtime(&src.join("file_b.txt"), 1_700_000_000);
+    std::fs::write(prev.join("file_b.txt"), "same\n").unwrap();
+    set_mtime(&prev.join("file_b.txt"), 1_700_000_000);
+
+    let opts = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .link_dest(&prev)
+        .source(src.clone())
+        .dest(dst.clone())
+        .build();
+
+    let server_opts = build_server_options(&opts, false);
+    let transport = RsyncServerTransport::new(false, &server_opts, &src);
+    let fs = Box::new(UnixFileSystem::new());
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    match result {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => panic!("pull failed: {e}"),
+        Err(_) => panic!("pull timed out after 10s"),
+    }
+
+    // Unchanged file should be hard-linked.
+    assert_eq!(
+        inode_of(&dst.join("file_b.txt")),
+        inode_of(&prev.join("file_b.txt")),
+        "unchanged file_b.txt should be hard-linked"
+    );
+
+    // Changed file should be a new copy, not hard-linked.
+    assert_ne!(
+        inode_of(&dst.join("file_a.txt")),
+        inode_of(&prev.join("file_a.txt")),
+        "changed file_a.txt should NOT be hard-linked"
+    );
+    assert_eq!(
+        std::fs::read(dst.join("file_a.txt")).unwrap(),
+        b"version 2\n"
+    );
+}
+
+#[tokio::test]
+async fn test_interop_link_dest_snapshot_rotation() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let backup_0 = tmp.path().join("backup_0");
+    let backup_1 = tmp.path().join("backup_1");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&backup_0).unwrap();
+
+    // Initial source state.
+    std::fs::write(src.join("file_a.txt"), "original\n").unwrap();
+    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
+    std::fs::write(src.join("file_b.txt"), "stable\n").unwrap();
+    set_mtime(&src.join("file_b.txt"), 1_700_000_000);
+
+    // First sync: pull src/ -> backup_0/ (no link-dest).
+    {
+        let opts = TransferOptions::builder()
+            .recursive(true)
+            .preserve_times(true)
+            .source(src.clone())
+            .dest(backup_0.clone())
+            .build();
+
+        let server_opts = build_server_options(&opts, false);
+        let transport = RsyncServerTransport::new(false, &server_opts, &src);
+        let fs = Box::new(UnixFileSystem::new());
+        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("first sync failed: {e}"),
+            Err(_) => panic!("first sync timed out"),
+        }
+    }
+
+    // Modify source: change file_a, leave file_b stable.
+    std::fs::write(src.join("file_a.txt"), "modified\n").unwrap();
+    set_mtime(&src.join("file_a.txt"), 1_700_001_000);
+
+    // Second sync: pull src/ -> backup_1/ with --link-dest=backup_0/.
+    std::fs::create_dir_all(&backup_1).unwrap();
+    {
+        let opts = TransferOptions::builder()
+            .recursive(true)
+            .preserve_times(true)
+            .link_dest(&backup_0)
+            .source(src.clone())
+            .dest(backup_1.clone())
+            .build();
+
+        let server_opts = build_server_options(&opts, false);
+        let transport = RsyncServerTransport::new(false, &server_opts, &src);
+        let fs = Box::new(UnixFileSystem::new());
+        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("second sync failed: {e}"),
+            Err(_) => panic!("second sync timed out"),
+        }
+    }
+
+    // Unchanged file_b should be hard-linked across snapshots.
+    assert_eq!(
+        inode_of(&backup_1.join("file_b.txt")),
+        inode_of(&backup_0.join("file_b.txt")),
+        "stable file_b.txt should be hard-linked between snapshots"
+    );
+
+    // Changed file_a should have a different inode.
+    assert_ne!(
+        inode_of(&backup_1.join("file_a.txt")),
+        inode_of(&backup_0.join("file_a.txt")),
+        "modified file_a.txt should NOT be hard-linked"
+    );
+
+    // Both snapshots should be complete.
+    assert!(backup_0.join("file_a.txt").exists());
+    assert!(backup_0.join("file_b.txt").exists());
+    assert!(backup_1.join("file_a.txt").exists());
+    assert!(backup_1.join("file_b.txt").exists());
+
+    // Verify content correctness.
+    assert_eq!(
+        std::fs::read(backup_0.join("file_a.txt")).unwrap(),
+        b"original\n"
+    );
+    assert_eq!(
+        std::fs::read(backup_1.join("file_a.txt")).unwrap(),
+        b"modified\n"
+    );
+}
+
+#[tokio::test]
+async fn test_interop_link_dest_rerun_idempotent() {
+    skip_if_no_rsync!();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    let prev = tmp.path().join("prev");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+
+    std::fs::write(src.join("file.txt"), "idempotent\n").unwrap();
+    set_mtime(&src.join("file.txt"), 1_700_000_000);
+
+    // First pull: src/ -> dst/ (no link-dest).
+    {
+        let opts = TransferOptions::builder()
+            .recursive(true)
+            .preserve_times(true)
+            .source(src.clone())
+            .dest(dst.clone())
+            .build();
+
+        let server_opts = build_server_options(&opts, false);
+        let transport = RsyncServerTransport::new(false, &server_opts, &src);
+        let fs = Box::new(UnixFileSystem::new());
+        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("first pull failed: {e}"),
+            Err(_) => panic!("first pull timed out"),
+        }
+    }
+
+    // Create prev/ as a copy of dst/ with matching content and mtimes.
+    std::fs::create_dir_all(&prev).unwrap();
+    std::fs::copy(dst.join("file.txt"), prev.join("file.txt")).unwrap();
+    set_mtime(&prev.join("file.txt"), 1_700_000_000);
+
+    // Re-run pull with link-dest=prev into a fresh dst.
+    let dst2 = tmp.path().join("dst2");
+    std::fs::create_dir_all(&dst2).unwrap();
+    {
+        let opts = TransferOptions::builder()
+            .recursive(true)
+            .preserve_times(true)
+            .link_dest(&prev)
+            .source(src.clone())
+            .dest(dst2.clone())
+            .build();
+
+        let server_opts = build_server_options(&opts, false);
+        let transport = RsyncServerTransport::new(false, &server_opts, &src);
+        let fs = Box::new(UnixFileSystem::new());
+        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => panic!("re-run pull failed: {e}"),
+            Err(_) => panic!("re-run pull timed out"),
+        }
+    }
+
+    let content = std::fs::read(dst2.join("file.txt")).unwrap();
+    assert_eq!(content, b"idempotent\n");
 }
