@@ -131,6 +131,8 @@ async fn execute_transfer_impl(
         path: PathBuf::from("<no destination>"),
     })?;
 
+    let resolved_link_dests = file_decision::resolve_link_dest_dirs(options.link_dest(), dest);
+
     // Build filter rules from options.
     let filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
@@ -243,10 +245,11 @@ async fn execute_transfer_impl(
         }
 
         // --link-dest: hard-link from alt dir if unchanged.
-        if !options.link_dest().is_empty() && !options.dry_run() {
+        if !resolved_link_dests.is_empty() && !options.dry_run() {
             if let Some(alt_path) =
-                file_decision::check_alt_dest(fs, &item.entry, options.link_dest())
+                file_decision::check_alt_dest(fs, &item.entry, &resolved_link_dests)
             {
+                let _ = fs.remove_file(&dest_path);
                 if fs.hard_link(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
                     progress.emit(ProgressEvent::FileComplete {

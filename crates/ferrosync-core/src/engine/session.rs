@@ -147,6 +147,12 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
         DeleteMode::None => {}
     }
 
+    if _am_sender {
+        for dir in opts.link_dest() {
+            s.push_str(&format!(" --link-dest={}", dir.display()));
+        }
+    }
+
     s
 }
 
@@ -261,6 +267,10 @@ pub fn parse_server_args(
             }
             "--delete-excluded" => {
                 builder = builder.delete(DeleteMode::Excluded);
+            }
+            _ if opt.starts_with("--link-dest=") => {
+                let dir = &opt["--link-dest=".len()..];
+                builder = builder.link_dest(std::path::PathBuf::from(dir));
             }
             _ => {}
         }

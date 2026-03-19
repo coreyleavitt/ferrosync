@@ -64,6 +64,23 @@ pub fn check_alt_dest(
     None
 }
 
+/// Resolve --link-dest directories relative to the destination.
+///
+/// rsync resolves relative paths against the destination directory.
+/// Absolute paths are used as-is.
+pub fn resolve_link_dest_dirs(link_dest: &[PathBuf], dest: &Path) -> Vec<PathBuf> {
+    link_dest
+        .iter()
+        .map(|d| {
+            if d.is_relative() {
+                dest.join(d)
+            } else {
+                d.clone()
+            }
+        })
+        .collect()
+}
+
 /// Check if a file should be skipped based on size limits.
 ///
 /// Returns `true` if the file exceeds `--max-size` or is below `--min-size`.

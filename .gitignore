@@ -35,3 +35,6 @@ CLAUDE.md
 .claude/
 .mcp.json
 .review/
+
+# Reference sources
+references/

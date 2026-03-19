@@ -231,6 +231,13 @@ pub trait FileOps: Send + Sync {
 
     /// Resolve the destination path for a file entry.
     fn dest_path(&self, entry: &FileEntry) -> PathBuf;
+
+    /// Attempt to satisfy a file via hard link from a --link-dest dir.
+    /// Returns true if the file was successfully linked (no delta needed).
+    fn try_link_dest(&self, entry: &FileEntry) -> bool {
+        let _ = entry;
+        false
+    }
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
@@ -238,6 +245,7 @@ pub struct LocalFileOps {
     fs: Arc<dyn FileSystem>,
     dest: PathBuf,
     options: crate::options::TransferOptions,
+    resolved_link_dests: Vec<PathBuf>,
 }
 
 impl LocalFileOps {
@@ -246,7 +254,14 @@ impl LocalFileOps {
         dest: PathBuf,
         options: crate::options::TransferOptions,
     ) -> Self {
-        Self { fs, dest, options }
+        let resolved_link_dests =
+            super::file_decision::resolve_link_dest_dirs(options.link_dest(), &dest);
+        Self {
+            fs,
+            dest,
+            options,
+            resolved_link_dests,
+        }
     }
 }
 
@@ -331,8 +346,24 @@ impl FileOps for LocalFileOps {
     }
 
     fn dest_path(&self, entry: &FileEntry) -> PathBuf {
-        let name_str = String::from_utf8_lossy(&entry.name);
-        self.dest.join(name_str.as_ref())
+        self.dest.join(entry.path())
+    }
+
+    fn try_link_dest(&self, entry: &FileEntry) -> bool {
+        if self.resolved_link_dests.is_empty() || self.options.dry_run() {
+            return false;
+        }
+        if let Some(alt_path) =
+            super::file_decision::check_alt_dest(&*self.fs, entry, &self.resolved_link_dests)
+        {
+            let dest_path = self.dest_path(entry);
+            // Remove existing dest if present (rsync does this before hard-linking)
+            let _ = self.fs.remove_file(&dest_path);
+            if self.fs.hard_link(&alt_path, &dest_path).is_ok() {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -400,8 +431,7 @@ impl FileOps for ModuleFileOps {
     }
 
     fn dest_path(&self, entry: &FileEntry) -> PathBuf {
-        let name_str = String::from_utf8_lossy(&entry.name);
-        self.module_path.join(name_str.as_ref())
+        self.module_path.join(entry.path())
     }
 }
 
@@ -814,6 +844,8 @@ enum GeneratorItem {
         basis_data: FileData,
         blength: usize,
     },
+    /// A file was satisfied via --link-dest hard link (no delta needed).
+    Linked { entry_idx: usize },
     /// All phases are complete.
     Done,
 }
@@ -888,6 +920,12 @@ where
         let mut gen_ndx_state = varint::NdxState::default();
 
         for (idx, file_ndx, entry) in &gen_file_items {
+            // Try link-dest before computing signatures.
+            if gen_file_ops.try_link_dest(entry) {
+                let _ = gen_tx.send(GeneratorItem::Linked { entry_idx: *idx }).await;
+                continue; // Don't send NDX to sender -- no delta needed
+            }
+
             // Read existing basis file for delta computation.
             let basis_data = gen_file_ops.read_basis(entry);
 
@@ -1013,6 +1051,17 @@ where
                     name: crate::engine::progress::name_to_pathbuf(&entry.name),
                     literal_bytes,
                     matched_bytes: 0,
+                });
+            }
+            GeneratorItem::Linked { entry_idx } => {
+                let entry = &entries[entry_idx];
+                stats.files_transferred += 1;
+                stats.matched_data += entry.len as u64;
+                progress.emit(ProgressEvent::FileComplete {
+                    index: entry_idx as i32,
+                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    literal_bytes: 0,
+                    matched_bytes: entry.len as u64,
                 });
             }
             GeneratorItem::Done => break,
