@@ -396,7 +396,8 @@ impl CompressedTokenReader {
                         // Append the Z_SYNC_FLUSH trailer only for zlib.
                         maybe_append_trailer(&mut compressed, dtype);
 
-                        let decompressed = self.decompressor.decompress(&compressed, DATA_CHUNK_SIZE)?;
+                        let decompressed =
+                            self.decompressor.decompress(&compressed, DATA_CHUNK_SIZE)?;
                         if !decompressed.is_empty() {
                             return Ok(Token::Data(decompressed));
                         }

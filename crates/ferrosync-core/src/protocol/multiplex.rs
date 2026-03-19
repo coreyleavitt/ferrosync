@@ -31,7 +31,6 @@ const MPLEX_BASE: u8 = 7;
 /// Maximum payload size per multiplexed frame (24 bits).
 const MAX_PAYLOAD: u32 = 0x00FF_FFFF;
 
-
 // ---------------------------------------------------------------------------
 // Message codes
 // ---------------------------------------------------------------------------
