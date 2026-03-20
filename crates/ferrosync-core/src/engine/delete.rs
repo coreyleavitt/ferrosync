@@ -275,6 +275,7 @@ mod tests {
         assert!(!budget.try_consume());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_prune_empty_dirs_removes_empty() {
         let tmp = tempfile::tempdir().unwrap();
@@ -296,6 +297,7 @@ mod tests {
         assert!(root.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_prune_empty_dirs_dry_run() {
         let tmp = tempfile::tempdir().unwrap();
