@@ -110,6 +110,18 @@ pub struct TransferOptions {
     // --- Concurrency ---
     concurrent: usize,
 
+    // --- Skip behavior ---
+    ignore_times: bool,
+    size_only: bool,
+    existing: bool,
+    ignore_existing: bool,
+
+    // --- Delete limits ---
+    max_delete: Option<u64>,
+
+    // --- Post-transfer ---
+    prune_empty_dirs: bool,
+
     // --- Misc ---
     one_file_system: bool,
     numeric_ids: bool,
@@ -158,6 +170,12 @@ impl Default for TransferOptions {
             append: false,
             files_from: None,
             concurrent: 1,
+            ignore_times: false,
+            size_only: false,
+            existing: false,
+            ignore_existing: false,
+            max_delete: None,
+            prune_empty_dirs: false,
             one_file_system: false,
             numeric_ids: false,
             sparse: false,
@@ -336,6 +354,30 @@ impl TransferOptions {
     /// Files-from path.
     pub fn files_from(&self) -> Option<&PathBuf> {
         self.files_from.as_ref()
+    }
+    /// Never skip based on mtime, always transfer (`-I`).
+    pub fn ignore_times(&self) -> bool {
+        self.ignore_times
+    }
+    /// Skip if sizes match, ignore mtime (`--size-only`).
+    pub fn size_only(&self) -> bool {
+        self.size_only
+    }
+    /// Only update files that already exist on dest (`--existing`).
+    pub fn existing(&self) -> bool {
+        self.existing
+    }
+    /// Don't update files that exist on dest (`--ignore-existing`).
+    pub fn ignore_existing(&self) -> bool {
+        self.ignore_existing
+    }
+    /// Cap number of deletions (`--max-delete=N`).
+    pub fn max_delete(&self) -> Option<u64> {
+        self.max_delete
+    }
+    /// Remove empty dirs after transfer (`-m`).
+    pub fn prune_empty_dirs(&self) -> bool {
+        self.prune_empty_dirs
     }
     /// Don't cross filesystem boundaries (`-x`).
     pub fn one_file_system(&self) -> bool {
@@ -546,6 +588,42 @@ impl TransferOptionsBuilder {
     /// Set the I/O timeout in seconds (`--timeout`).
     pub fn timeout(mut self, seconds: u64) -> Self {
         self.opts.timeout = Some(seconds);
+        self
+    }
+
+    /// Enable or disable ignore-times mode (`-I`).
+    pub fn ignore_times(mut self, v: bool) -> Self {
+        self.opts.ignore_times = v;
+        self
+    }
+
+    /// Enable or disable size-only mode (`--size-only`).
+    pub fn size_only(mut self, v: bool) -> Self {
+        self.opts.size_only = v;
+        self
+    }
+
+    /// Enable or disable existing mode (`--existing`).
+    pub fn existing(mut self, v: bool) -> Self {
+        self.opts.existing = v;
+        self
+    }
+
+    /// Enable or disable ignore-existing mode (`--ignore-existing`).
+    pub fn ignore_existing(mut self, v: bool) -> Self {
+        self.opts.ignore_existing = v;
+        self
+    }
+
+    /// Set the maximum number of deletions (`--max-delete`).
+    pub fn max_delete(mut self, n: u64) -> Self {
+        self.opts.max_delete = Some(n);
+        self
+    }
+
+    /// Enable or disable empty directory pruning (`-m`).
+    pub fn prune_empty_dirs(mut self, v: bool) -> Self {
+        self.opts.prune_empty_dirs = v;
         self
     }
 

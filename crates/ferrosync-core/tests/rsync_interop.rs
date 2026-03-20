@@ -970,3 +970,205 @@ async fn test_interop_pull_delete_excluded() {
 
     remote_cleanup(&remote_dir).await;
 }
+
+// ---------------------------------------------------------------------------
+// New flag interop tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_interop_push_ignore_times() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"new content\n", Some(1_700_000_000))
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+
+    // First push to populate remote.
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Overwrite local with different content but same size+mtime.
+    std::fs::write(env.src().join("file.txt"), b"alt content\n").unwrap();
+    set_mtime(&env.src().join("file.txt"), 1_700_000_000);
+
+    // Push with --ignore-times: should transfer despite same size+mtime.
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .ignore_times(true)
+        .source(env.src())
+        .build();
+    push_with_opts(opts, &remote_dir, 30).await;
+
+    let content = remote_cat(&format!("{remote_dir}/file.txt")).await;
+    assert_eq!(content, "alt content\n");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_size_only() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"src data\n", Some(1_700_000_000))
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Pre-populate local dest with same-length but different content and mtime.
+    std::fs::write(env.dst().join("file.txt"), b"old data\n").unwrap();
+    set_mtime(&env.dst().join("file.txt"), 1_600_000_000);
+
+    // Pull with --size-only: should skip because sizes match (9 bytes both).
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .size_only(true)
+        .dest(env.dst())
+        .build();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    let content = std::fs::read(env.dst().join("file.txt")).unwrap();
+    assert_eq!(
+        content, b"old data\n",
+        "size-only should skip same-size file"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_existing() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("present.txt", b"updated\n", None)
+        .with_src_file("absent.txt", b"new file\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Pre-create only present.txt on local dest.
+    std::fs::write(env.dst().join("present.txt"), "old\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .existing(true)
+        .dest(env.dst())
+        .build();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    assert_eq!(
+        std::fs::read(env.dst().join("present.txt")).unwrap(),
+        b"updated\n",
+    );
+    assert!(
+        !env.dst().join("absent.txt").exists(),
+        "--existing should skip files not on dest"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_ignore_existing() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("present.txt", b"updated\n", None)
+        .with_src_file("absent.txt", b"new file\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Pre-create present.txt on local dest.
+    std::fs::write(env.dst().join("present.txt"), "original\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .ignore_existing(true)
+        .dest(env.dst())
+        .build();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    assert_eq!(
+        std::fs::read(env.dst().join("present.txt")).unwrap(),
+        b"original\n",
+        "--ignore-existing should not overwrite"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("absent.txt")).unwrap(),
+        b"new file\n",
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_max_delete() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("keep.txt", b"keep\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Pre-create extra files locally.
+    std::fs::write(env.dst().join("keep.txt"), "keep\n").unwrap();
+    std::fs::write(env.dst().join("extra1.txt"), "del\n").unwrap();
+    std::fs::write(env.dst().join("extra2.txt"), "del\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::Before)
+        .max_delete(1)
+        .dest(env.dst())
+        .build();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    let extra1 = env.dst().join("extra1.txt").exists();
+    let extra2 = env.dst().join("extra2.txt").exists();
+    let remaining = (extra1 as u32) + (extra2 as u32);
+    assert_eq!(remaining, 1, "max-delete=1 should leave one extra file");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_prune_empty_dirs() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("a/file.txt", b"content\n", None)
+        .build();
+
+    // Also create an empty dir on remote.
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+    ssh_cmd(&["mkdir", "-p", &format!("{remote_dir}/empty_dir")]).await;
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .prune_empty_dirs(true)
+        .dest(env.dst())
+        .build();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    assert!(env.dst().join("a/file.txt").exists());
+    assert!(
+        !env.dst().join("empty_dir").exists(),
+        "empty dir should be pruned"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}

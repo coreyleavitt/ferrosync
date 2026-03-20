@@ -19,7 +19,7 @@ use ferrosync_core::options::TransferOptions;
 use ferrosync_core::protocol::handshake::ChecksumType;
 
 use crate::common::assertions::assert_trees_equal;
-use crate::common::env::TestEnv;
+use crate::common::env::{set_mtime, TestEnv};
 
 /// Create a temp source directory with known test files.
 fn create_test_tree(dir: &Path) {
@@ -521,4 +521,177 @@ async fn test_transfer_special_characters_in_filenames() {
         std::fs::read(env.dst().join("file_with_underscores.txt")).unwrap(),
         b"underscores\n"
     );
+}
+
+// ---------------------------------------------------------------------------
+// New flag tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_transfer_ignore_times() {
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"new content\n", Some(1_700_000_000))
+        .build();
+
+    // Same size+mtime on dest would normally skip. --ignore-times forces transfer.
+    std::fs::write(env.dst().join("file.txt"), b"old content\n").unwrap();
+    set_mtime(&env.dst().join("file.txt"), 1_700_000_000);
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .ignore_times(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    let content = std::fs::read(env.dst().join("file.txt")).unwrap();
+    assert_eq!(content, b"new content\n");
+}
+
+#[tokio::test]
+async fn test_transfer_size_only() {
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"src data\n", Some(1_700_000_000))
+        .build();
+
+    // Same length, different mtime and content. --size-only should skip.
+    std::fs::write(env.dst().join("file.txt"), b"dst data\n").unwrap();
+    set_mtime(&env.dst().join("file.txt"), 1_600_000_000);
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .size_only(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    let content = std::fs::read(env.dst().join("file.txt")).unwrap();
+    assert_eq!(
+        content, b"dst data\n",
+        "size-only should skip when sizes match"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_existing() {
+    let env = TestEnv::builder()
+        .with_src_file("present.txt", b"updated\n", None)
+        .with_src_file("absent.txt", b"new file\n", None)
+        .build();
+
+    std::fs::write(env.dst().join("present.txt"), b"old\n").unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .existing(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert_eq!(
+        std::fs::read(env.dst().join("present.txt")).unwrap(),
+        b"updated\n",
+    );
+    assert!(
+        !env.dst().join("absent.txt").exists(),
+        "--existing should skip files not on dest"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_ignore_existing() {
+    let env = TestEnv::builder()
+        .with_src_file("present.txt", b"updated\n", None)
+        .with_src_file("absent.txt", b"new file\n", None)
+        .build();
+
+    std::fs::write(env.dst().join("present.txt"), b"original\n").unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .ignore_existing(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert_eq!(
+        std::fs::read(env.dst().join("present.txt")).unwrap(),
+        b"original\n",
+        "--ignore-existing should not overwrite"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("absent.txt")).unwrap(),
+        b"new file\n",
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_max_delete() {
+    use ferrosync_core::options::DeleteMode;
+
+    let env = TestEnv::builder()
+        .with_src_file("keep.txt", b"keep\n", None)
+        .build();
+
+    std::fs::write(env.dst().join("keep.txt"), b"keep\n").unwrap();
+    std::fs::write(env.dst().join("extra1.txt"), b"del\n").unwrap();
+    std::fs::write(env.dst().join("extra2.txt"), b"del\n").unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .delete(DeleteMode::Before)
+        .max_delete(1)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    let extra1 = env.dst().join("extra1.txt").exists();
+    let extra2 = env.dst().join("extra2.txt").exists();
+    let remaining = (extra1 as u32) + (extra2 as u32);
+    assert_eq!(remaining, 1, "max-delete=1 should leave one extra file");
+}
+
+#[tokio::test]
+async fn test_transfer_prune_empty_dirs() {
+    let env = TestEnv::builder()
+        .with_src_file("a/file.txt", b"content\n", None)
+        .with_src_dir("a/empty_child")
+        .with_src_dir("empty_top")
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .prune_empty_dirs(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(env.dst().join("a/file.txt").exists());
+    assert!(
+        !env.dst().join("a/empty_child").exists(),
+        "empty child dir should be pruned"
+    );
+    assert!(
+        !env.dst().join("empty_top").exists(),
+        "empty top-level dir should be pruned"
+    );
+    assert!(env.dst().join("a").exists(), "non-empty dir should remain");
 }

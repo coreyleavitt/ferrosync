@@ -156,19 +156,21 @@ async fn execute_transfer_impl(
     progress.set_totals(stats.total_files, total_bytes as u64);
 
     let delete_excluded = options.delete() == DeleteMode::Excluded;
+    let delete_budget = delete::DeleteBudget::new(options.max_delete());
+    let deleter = delete::Deleter::new(
+        fs,
+        &filters,
+        &delete_budget,
+        options.dry_run(),
+        delete_excluded,
+    );
 
     // Handle --delete-before.
     if options.delete() == DeleteMode::Before
         || (delete_excluded && options.delete() == DeleteMode::Excluded)
     {
-        let deleted = delete::delete_extraneous(
-            fs,
-            dest,
-            source_entries.iter().map(|item| &item.entry),
-            &filters,
-            options.dry_run(),
-            delete_excluded,
-        )?;
+        let deleted =
+            deleter.delete_extraneous(dest, source_entries.iter().map(|item| &item.entry))?;
         stats.files_deleted = deleted;
     }
 
@@ -189,14 +191,10 @@ async fn execute_transfer_impl(
 
             // --delete-during: remove extraneous files in this directory.
             if options.delete() == DeleteMode::During {
-                let deleted = delete::delete_extraneous_in_dir(
-                    fs,
+                let deleted = deleter.delete_extraneous_in_dir(
                     &dest_path,
                     source_entries.iter().map(|item| &item.entry),
                     &item.entry.name,
-                    &filters,
-                    options.dry_run(),
-                    false,
                 )?;
                 stats.files_deleted += deleted;
             }
@@ -219,6 +217,16 @@ async fn execute_transfer_impl(
         }
 
         if !item.entry.is_file() {
+            continue;
+        }
+
+        // Check existence-based skip (--existing, --ignore-existing).
+        if file_decision::check_existence_skip(fs, &dest_path, options) {
+            stats.files_skipped += 1;
+            progress.emit(ProgressEvent::FileSkipped {
+                index: item.index,
+                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
+            });
             continue;
         }
 
@@ -463,15 +471,15 @@ async fn execute_transfer_impl(
 
     // Handle --delete-after.
     if options.delete() == DeleteMode::After {
-        let deleted = delete::delete_extraneous(
-            fs,
-            dest,
-            source_entries.iter().map(|item| &item.entry),
-            &filters,
-            options.dry_run(),
-            false,
-        )?;
+        let deleted =
+            deleter.delete_extraneous(dest, source_entries.iter().map(|item| &item.entry))?;
         stats.files_deleted = deleted;
+    }
+
+    // Handle --prune-empty-dirs (-m).
+    if options.prune_empty_dirs() {
+        let pruned = delete::prune_empty_dirs(fs, dest, options.dry_run())?;
+        stats.files_deleted += pruned;
     }
 
     stats.finish();

@@ -95,14 +95,19 @@ impl SshTransport {
     /// - `am_sender`: if true, we are sending to the remote (remote is receiver).
     /// - `options`: the server-mode option string (e.g., "-logDtprze.iLsfxCIvu").
     /// - `path`: the remote source or destination path.
-    pub fn new(config: SshTransportConfig, am_sender: bool, options: &str, path: &Path) -> Self {
+    pub fn new(
+        config: SshTransportConfig,
+        am_sender: bool,
+        options: &[String],
+        path: &Path,
+    ) -> Self {
         // Store protocol args without the binary/subcommand prefix.
         // remote_command() will prepend the appropriate prefix based on config.
         let mut args = Vec::new();
         if !am_sender {
             args.push("--sender".to_string());
         }
-        args.push(options.to_string());
+        args.extend(options.iter().cloned());
         args.push(".".to_string());
         args.push(path.display().to_string());
 
@@ -523,7 +528,7 @@ mod tests {
         let transport = SshTransport::new(
             config,
             true, // we are sender, remote is receiver
-            "-logDtprze.iLsfxCIvu",
+            &["-logDtprze.iLsfxCIvu".into()],
             Path::new("/data/backup"),
         );
         let cmd = transport.remote_command();
@@ -544,7 +549,7 @@ mod tests {
         let transport = SshTransport::new(
             config,
             false, // we are receiver, remote is sender
-            "-logDtprze.iLsfxCIvu",
+            &["-logDtprze.iLsfxCIvu".into()],
             Path::new("/data/source"),
         );
         let cmd = transport.remote_command();
@@ -564,7 +569,7 @@ mod tests {
         let transport = SshTransport::new(
             config,
             true, // we are sender, remote is receiver
-            "-logDtprze.iLsfxCIvu",
+            &["-logDtprze.iLsfxCIvu".into()],
             Path::new("/data/backup"),
         );
         let cmd = transport.remote_command();
@@ -582,7 +587,7 @@ mod tests {
         let transport = SshTransport::new(
             config,
             false, // we are receiver, remote is sender
-            "-logDtprze.iLsfxCIvu",
+            &["-logDtprze.iLsfxCIvu".into()],
             Path::new("/data/source"),
         );
         let cmd = transport.remote_command();
@@ -595,7 +600,12 @@ mod tests {
     #[test]
     fn test_remote_command_escapes_spaces() {
         let config = SshTransportConfig::default();
-        let transport = SshTransport::new(config, true, "-r", Path::new("/path with spaces/dir"));
+        let transport = SshTransport::new(
+            config,
+            true,
+            &["-r".into()],
+            Path::new("/path with spaces/dir"),
+        );
         let cmd = transport.remote_command();
         assert!(cmd.contains("'/path with spaces/dir'"));
     }
@@ -708,7 +718,7 @@ mod tests {
         let transport = Box::new(SshTransport::new(
             config,
             false,
-            "-re.iLsfxCIvu",
+            &["-re.iLsfxCIvu".into()],
             Path::new("/tmp"),
         ));
 

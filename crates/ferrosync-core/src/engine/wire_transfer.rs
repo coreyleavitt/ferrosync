@@ -321,16 +321,23 @@ impl FileOps for LocalFileOps {
 
     fn should_skip(&self, entry: &FileEntry) -> bool {
         if self.options.dry_run() {
-            return false; // handled separately
+            return false;
         }
-        // Quick check: skip files that are already up-to-date.
-        if self.options.preserve_times() && !self.options.checksum_mode() {
-            let dest_path = self.dest_path(entry);
-            if let Ok(dest_meta) = self.fs.lstat(&dest_path) {
-                if dest_meta.len == entry.len && dest_meta.mtime == entry.mtime {
-                    return true;
-                }
-            }
+        let dest_path = self.dest_path(entry);
+
+        if super::file_decision::check_existence_skip(&*self.fs, &dest_path, &self.options) {
+            return true;
+        }
+        if super::file_decision::check_size_limits(entry, &self.options) {
+            return true;
+        }
+        if !self.options.checksum_mode() {
+            return super::file_decision::quick_check_skip(
+                &*self.fs,
+                entry,
+                &dest_path,
+                &self.options,
+            );
         }
         false
     }

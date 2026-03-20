@@ -93,8 +93,8 @@ pub struct DaemonTransport {
     config: DaemonTransportConfig,
     /// Whether we are sending to the remote (remote is receiver).
     am_sender: bool,
-    /// Server-mode option string.
-    options: String,
+    /// Server-mode option arguments.
+    options: Vec<String>,
 }
 
 impl DaemonTransport {
@@ -102,12 +102,12 @@ impl DaemonTransport {
     ///
     /// - `config`: daemon connection parameters.
     /// - `am_sender`: if true, we are sending to the remote (remote is receiver).
-    /// - `options`: the server-mode option string (e.g., "-logDtprze.iLsfxCIvu").
-    pub fn new(config: DaemonTransportConfig, am_sender: bool, options: &str) -> Self {
+    /// - `options`: the server-mode option arguments (condensed flags + long options).
+    pub fn new(config: DaemonTransportConfig, am_sender: bool, options: &[String]) -> Self {
         Self {
             config,
             am_sender,
-            options: options.to_string(),
+            options: options.to_vec(),
         }
     }
 
@@ -168,7 +168,7 @@ impl DaemonTransport {
         if !self.am_sender {
             args.push("--sender".to_string());
         }
-        args.push(self.options.clone());
+        args.extend(self.options.iter().cloned());
         args.push(".".to_string());
 
         // The path within the module.
@@ -599,7 +599,7 @@ mod tests {
             path: "subdir".to_string(),
             ..Default::default()
         };
-        let transport = DaemonTransport::new(config, true, "-logDtprze.iLsfxCIvu");
+        let transport = DaemonTransport::new(config, true, &["-logDtprze.iLsfxCIvu".into()]);
         let args = transport.build_args();
         assert_eq!(args[0], "--server");
         assert!(!args.contains(&"--sender".to_string()));
@@ -613,7 +613,7 @@ mod tests {
             path: String::new(),
             ..Default::default()
         };
-        let transport = DaemonTransport::new(config, false, "-logDtprze.iLsfxCIvu");
+        let transport = DaemonTransport::new(config, false, &["-logDtprze.iLsfxCIvu".into()]);
         let args = transport.build_args();
         assert_eq!(args[0], "--server");
         assert_eq!(args[1], "--sender");
@@ -788,7 +788,7 @@ mod tests {
             module: "testmod".to_string(),
             ..Default::default()
         };
-        let transport = DaemonTransport::new(config, false, "-r");
+        let transport = DaemonTransport::new(config, false, &["-r".into()]);
         for arg in &transport.build_args() {
             writer
                 .write_all(format!("{arg}\n").as_bytes())

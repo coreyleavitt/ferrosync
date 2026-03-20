@@ -54,65 +54,77 @@ pub enum SyncDirection {
 ///
 /// This is the flag string rsync passes to the remote side, e.g.
 /// `-logDtprze.iLsfxCIvu`. The remote uses it to configure its behavior.
-pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String {
-    let mut s = String::from("-");
+/// Build the argument list for `rsync --server`.
+///
+/// Returns a vector of separate arguments: the condensed single-char flag
+/// string (including the `e`-prefixed capability string) as the first
+/// element, followed by any long-form options as individual elements.
+/// Each element maps to one `argv` entry on the remote side.
+pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<String> {
+    let mut condensed = String::from("-");
 
     // Single-char flags MUST come before the capability string, because
     // rsync's option parser treats `e` as consuming the rest of the arg
     // as its value.
     if opts.preserve_links() {
-        s.push('l');
+        condensed.push('l');
     }
     if opts.preserve_owner() {
-        s.push('o');
+        condensed.push('o');
     }
     if opts.preserve_group() {
-        s.push('g');
+        condensed.push('g');
     }
     if opts.preserve_devices() || opts.preserve_specials() {
-        s.push('D');
+        condensed.push('D');
     }
     if opts.preserve_times() {
-        s.push('t');
+        condensed.push('t');
     }
     if opts.preserve_perms() {
-        s.push('p');
+        condensed.push('p');
     }
     if opts.recursive() {
-        s.push('r');
+        condensed.push('r');
     }
     if opts.compress() {
-        s.push('z');
+        condensed.push('z');
     }
     if opts.checksum_mode() {
-        s.push('c');
+        condensed.push('c');
     }
     if opts.update() {
-        s.push('u');
+        condensed.push('u');
     }
     if opts.dry_run() {
-        s.push('n');
+        condensed.push('n');
     }
     if opts.whole_file() {
-        s.push('W');
+        condensed.push('W');
     }
     if opts.one_file_system() {
-        s.push('x');
+        condensed.push('x');
     }
     if opts.sparse() {
-        s.push('S');
+        condensed.push('S');
+    }
+    if opts.ignore_times() {
+        condensed.push('I');
+    }
+    if opts.prune_empty_dirs() {
+        condensed.push('m');
     }
     match opts.verbosity() {
-        crate::options::Verbosity::Quiet => s.push('q'),
-        crate::options::Verbosity::Verbose => s.push('v'),
+        crate::options::Verbosity::Quiet => condensed.push('q'),
+        crate::options::Verbosity::Verbose => condensed.push('v'),
         crate::options::Verbosity::VeryVerbose => {
-            s.push('v');
-            s.push('v');
+            condensed.push('v');
+            condensed.push('v');
         }
         crate::options::Verbosity::Debug => {
-            s.push('v');
-            s.push('v');
-            s.push('v');
+            condensed.push('v');
+            condensed.push('v');
+            condensed.push('v');
         }
         _ => {}
     }
@@ -125,36 +137,51 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> String 
     // For pull, 'i' is fine since rsync's sender handles incremental sub-lists.
     let use_inc_recurse = opts.recursive() && !_am_sender;
     let caps = build_capability_string(use_inc_recurse, true, false);
-    s.push('e');
-    s.push_str(&caps);
+    condensed.push('e');
+    condensed.push_str(&caps);
 
-    // Long-form options are separate arguments appended after the
-    // condensed string.
+    let mut args = vec![condensed];
+
+    // Long-form options: each must be its own argument so the remote
+    // rsync parses them correctly (they cannot be embedded in the
+    // condensed string because `e` consumes the rest of that arg).
     if opts.inplace() {
-        s.push_str(" --inplace");
+        args.push("--inplace".into());
     }
     if opts.numeric_ids() {
-        s.push_str(" --numeric-ids");
+        args.push("--numeric-ids".into());
     }
     if opts.append() {
-        s.push_str(" --append");
+        args.push("--append".into());
+    }
+    if opts.size_only() {
+        args.push("--size-only".into());
+    }
+    if opts.existing() {
+        args.push("--existing".into());
+    }
+    if opts.ignore_existing() {
+        args.push("--ignore-existing".into());
+    }
+    if let Some(n) = opts.max_delete() {
+        args.push(format!("--max-delete={n}"));
     }
 
     match opts.delete() {
-        DeleteMode::Before => s.push_str(" --delete-before"),
-        DeleteMode::During => s.push_str(" --delete-during"),
-        DeleteMode::After => s.push_str(" --delete-after"),
-        DeleteMode::Excluded => s.push_str(" --delete-excluded"),
+        DeleteMode::Before => args.push("--delete-before".into()),
+        DeleteMode::During => args.push("--delete-during".into()),
+        DeleteMode::After => args.push("--delete-after".into()),
+        DeleteMode::Excluded => args.push("--delete-excluded".into()),
         DeleteMode::None => {}
     }
 
     if _am_sender {
         for dir in opts.link_dest() {
-            s.push_str(&format!(" --link-dest={}", dir.display()));
+            args.push(format!("--link-dest={}", dir.display()));
         }
     }
 
-    s
+    args
 }
 
 /// Parse the condensed option string from `rsync --server` arguments.
@@ -235,6 +262,12 @@ pub fn parse_server_args(
             'S' => {
                 builder = builder.sparse(true);
             }
+            'I' => {
+                builder = builder.ignore_times(true);
+            }
+            'm' => {
+                builder = builder.prune_empty_dirs(true);
+            }
             'v' => {
                 // Verbosity is cumulative but we just set it once here.
                 // Multiple v's are handled by the Verbosity enum already
@@ -257,6 +290,15 @@ pub fn parse_server_args(
             "--append" => {
                 builder = builder.append(true);
             }
+            "--size-only" => {
+                builder = builder.size_only(true);
+            }
+            "--existing" => {
+                builder = builder.existing(true);
+            }
+            "--ignore-existing" => {
+                builder = builder.ignore_existing(true);
+            }
             "--delete-before" => {
                 builder = builder.delete(DeleteMode::Before);
             }
@@ -268,6 +310,12 @@ pub fn parse_server_args(
             }
             "--delete-excluded" => {
                 builder = builder.delete(DeleteMode::Excluded);
+            }
+            _ if opt.starts_with("--max-delete=") => {
+                let n = &opt["--max-delete=".len()..];
+                if let Ok(val) = n.parse::<u64>() {
+                    builder = builder.max_delete(val);
+                }
             }
             _ if opt.starts_with("--link-dest=") => {
                 let dir = &opt["--link-dest=".len()..];
@@ -444,7 +492,7 @@ async fn run_push(
     //
     // For server sender (our pull target): am_sender=1, always reads filter list.
     // (Handled in run_pull which always sends it.)
-    let send_filter_list = options.delete() != DeleteMode::None;
+    let send_filter_list = options.delete() != DeleteMode::None || options.prune_empty_dirs();
     tracing::debug!(send_filter_list, delete_mode = ?options.delete(), "push: filter list decision");
     if send_filter_list {
         let filter_data = collect_filter_list(options)?;
@@ -593,19 +641,20 @@ async fn run_pull(
     let filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
     let delete_excluded = options.delete() == DeleteMode::Excluded;
+    let delete_budget = delete::DeleteBudget::new(options.max_delete());
+    let deleter = delete::Deleter::new(
+        &*fs,
+        &filters,
+        &delete_budget,
+        options.dry_run(),
+        delete_excluded,
+    );
 
     if matches!(
         options.delete(),
         DeleteMode::Before | DeleteMode::During | DeleteMode::Excluded
     ) {
-        let deleted = delete::delete_extraneous(
-            &*fs,
-            &dest,
-            entries.iter(),
-            &filters,
-            options.dry_run(),
-            delete_excluded,
-        )?;
+        let deleted = deleter.delete_extraneous(&dest, entries.iter())?;
         stats.files_deleted = deleted;
     }
 
@@ -655,15 +704,14 @@ async fn run_pull(
 
     // Delete extraneous files after the transfer.
     if options.delete() == DeleteMode::After {
-        let deleted = delete::delete_extraneous(
-            &*fs,
-            &dest,
-            entries.iter(),
-            &filters,
-            options.dry_run(),
-            false,
-        )?;
+        let deleted = deleter.delete_extraneous(&dest, entries.iter())?;
         stats.files_deleted = deleted;
+    }
+
+    // Handle --prune-empty-dirs (-m).
+    if options.prune_empty_dirs() {
+        let pruned = delete::prune_empty_dirs(&*fs, &dest, options.dry_run())?;
+        stats.files_deleted += pruned;
     }
 
     // Phase exchange.
@@ -812,32 +860,48 @@ mod tests {
     use super::*;
     use crate::options::{DeleteMode, Verbosity};
 
+    /// The condensed flag string (first element of the args vector).
+    fn condensed(args: &[String]) -> &str {
+        &args[0]
+    }
+
+    /// Check if a long-form option is present in the args vector.
+    fn has_long(args: &[String], opt: &str) -> bool {
+        args.iter().any(|a| a == opt)
+    }
+
+    /// Check if any long-form option starts with the given prefix.
+    fn has_long_prefix(args: &[String], prefix: &str) -> bool {
+        args.iter().any(|a| a.starts_with(prefix))
+    }
+
     #[test]
     fn test_build_server_options_archive() {
         let opts = TransferOptions::builder().archive().build();
-        let s = build_server_options(&opts, true);
-        assert!(s.contains('l'), "missing -l (links)");
-        assert!(s.contains('o'), "missing -o (owner)");
-        assert!(s.contains('g'), "missing -g (group)");
-        assert!(s.contains('D'), "missing -D (devices)");
-        assert!(s.contains('t'), "missing -t (times)");
-        assert!(s.contains('p'), "missing -p (perms)");
-        assert!(s.contains('r'), "missing -r (recursive)");
-        assert!(s.contains("e."), "missing capability string");
+        let args = build_server_options(&opts, true);
+        let c = condensed(&args);
+        assert!(c.contains('l'), "missing -l (links)");
+        assert!(c.contains('o'), "missing -o (owner)");
+        assert!(c.contains('g'), "missing -g (group)");
+        assert!(c.contains('D'), "missing -D (devices)");
+        assert!(c.contains('t'), "missing -t (times)");
+        assert!(c.contains('p'), "missing -p (perms)");
+        assert!(c.contains('r'), "missing -r (recursive)");
+        assert!(c.contains("e."), "missing capability string");
     }
 
     #[test]
     fn test_build_server_options_compress() {
         let opts = TransferOptions::builder().compress(true).build();
-        let s = build_server_options(&opts, true);
-        assert!(s.contains('z'), "missing -z (compress)");
+        let args = build_server_options(&opts, true);
+        assert!(condensed(&args).contains('z'), "missing -z (compress)");
     }
 
     #[test]
     fn test_build_server_options_dry_run() {
         let opts = TransferOptions::builder().dry_run(true).build();
-        let s = build_server_options(&opts, true);
-        assert!(s.contains('n'), "missing -n (dry-run)");
+        let args = build_server_options(&opts, true);
+        assert!(condensed(&args).contains('n'), "missing -n (dry-run)");
     }
 
     #[test]
@@ -845,8 +909,8 @@ mod tests {
         let opts = TransferOptions::builder()
             .delete(DeleteMode::During)
             .build();
-        let s = build_server_options(&opts, true);
-        assert!(s.contains("--delete-during"));
+        let args = build_server_options(&opts, true);
+        assert!(has_long(&args, "--delete-during"));
     }
 
     #[test]
@@ -854,21 +918,89 @@ mod tests {
         let opts = TransferOptions::builder()
             .verbosity(Verbosity::VeryVerbose)
             .build();
-        let s = build_server_options(&opts, true);
-        assert!(s.contains("vv"), "missing -vv");
+        let args = build_server_options(&opts, true);
+        assert!(condensed(&args).contains("vv"), "missing -vv");
     }
 
     #[test]
     fn test_build_server_options_minimal() {
         let opts = TransferOptions::default();
-        let s = build_server_options(&opts, true);
-        assert!(s.starts_with('-'));
-        assert!(s.contains("e."));
+        let args = build_server_options(&opts, true);
+        assert!(condensed(&args).starts_with('-'));
+        assert!(condensed(&args).contains("e."));
     }
 
     #[test]
     fn test_sync_direction_eq() {
         assert_eq!(SyncDirection::Push, SyncDirection::Push);
         assert_ne!(SyncDirection::Push, SyncDirection::Pull);
+    }
+
+    #[test]
+    fn test_build_server_options_ignore_times() {
+        let opts = TransferOptions::builder().ignore_times(true).build();
+        let args = build_server_options(&opts, true);
+        assert!(condensed(&args).contains('I'), "missing -I (ignore-times)");
+    }
+
+    #[test]
+    fn test_build_server_options_prune_empty_dirs() {
+        let opts = TransferOptions::builder().prune_empty_dirs(true).build();
+        let args = build_server_options(&opts, true);
+        assert!(
+            condensed(&args).contains('m'),
+            "missing -m (prune-empty-dirs)"
+        );
+    }
+
+    #[test]
+    fn test_build_server_options_size_only() {
+        let opts = TransferOptions::builder().size_only(true).build();
+        let args = build_server_options(&opts, true);
+        assert!(has_long(&args, "--size-only"));
+    }
+
+    #[test]
+    fn test_build_server_options_existing() {
+        let opts = TransferOptions::builder().existing(true).build();
+        let args = build_server_options(&opts, true);
+        assert!(has_long(&args, "--existing"));
+    }
+
+    #[test]
+    fn test_build_server_options_ignore_existing() {
+        let opts = TransferOptions::builder().ignore_existing(true).build();
+        let args = build_server_options(&opts, true);
+        assert!(has_long(&args, "--ignore-existing"));
+    }
+
+    #[test]
+    fn test_build_server_options_max_delete() {
+        let opts = TransferOptions::builder().max_delete(42).build();
+        let args = build_server_options(&opts, true);
+        assert!(has_long_prefix(&args, "--max-delete=42"));
+    }
+
+    #[test]
+    fn test_roundtrip_new_flags() {
+        let opts = TransferOptions::builder()
+            .archive()
+            .ignore_times(true)
+            .size_only(true)
+            .existing(true)
+            .ignore_existing(true)
+            .max_delete(99)
+            .prune_empty_dirs(true)
+            .build();
+
+        let args = build_server_options(&opts, true);
+        let parsed = parse_server_args(&args, "/tmp/test".into(), true);
+
+        assert!(parsed.ignore_times());
+        assert!(parsed.size_only());
+        assert!(parsed.existing());
+        assert!(parsed.ignore_existing());
+        assert_eq!(parsed.max_delete(), Some(99));
+        assert!(parsed.prune_empty_dirs());
     }
 }

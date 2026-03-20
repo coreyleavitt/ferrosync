@@ -12,6 +12,25 @@ use crate::options::TransferOptions;
 
 use super::progress::ItemizedChanges;
 
+/// Check if a file should be skipped based on existence checks.
+///
+/// Returns `true` if `--existing` is set and dest doesn't exist, or
+/// `--ignore-existing` is set and dest exists.
+pub fn check_existence_skip(
+    fs: &dyn FileSystem,
+    dest_path: &Path,
+    options: &TransferOptions,
+) -> bool {
+    let dest_exists = fs.lexists(dest_path);
+    if options.existing() && !dest_exists {
+        return true;
+    }
+    if options.ignore_existing() && dest_exists {
+        return true;
+    }
+    false
+}
+
 /// Check if a file should be skipped based on size and mtime comparison.
 ///
 /// Returns `true` if the destination file exists with the same size and
@@ -22,6 +41,11 @@ pub fn quick_check_skip(
     dest_path: &Path,
     options: &TransferOptions,
 ) -> bool {
+    // --ignore-times: never skip, always transfer
+    if options.ignore_times() {
+        return false;
+    }
+
     let dest_meta = match fs.lstat(dest_path) {
         Ok(m) => m,
         Err(_) => return false, // dest doesn't exist, must transfer
@@ -30,6 +54,11 @@ pub fn quick_check_skip(
     // Size differs -> must transfer.
     if dest_meta.len != src_entry.len {
         return false;
+    }
+
+    // --size-only: sizes match -> skip (don't check mtime)
+    if options.size_only() {
+        return true;
     }
 
     // --update: skip if dest is newer.
@@ -233,5 +262,88 @@ pub fn compute_itemized(
         perms_changed,
         owner_changed,
         group_changed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(name: &str, len: i64, mtime: i64) -> FileEntry {
+        FileEntry {
+            name: name.as_bytes().to_vec(),
+            len,
+            mtime,
+            mode: 0o100644,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_ignore_times_never_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::unix::UnixFileSystem::new();
+        let dest = tmp.path().join("file.txt");
+        std::fs::write(&dest, "hello").unwrap();
+        filetime::set_file_mtime(&dest, filetime::FileTime::from_unix_time(1_700_000_000, 0))
+            .unwrap();
+
+        let entry = make_entry("file.txt", 5, 1_700_000_000);
+        let opts = TransferOptions::builder().ignore_times(true).build();
+        // Same size, same mtime -- would normally skip, but --ignore-times forces transfer
+        assert!(!quick_check_skip(&fs, &entry, &dest, &opts));
+    }
+
+    #[test]
+    fn test_size_only_skips_matching_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::unix::UnixFileSystem::new();
+        let dest = tmp.path().join("file.txt");
+        std::fs::write(&dest, "hello").unwrap();
+        filetime::set_file_mtime(&dest, filetime::FileTime::from_unix_time(1_600_000_000, 0))
+            .unwrap();
+
+        let entry = make_entry("file.txt", 5, 1_700_000_000);
+        let opts = TransferOptions::builder().size_only(true).build();
+        // Different mtime but same size -- size-only should skip
+        assert!(quick_check_skip(&fs, &entry, &dest, &opts));
+    }
+
+    #[test]
+    fn test_existing_skips_when_dest_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::unix::UnixFileSystem::new();
+        let dest = tmp.path().join("nope.txt");
+        let opts = TransferOptions::builder().existing(true).build();
+        assert!(check_existence_skip(&fs, &dest, &opts));
+    }
+
+    #[test]
+    fn test_existing_allows_when_dest_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::unix::UnixFileSystem::new();
+        let dest = tmp.path().join("yes.txt");
+        std::fs::write(&dest, "data").unwrap();
+        let opts = TransferOptions::builder().existing(true).build();
+        assert!(!check_existence_skip(&fs, &dest, &opts));
+    }
+
+    #[test]
+    fn test_ignore_existing_skips_when_dest_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::unix::UnixFileSystem::new();
+        let dest = tmp.path().join("yes.txt");
+        std::fs::write(&dest, "data").unwrap();
+        let opts = TransferOptions::builder().ignore_existing(true).build();
+        assert!(check_existence_skip(&fs, &dest, &opts));
+    }
+
+    #[test]
+    fn test_ignore_existing_allows_when_dest_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::unix::UnixFileSystem::new();
+        let dest = tmp.path().join("nope.txt");
+        let opts = TransferOptions::builder().ignore_existing(true).build();
+        assert!(!check_existence_skip(&fs, &dest, &opts));
     }
 }

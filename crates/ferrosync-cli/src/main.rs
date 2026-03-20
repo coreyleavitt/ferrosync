@@ -142,6 +142,30 @@ struct TransferFlags {
     #[arg(short = 'u', long)]
     update: bool,
 
+    /// Never skip based on mtime, always transfer
+    #[arg(short = 'I', long)]
+    ignore_times: bool,
+
+    /// Skip if sizes match, ignore mtime
+    #[arg(long)]
+    size_only: bool,
+
+    /// Only update files that already exist on dest
+    #[arg(long)]
+    existing: bool,
+
+    /// Don't update files that exist on dest
+    #[arg(long)]
+    ignore_existing: bool,
+
+    /// Cap number of deletions
+    #[arg(long, value_name = "NUM")]
+    max_delete: Option<u64>,
+
+    /// Remove empty directories after transfer
+    #[arg(short = 'm', long)]
+    prune_empty_dirs: bool,
+
     /// In-place file updates
     #[arg(long)]
     inplace: bool,
@@ -455,7 +479,11 @@ impl TransferFlags {
             .checksum_mode(self.checksum)
             .whole_file(self.whole_file)
             .update(self.update)
-            .inplace(self.inplace);
+            .inplace(self.inplace)
+            .ignore_times(self.ignore_times)
+            .size_only(self.size_only)
+            .existing(self.existing)
+            .ignore_existing(self.ignore_existing);
 
         let delete_mode = if self.delete_before {
             DeleteMode::Before
@@ -493,11 +521,15 @@ impl TransferFlags {
         if let Some(t) = self.timeout {
             builder = builder.timeout(t);
         }
+        if let Some(n) = self.max_delete {
+            builder = builder.max_delete(n);
+        }
 
         builder = builder
             .one_file_system(self.one_file_system)
             .numeric_ids(self.numeric_ids)
             .sparse(self.sparse)
+            .prune_empty_dirs(self.prune_empty_dirs)
             .backup(self.backup)
             .suffix(self.suffix)
             .append(self.append)

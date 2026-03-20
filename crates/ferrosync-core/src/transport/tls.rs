@@ -179,17 +179,17 @@ pub struct TlsDaemonTransport {
     config: TlsDaemonConfig,
     /// Whether we are sending to the remote (remote is receiver).
     am_sender: bool,
-    /// Server-mode option string.
-    options: String,
+    /// Server-mode option arguments.
+    options: Vec<String>,
 }
 
 impl TlsDaemonTransport {
     /// Create a new TLS daemon transport.
-    pub fn new(config: TlsDaemonConfig, am_sender: bool, options: &str) -> Self {
+    pub fn new(config: TlsDaemonConfig, am_sender: bool, options: &[String]) -> Self {
         Self {
             config,
             am_sender,
-            options: options.to_string(),
+            options: options.to_vec(),
         }
     }
 
@@ -200,7 +200,7 @@ impl TlsDaemonTransport {
         if !self.am_sender {
             args.push("--sender".to_string());
         }
-        args.push(self.options.clone());
+        args.extend(self.options.iter().cloned());
         args.push(".".to_string());
 
         let path = if self.config.path.is_empty() {
@@ -499,7 +499,7 @@ mod tests {
             path: "subdir".to_string(),
             ..Default::default()
         };
-        let transport = TlsDaemonTransport::new(config, true, "-logDtprze.iLsfxCIvu");
+        let transport = TlsDaemonTransport::new(config, true, &["-logDtprze.iLsfxCIvu".into()]);
         let args = transport.build_args();
         assert_eq!(args[0], "--server");
         assert!(!args.contains(&"--sender".to_string()));
@@ -513,7 +513,7 @@ mod tests {
             path: String::new(),
             ..Default::default()
         };
-        let transport = TlsDaemonTransport::new(config, false, "-logDtprze.iLsfxCIvu");
+        let transport = TlsDaemonTransport::new(config, false, &["-logDtprze.iLsfxCIvu".into()]);
         let args = transport.build_args();
         assert_eq!(args[0], "--server");
         assert_eq!(args[1], "--sender");
