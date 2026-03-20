@@ -1,783 +1,508 @@
-//! Interop tests: ferrosync client against real rsync binary.
+//! Rsync interop tests: ferrosync client against real rsync over SSH.
 //!
-//! These tests spawn `rsync --server` as a subprocess and run our
-//! client-side protocol against it. This is TEST INFRASTRUCTURE ONLY --
-//! production code never spawns rsync.
+//! These tests exercise the production path: ferrosync client -> SSH -> rsync
+//! --server on a real Linux box. They verify wire protocol compatibility with
+//! real rsync for every supported flag and flag combination.
 //!
-//! Requires rsync installed and a Unix environment.
+//! Requires Docker:
+//! ```sh
+//! docker compose -f docker-compose.test.yml run ferrosync-dev \
+//!     cargo test -p ferrosync-core --test rsync_interop
+//! ```
+//!
+//! Gated behind FERROSYNC_SSH_TEST=1 env var.
 #![cfg(unix)]
 
-use std::path::Path;
-use std::process::Stdio;
+#[macro_use]
+mod common;
 
-use tokio::process::Command;
-
-use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncSession};
-use ferrosync_core::error::TransportError;
-use ferrosync_core::fs::unix::UnixFileSystem;
-use ferrosync_core::options::TransferOptions;
-use ferrosync_core::transport::{Transport, TransportStreams};
-
-/// Locate a usable rsync binary.
-///
-/// Prefers `RSYNC_BIN` env var, then `/tmp/rsync-3.4.1/rsync` (vanilla build
-/// for systems with a vendor-patched rsync), then `rsync` from PATH.
-fn rsync_binary() -> Option<String> {
-    if let Ok(bin) = std::env::var("RSYNC_BIN") {
-        if std::process::Command::new(&bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-        {
-            return Some(bin);
-        }
-    }
-
-    // Prefer vanilla build over potentially vendor-patched system rsync.
-    for candidate in &["/tmp/rsync-3.4.1/rsync", "rsync"] {
-        if std::process::Command::new(candidate)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok()
-        {
-            return Some(candidate.to_string());
-        }
-    }
-
-    None
-}
-
-/// Check if rsync is available. Skip tests if not.
-fn rsync_available() -> bool {
-    rsync_binary().is_some()
-}
-
-macro_rules! skip_if_no_rsync {
-    () => {
-        if !rsync_available() {
-            eprintln!("skipping: rsync not found");
-            return;
-        }
-    };
-}
-
-/// Test-only transport that spawns rsync --server as a subprocess.
-/// This exists ONLY in test code for interop testing.
-struct RsyncServerTransport {
-    rsync_bin: String,
-    args: Vec<String>,
-    cwd: std::path::PathBuf,
-}
-
-impl RsyncServerTransport {
-    fn new(am_sender: bool, options: &str, cwd: &Path) -> Self {
-        Self::new_with_extra_args(am_sender, options, cwd, &[])
-    }
-
-    fn new_with_extra_args(
-        am_sender: bool,
-        options: &str,
-        cwd: &Path,
-        extra_args: &[String],
-    ) -> Self {
-        let mut args = vec!["--server".to_string()];
-        if !am_sender {
-            args.push("--sender".to_string());
-        }
-        args.push(options.to_string());
-        // Extra long options (e.g., --link-dest=DIR) go before the path args.
-        args.extend(extra_args.iter().cloned());
-        args.push(".".to_string());
-        args.push(".".to_string());
-
-        Self {
-            rsync_bin: rsync_binary().unwrap_or_else(|| "rsync".to_string()),
-            args,
-            cwd: cwd.to_path_buf(),
-        }
-    }
-}
-
-impl Transport for RsyncServerTransport {
-    fn connect(
-        self: Box<Self>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<TransportStreams, TransportError>> + Send>,
-    > {
-        Box::pin(async move {
-            let mut child = Command::new(&self.rsync_bin)
-                .args(&self.args)
-                .current_dir(&self.cwd)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| TransportError::ConnectionFailed {
-                    message: format!("failed to spawn rsync: {e}"),
-                })?;
-
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| TransportError::ConnectionFailed {
-                    message: "failed to open rsync stdin".to_string(),
-                })?;
-
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| TransportError::ConnectionFailed {
-                    message: "failed to open rsync stdout".to_string(),
-                })?;
-
-            // Monitor child in background for diagnostics.
-            tokio::spawn(async move {
-                let output = child.wait_with_output().await;
-                if let Ok(output) = output {
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        eprintln!(
-                            "[rsync-interop] exit={:?} stderr: {}",
-                            output.status.code(),
-                            stderr.trim()
-                        );
-                    }
-                }
-            });
-
-            Ok(TransportStreams::new(Box::new(stdout), Box::new(stdin)))
-        })
-    }
-}
+use common::assertions::{assert_hard_linked, assert_not_hard_linked};
+use common::env::{set_mtime, TestEnv};
+use common::ssh::*;
 
 // ---------------------------------------------------------------------------
-// Pull tests (ferrosync pulls from rsync --server --sender)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_interop_pull_single_file() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("hello.txt"), "hello from rsync\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    let result = session.run().await;
-    if let Err(ref e) = result {
-        eprintln!("pull failed: {e}");
-    }
-    result.unwrap();
-
-    let content = std::fs::read(dst.join("hello.txt")).unwrap();
-    assert_eq!(content, b"hello from rsync\n");
-}
-
-#[tokio::test]
-async fn test_interop_pull_directory_recursive() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(src.join("subdir")).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("root.txt"), "root file\n").unwrap();
-    std::fs::write(src.join("subdir/nested.txt"), "nested\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    session.run().await.unwrap();
-
-    assert_eq!(std::fs::read(dst.join("root.txt")).unwrap(), b"root file\n");
-    assert_eq!(
-        std::fs::read(dst.join("subdir/nested.txt")).unwrap(),
-        b"nested\n"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Push tests (ferrosync pushes to rsync --server receiver)
+// Push tests: ferrosync client -> rsync server over SSH
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_interop_push_single_file() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("upload.txt"), "pushed to rsync\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("hello.txt", b"hello via SSH\n", None)
         .build();
 
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+    let remote_dir = remote_tmpdir().await;
+    let result = push_archive(&env.src(), &remote_dir, 30).await;
+    assert!(result.stats.files_transferred >= 1);
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    let content = remote_cat(&format!("{remote_dir}/hello.txt")).await;
+    assert_eq!(content, "hello via SSH\n");
 
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("push failed: {e}"),
-        Err(_) => panic!("push timed out after 10s"),
-    }
-
-    let content = std::fs::read(dst.join("upload.txt")).unwrap();
-    assert_eq!(content, b"pushed to rsync\n");
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_push_directory_recursive() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(src.join("a/b")).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("top.txt"), "top\n").unwrap();
-    std::fs::write(src.join("a/mid.txt"), "mid\n").unwrap();
-    std::fs::write(src.join("a/b/deep.txt"), "deep\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("top.txt", b"top\n", None)
+        .with_src_file("a/mid.txt", b"mid\n", None)
+        .with_src_file("a/b/deep.txt", b"deep\n", None)
         .build();
 
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    let result = session.run().await;
-    if let Err(ref e) = result {
-        eprintln!("push failed: {e}");
-    }
-    result.unwrap();
-
-    assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"top\n");
-    assert_eq!(std::fs::read(dst.join("a/mid.txt")).unwrap(), b"mid\n");
-    assert_eq!(std::fs::read(dst.join("a/b/deep.txt")).unwrap(), b"deep\n");
-}
-
-#[tokio::test]
-async fn test_interop_pull_large_file() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
-    std::fs::write(src.join("big.dat"), &data).unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    session.run().await.unwrap();
-
-    let pulled = std::fs::read(dst.join("big.dat")).unwrap();
-    assert_eq!(pulled.len(), data.len());
-    assert_eq!(pulled, data);
-}
-
-#[tokio::test]
-async fn test_interop_pull_empty_file() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("empty.txt"), b"").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    session.run().await.unwrap();
-
-    let content = std::fs::read(dst.join("empty.txt")).unwrap();
-    assert!(content.is_empty());
-}
-
-// ---------------------------------------------------------------------------
-// File list codec validation (Phase 4)
-//
-// These tests verify our flist wire encoding is correctly parsed by real rsync
-// by checking that file metadata (name, size, mode, mtime) survives a push.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_interop_flist_preserves_mtime() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("timed.txt"), "check mtime\n").unwrap();
-
-    // Set a specific mtime to verify it's preserved through the wire encoding.
-    let known_time = filetime::FileTime::from_unix_time(1700000000, 0);
-    filetime::set_file_mtime(src.join("timed.txt"), known_time).unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
-    session.run().await.unwrap();
-
-    let content = std::fs::read(dst.join("timed.txt")).unwrap();
-    assert_eq!(content, b"check mtime\n");
-
-    // Verify rsync set the mtime correctly.
-    let meta = std::fs::metadata(dst.join("timed.txt")).unwrap();
-    let actual_mtime = meta
-        .modified()
-        .unwrap()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    assert_eq!(remote_cat(&format!("{remote_dir}/top.txt")).await, "top\n");
     assert_eq!(
-        actual_mtime, 1700000000,
-        "mtime should be preserved through flist encoding"
+        remote_cat(&format!("{remote_dir}/a/mid.txt")).await,
+        "mid\n"
     );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/a/b/deep.txt")).await,
+        "deep\n"
+    );
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
-async fn test_interop_flist_preserves_permissions() {
-    skip_if_no_rsync!();
+async fn test_interop_push_many_small_files() {
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("script.sh"), "#!/bin/sh\necho hi\n").unwrap();
-    // Set executable permission.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            src.join("script.sh"),
-            std::fs::Permissions::from_mode(0o755),
+    let env = TestEnv::builder().build();
+    for i in 0..50 {
+        std::fs::write(
+            env.src().join(format!("file_{i:03}.txt")),
+            format!("content {i}\n"),
         )
         .unwrap();
     }
 
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .preserve_perms(true)
-        .source(src.clone())
-        .dest(dst.clone())
+    let remote_dir = remote_tmpdir().await;
+    let result = push_archive(&env.src(), &remote_dir, 60).await;
+    assert_eq!(result.stats.files_transferred, 50);
+
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/file_000.txt")).await,
+        "content 0\n"
+    );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/file_049.txt")).await,
+        "content 49\n"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_push_large_file() {
+    skip_if_no_ssh!();
+
+    let data: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+    let env = TestEnv::builder()
+        .with_src_file("big.dat", &data, None)
         .build();
 
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
-    session.run().await.unwrap();
+    let remote_dir = remote_tmpdir().await;
+    let result = push_archive(&env.src(), &remote_dir, 60).await;
+    assert_eq!(result.stats.files_transferred, 1);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dst.join("script.sh"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o755,
-            "permissions should be preserved through flist encoding"
-        );
+    let size = ssh_cmd(&["stat", "-c", "%s", &format!("{remote_dir}/big.dat")]).await;
+    assert_eq!(size.trim(), "1048576");
+
+    let head = ssh_cmd(&[
+        "od",
+        "-A",
+        "n",
+        "-t",
+        "x1",
+        "-N",
+        "16",
+        &format!("{remote_dir}/big.dat"),
+    ])
+    .await;
+    let head_hex: String = head.split_whitespace().collect();
+    let expected_head: String = data[..16].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(head_hex, expected_head, "large file head mismatch");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_push_very_large_file() {
+    skip_if_no_ssh!();
+
+    let size = 16 * 1024 * 1024;
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let env = TestEnv::builder()
+        .with_src_file("huge.dat", &data, None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    let result = push_archive(&env.src(), &remote_dir, 120).await;
+    assert_eq!(result.stats.files_transferred, 1);
+
+    let remote_size = ssh_cmd(&["stat", "-c", "%s", &format!("{remote_dir}/huge.dat")]).await;
+    assert_eq!(
+        remote_size.trim(),
+        size.to_string(),
+        "remote file size mismatch"
+    );
+
+    let head = ssh_cmd(&[
+        "od",
+        "-A",
+        "n",
+        "-t",
+        "x1",
+        "-N",
+        "4096",
+        &format!("{remote_dir}/huge.dat"),
+    ])
+    .await;
+    let head_hex: String = head.split_whitespace().collect();
+    let expected_head: String = data[..4096].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(head_hex, expected_head, "16MB file head mismatch");
+
+    let tail = ssh_cmd(&[
+        "od",
+        "-A",
+        "n",
+        "-t",
+        "x1",
+        "-j",
+        &format!("{}", size - 4096),
+        "-N",
+        "4096",
+        &format!("{remote_dir}/huge.dat"),
+    ])
+    .await;
+    let tail_hex: String = tail.split_whitespace().collect();
+    let expected_tail: String = data[size - 4096..]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(tail_hex, expected_tail, "16MB file tail mismatch");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_push_mixed_directory() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder().build();
+    std::fs::create_dir_all(env.src().join("sub")).unwrap();
+
+    for i in 0..20 {
+        std::fs::write(
+            env.src().join(format!("small_{i:02}.txt")),
+            format!("data {i}\n"),
+        )
+        .unwrap();
     }
+    for i in 0..10 {
+        std::fs::write(
+            env.src().join(format!("sub/nested_{i:02}.txt")),
+            format!("nested {i}\n"),
+        )
+        .unwrap();
+    }
+    let big_data: Vec<u8> = (0..524_288).map(|i| (i % 199) as u8).collect();
+    std::fs::write(env.src().join("medium.bin"), &big_data).unwrap();
+
+    let remote_dir = remote_tmpdir().await;
+    let result = push_archive(&env.src(), &remote_dir, 120).await;
+    assert_eq!(result.stats.files_transferred, 31);
+
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/small_00.txt")).await,
+        "data 0\n"
+    );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/sub/nested_09.txt")).await,
+        "nested 9\n"
+    );
+    assert!(remote_exists(&format!("{remote_dir}/medium.bin")).await);
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_push_preserves_mtime() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("timed.txt", b"check mtime\n", Some(1_700_000_000))
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    let stat_output = ssh_cmd(&["stat", "-c", "%Y", &format!("{remote_dir}/timed.txt")]).await;
+    let remote_mtime: i64 = stat_output.trim().parse().unwrap();
+    assert_eq!(remote_mtime, 1_700_000_000, "mtime should be preserved");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_push_idempotent() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("stable.txt", b"no change\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+
+    push_archive(&env.src(), &remote_dir, 30).await;
+    let _result2 = push_archive(&env.src(), &remote_dir, 30).await;
+
+    let content = remote_cat(&format!("{remote_dir}/stable.txt")).await;
+    assert_eq!(content, "no change\n");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_push_archive_mode() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("archive.txt", b"archive mode push\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    let content = remote_cat(&format!("{remote_dir}/archive.txt")).await;
+    assert_eq!(content, "archive mode push\n");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+// ---------------------------------------------------------------------------
+// Flist codec validation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_interop_flist_preserves_permissions() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("script.sh", b"#!/bin/sh\necho hi\n", None)
+        .build();
+
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(
+        env.src().join("script.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let remote_dir = remote_tmpdir().await;
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .source(env.src())
+        .build();
+    push_with_opts(opts, &remote_dir, 30).await;
+
+    let stat_output = ssh_cmd(&["stat", "-c", "%a", &format!("{remote_dir}/script.sh")]).await;
+    assert_eq!(stat_output.trim(), "755", "permissions should be preserved");
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_flist_multiple_files_sorted() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    // Create files with names that test prefix compression in the codec.
-    let files = vec![
-        ("alpha.txt", "aaa"),
-        ("alpha_test.txt", "bbb"), // shares "alpha" prefix
-        ("beta.txt", "ccc"),
-        ("beta_long_name.txt", "ddd"),
-    ];
-
-    for (name, content) in &files {
-        std::fs::write(src.join(name), content).unwrap();
-    }
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("alpha.txt", b"aaa", None)
+        .with_src_file("alpha_test.txt", b"bbb", None)
+        .with_src_file("beta.txt", b"ccc", None)
+        .with_src_file("beta_long_name.txt", b"ddd", None)
         .build();
 
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
-    session.run().await.unwrap();
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    // Verify all files arrived with correct content.
-    for (name, content) in &files {
-        let actual = std::fs::read(dst.join(name)).unwrap();
-        assert_eq!(
-            actual,
-            content.as_bytes(),
-            "file {name} content mismatch after flist push"
-        );
-    }
+    assert_eq!(remote_cat(&format!("{remote_dir}/alpha.txt")).await, "aaa");
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/alpha_test.txt")).await,
+        "bbb"
+    );
+    assert_eq!(remote_cat(&format!("{remote_dir}/beta.txt")).await, "ccc");
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/beta_long_name.txt")).await,
+        "ddd"
+    );
+
+    remote_cleanup(&remote_dir).await;
 }
 
-/// Push with archive mode (-a = -rlptgoD) which enables preserve_uid/gid.
-/// This exercises the uid/gid name list exchange after the file list.
+// ---------------------------------------------------------------------------
+// Pull tests: ferrosync client <- rsync server over SSH
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn test_interop_push_archive_mode() {
-    skip_if_no_rsync!();
+async fn test_interop_pull_single_file() {
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("archive.txt"), "archive mode push\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .archive()
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("pull.txt", b"pulled via SSH\n", None)
         .build();
 
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
+    // Push to remote, then pull back into a clean destination.
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    let remote_path = format!("{remote_dir}/");
+    pull_archive(&remote_path, &env.dst(), 30).await;
 
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("archive push failed: {e}"),
-        Err(_) => panic!("archive push timed out after 10s"),
-    }
+    let content = std::fs::read_to_string(env.dst().join("pull.txt")).unwrap();
+    assert_eq!(content, "pulled via SSH\n");
 
-    let content = std::fs::read(dst.join("archive.txt")).unwrap();
-    assert_eq!(content, b"archive mode push\n");
+    remote_cleanup(&remote_dir).await;
 }
 
-/// Pull with archive mode exercises the uid/gid name list on the receive side.
+#[tokio::test]
+async fn test_interop_pull_directory_recursive() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("top.txt", b"top\n", None)
+        .with_src_file("sub/deep.txt", b"deep\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    let remote_path = format!("{remote_dir}/");
+    pull_archive(&remote_path, &env.dst(), 30).await;
+
+    assert_eq!(
+        std::fs::read_to_string(env.dst().join("top.txt")).unwrap(),
+        "top\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.dst().join("sub/deep.txt")).unwrap(),
+        "deep\n"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_large_file() {
+    skip_if_no_ssh!();
+
+    let data: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+    let env = TestEnv::builder()
+        .with_src_file("big.dat", &data, None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 60).await;
+
+    let remote_path = format!("{remote_dir}/");
+    let result = pull_archive(&remote_path, &env.dst(), 60).await;
+    assert_eq!(result.stats.files_transferred, 1);
+
+    let pulled = std::fs::read(env.dst().join("big.dat")).unwrap();
+    assert_eq!(pulled.len(), 1_048_576, "pulled file should be 1MB");
+    assert_eq!(pulled, data, "large file content mismatch after pull");
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_empty_file() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder().build();
+
+    let remote_dir = remote_tmpdir().await;
+    ssh_cmd(&["touch", &format!("{remote_dir}/empty.txt")]).await;
+
+    let remote_path = format!("{remote_dir}/");
+    pull_archive(&remote_path, &env.dst(), 30).await;
+
+    let content = std::fs::read(env.dst().join("empty.txt")).unwrap();
+    assert!(content.is_empty());
+
+    remote_cleanup(&remote_dir).await;
+}
+
 #[tokio::test]
 async fn test_interop_pull_archive_mode() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("archive.txt"), "archive mode pull\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .archive()
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("archive.txt", b"archive mode pull\n", None)
         .build();
 
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
+    let remote_path = format!("{remote_dir}/");
+    pull_archive(&remote_path, &env.dst(), 30).await;
 
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("archive pull failed: {e}"),
-        Err(_) => panic!("archive pull timed out after 10s"),
-    }
+    let content = std::fs::read_to_string(env.dst().join("archive.txt")).unwrap();
+    assert_eq!(content, "archive mode pull\n");
 
-    let content = std::fs::read(dst.join("archive.txt")).unwrap();
-    assert_eq!(content, b"archive mode pull\n");
+    remote_cleanup(&remote_dir).await;
 }
 
 // ---------------------------------------------------------------------------
-// SSH-simulated tests (is_remote=true)
-//
-// These use new_remote() to simulate the SSH protocol path where the filter
-// list is ALWAYS sent (matching rsync --server with local_server=0).
-//
-// IMPORTANT: A local rsync subprocess has local_server=1, which means it
-// conditionally reads the filter list. When is_remote=true, we send the
-// filter list, but the local subprocess may NOT read it -- causing desync.
-// These tests verify our wire format matches what rsync expects over SSH.
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_interop_ssh_push_single_file() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("hello.txt"), "ssh push test\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("ssh push failed: {e}"),
-        Err(_) => panic!("ssh push timed out after 10s"),
-    }
-
-    let content = std::fs::read(dst.join("hello.txt")).unwrap();
-    assert_eq!(content, b"ssh push test\n");
-}
-
-#[tokio::test]
-async fn test_interop_ssh_push_archive_mode() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("archive.txt"), "ssh archive push\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .archive()
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, true);
-    let transport = RsyncServerTransport::new(true, &server_opts, &dst);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("ssh archive push failed: {e}"),
-        Err(_) => panic!("ssh archive push timed out after 10s"),
-    }
-
-    let content = std::fs::read(dst.join("archive.txt")).unwrap();
-    assert_eq!(content, b"ssh archive push\n");
-}
-
-#[tokio::test]
-async fn test_interop_ssh_pull_single_file() {
-    skip_if_no_rsync!();
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("hello.txt"), "ssh pull test\n").unwrap();
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
-        .build();
-
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("ssh pull failed: {e}"),
-        Err(_) => panic!("ssh pull timed out after 10s"),
-    }
-
-    let content = std::fs::read(dst.join("hello.txt")).unwrap();
-    assert_eq!(content, b"ssh pull test\n");
-}
-
-// ---------------------------------------------------------------------------
-// Link-dest tests (ferrosync pulls from rsync --server --sender)
+// Link-dest tests (receiver-side hard-linking)
 //
 // --link-dest is a receiver-side feature: when a file in the source matches
 // (content + mtime) a file in a link-dest directory, the receiver hard-links
 // instead of transferring. All tests here are PULL tests.
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
-fn inode_of(path: &std::path::Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).unwrap().ino()
-}
-
-/// Helper to set mtime on a file to a specific unix timestamp.
-fn set_mtime(path: &std::path::Path, unix_secs: i64) {
-    let ft = filetime::FileTime::from_unix_time(unix_secs, 0);
-    filetime::set_file_mtime(path, ft).unwrap();
-}
-
 #[tokio::test]
 async fn test_interop_pull_link_dest_basic() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let prev = tmp.path().join("prev");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&prev).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("file_a.txt"), "hello\n").unwrap();
-    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
-
-    std::fs::write(prev.join("file_a.txt"), "hello\n").unwrap();
-    set_mtime(&prev.join("file_a.txt"), 1_700_000_000);
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .link_dest(&prev)
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"hello\n", Some(1_700_000_000))
+        .with_prev_file("file_a.txt", b"hello\n", Some(1_700_000_000))
         .build();
 
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+    // Push src to remote, then pull with link-dest.
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("pull failed: {e}"),
-        Err(_) => panic!("pull timed out after 10s"),
-    }
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .link_dest(env.prev())
+        .dest(env.dst())
+        .build();
 
-    let content = std::fs::read(dst.join("file_a.txt")).unwrap();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    let content = std::fs::read(env.dst().join("file_a.txt")).unwrap();
     assert_eq!(content, b"hello\n");
 
-    assert_eq!(
-        inode_of(&dst.join("file_a.txt")),
-        inode_of(&prev.join("file_a.txt")),
-        "dst/file_a.txt should be hard-linked to prev/file_a.txt"
+    assert_hard_linked(
+        &env.dst().join("file_a.txt"),
+        &env.prev().join("file_a.txt"),
     );
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_pull_link_dest_relative_path() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().join("base");
@@ -789,212 +514,150 @@ async fn test_interop_pull_link_dest_relative_path() {
     std::fs::write(current.join("file.txt"), "content\n").unwrap();
     set_mtime(&current.join("file.txt"), 1_700_000_000);
 
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
+    // Push current to remote.
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&current, &remote_dir, 30).await;
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
         .link_dest("../current")
-        .source(current.clone())
         .dest(new_dir.clone())
         .build();
 
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &current);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("pull failed: {e}"),
-        Err(_) => panic!("pull timed out after 10s"),
-    }
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
 
     let content = std::fs::read(new_dir.join("file.txt")).unwrap();
     assert_eq!(content, b"content\n");
 
-    assert_eq!(
-        inode_of(&new_dir.join("file.txt")),
-        inode_of(&current.join("file.txt")),
-        "new/file.txt should be hard-linked to current/file.txt"
-    );
+    assert_hard_linked(&new_dir.join("file.txt"), &current.join("file.txt"));
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_pull_link_dest_multiple_dirs() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let alt1 = tmp.path().join("alt1");
-    let alt2 = tmp.path().join("alt2");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"aaa\n", Some(1_700_000_000))
+        .with_src_file("file_b.txt", b"bbb\n", Some(1_700_000_000))
+        .build();
+
+    let alt1 = env.dir().join("alt1");
+    let alt2 = env.dir().join("alt2");
     std::fs::create_dir_all(&alt1).unwrap();
     std::fs::create_dir_all(&alt2).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("file_a.txt"), "aaa\n").unwrap();
-    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
-    std::fs::write(src.join("file_b.txt"), "bbb\n").unwrap();
-    set_mtime(&src.join("file_b.txt"), 1_700_000_000);
 
     std::fs::write(alt1.join("file_a.txt"), "aaa\n").unwrap();
     set_mtime(&alt1.join("file_a.txt"), 1_700_000_000);
-
     std::fs::write(alt2.join("file_b.txt"), "bbb\n").unwrap();
     set_mtime(&alt2.join("file_b.txt"), 1_700_000_000);
 
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
         .link_dest(&alt1)
         .link_dest(&alt2)
-        .source(src.clone())
-        .dest(dst.clone())
+        .dest(env.dst())
         .build();
 
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("pull failed: {e}"),
-        Err(_) => panic!("pull timed out after 10s"),
-    }
-
-    assert_eq!(std::fs::read(dst.join("file_a.txt")).unwrap(), b"aaa\n");
-    assert_eq!(std::fs::read(dst.join("file_b.txt")).unwrap(), b"bbb\n");
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
 
     assert_eq!(
-        inode_of(&dst.join("file_a.txt")),
-        inode_of(&alt1.join("file_a.txt")),
-        "dst/file_a.txt should be hard-linked from alt1"
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
+        b"aaa\n"
     );
     assert_eq!(
-        inode_of(&dst.join("file_b.txt")),
-        inode_of(&alt2.join("file_b.txt")),
-        "dst/file_b.txt should be hard-linked from alt2"
+        std::fs::read(env.dst().join("file_b.txt")).unwrap(),
+        b"bbb\n"
     );
+
+    assert_hard_linked(&env.dst().join("file_a.txt"), &alt1.join("file_a.txt"));
+    assert_hard_linked(&env.dst().join("file_b.txt"), &alt2.join("file_b.txt"));
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_pull_link_dest_mtime_mismatch() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let prev = tmp.path().join("prev");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&prev).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("file.txt"), "same content\n").unwrap();
-    set_mtime(&src.join("file.txt"), 1_700_000_000);
-
-    // Same content but DIFFERENT mtime -- should NOT be hard-linked.
-    std::fs::write(prev.join("file.txt"), "same content\n").unwrap();
-    set_mtime(&prev.join("file.txt"), 1_600_000_000);
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .link_dest(&prev)
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"same content\n", Some(1_700_000_000))
+        .with_prev_file("file.txt", b"same content\n", Some(1_600_000_000))
         .build();
 
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("pull failed: {e}"),
-        Err(_) => panic!("pull timed out after 10s"),
-    }
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .link_dest(env.prev())
+        .dest(env.dst())
+        .build();
 
-    let content = std::fs::read(dst.join("file.txt")).unwrap();
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    let content = std::fs::read(env.dst().join("file.txt")).unwrap();
     assert_eq!(content, b"same content\n");
 
-    assert_ne!(
-        inode_of(&dst.join("file.txt")),
-        inode_of(&prev.join("file.txt")),
-        "dst/file.txt should NOT be hard-linked when mtime differs"
-    );
+    assert_not_hard_linked(&env.dst().join("file.txt"), &env.prev().join("file.txt"));
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_pull_link_dest_changed_file() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let prev = tmp.path().join("prev");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&prev).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    // file_a: changed between prev and src
-    std::fs::write(src.join("file_a.txt"), "version 2\n").unwrap();
-    set_mtime(&src.join("file_a.txt"), 1_700_000_000);
-    std::fs::write(prev.join("file_a.txt"), "version 1\n").unwrap();
-    set_mtime(&prev.join("file_a.txt"), 1_600_000_000);
-
-    // file_b: unchanged between prev and src
-    std::fs::write(src.join("file_b.txt"), "same\n").unwrap();
-    set_mtime(&src.join("file_b.txt"), 1_700_000_000);
-    std::fs::write(prev.join("file_b.txt"), "same\n").unwrap();
-    set_mtime(&prev.join("file_b.txt"), 1_700_000_000);
-
-    let opts = TransferOptions::builder()
-        .recursive(true)
-        .preserve_times(true)
-        .link_dest(&prev)
-        .source(src.clone())
-        .dest(dst.clone())
+    let env = TestEnv::builder()
+        // file_a: changed between prev and src
+        .with_src_file("file_a.txt", b"version 2\n", Some(1_700_000_000))
+        .with_prev_file("file_a.txt", b"version 1\n", Some(1_600_000_000))
+        // file_b: unchanged between prev and src
+        .with_src_file("file_b.txt", b"same\n", Some(1_700_000_000))
+        .with_prev_file("file_b.txt", b"same\n", Some(1_700_000_000))
         .build();
 
-    let server_opts = build_server_options(&opts, false);
-    let transport = RsyncServerTransport::new(false, &server_opts, &src);
-    let fs = Box::new(UnixFileSystem::new());
-    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-    match result {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => panic!("pull failed: {e}"),
-        Err(_) => panic!("pull timed out after 10s"),
-    }
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .link_dest(env.prev())
+        .dest(env.dst())
+        .build();
+
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
 
     // Unchanged file should be hard-linked.
-    assert_eq!(
-        inode_of(&dst.join("file_b.txt")),
-        inode_of(&prev.join("file_b.txt")),
-        "unchanged file_b.txt should be hard-linked"
+    assert_hard_linked(
+        &env.dst().join("file_b.txt"),
+        &env.prev().join("file_b.txt"),
     );
 
-    // Changed file should be a new copy, not hard-linked.
-    assert_ne!(
-        inode_of(&dst.join("file_a.txt")),
-        inode_of(&prev.join("file_a.txt")),
-        "changed file_a.txt should NOT be hard-linked"
+    // Changed file should be a new copy.
+    assert_not_hard_linked(
+        &env.dst().join("file_a.txt"),
+        &env.prev().join("file_a.txt"),
     );
     assert_eq!(
-        std::fs::read(dst.join("file_a.txt")).unwrap(),
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
         b"version 2\n"
     );
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_link_dest_snapshot_rotation() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("src");
@@ -1009,69 +672,34 @@ async fn test_interop_link_dest_snapshot_rotation() {
     std::fs::write(src.join("file_b.txt"), "stable\n").unwrap();
     set_mtime(&src.join("file_b.txt"), 1_700_000_000);
 
-    // First sync: pull src/ -> backup_0/ (no link-dest).
-    {
-        let opts = TransferOptions::builder()
-            .recursive(true)
-            .preserve_times(true)
-            .source(src.clone())
-            .dest(backup_0.clone())
-            .build();
+    let remote_dir = remote_tmpdir().await;
 
-        let server_opts = build_server_options(&opts, false);
-        let transport = RsyncServerTransport::new(false, &server_opts, &src);
-        let fs = Box::new(UnixFileSystem::new());
-        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => panic!("first sync failed: {e}"),
-            Err(_) => panic!("first sync timed out"),
-        }
-    }
+    // First sync: push src to remote, pull into backup_0 (no link-dest).
+    push_archive(&src, &remote_dir, 30).await;
+    let remote_path = format!("{remote_dir}/");
+    pull_archive(&remote_path, &backup_0, 30).await;
 
     // Modify source: change file_a, leave file_b stable.
     std::fs::write(src.join("file_a.txt"), "modified\n").unwrap();
     set_mtime(&src.join("file_a.txt"), 1_700_001_000);
 
-    // Second sync: pull src/ -> backup_1/ with --link-dest=backup_0/.
+    // Update remote with modified source.
+    push_archive(&src, &remote_dir, 30).await;
+
+    // Second sync: pull into backup_1 with --link-dest=backup_0/.
     std::fs::create_dir_all(&backup_1).unwrap();
-    {
-        let opts = TransferOptions::builder()
-            .recursive(true)
-            .preserve_times(true)
-            .link_dest(&backup_0)
-            .source(src.clone())
-            .dest(backup_1.clone())
-            .build();
-
-        let server_opts = build_server_options(&opts, false);
-        let transport = RsyncServerTransport::new(false, &server_opts, &src);
-        let fs = Box::new(UnixFileSystem::new());
-        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => panic!("second sync failed: {e}"),
-            Err(_) => panic!("second sync timed out"),
-        }
-    }
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .link_dest(&backup_0)
+        .dest(backup_1.clone())
+        .build();
+    pull_with_opts(opts, &remote_path, 30).await;
 
     // Unchanged file_b should be hard-linked across snapshots.
-    assert_eq!(
-        inode_of(&backup_1.join("file_b.txt")),
-        inode_of(&backup_0.join("file_b.txt")),
-        "stable file_b.txt should be hard-linked between snapshots"
-    );
+    assert_hard_linked(&backup_1.join("file_b.txt"), &backup_0.join("file_b.txt"));
 
     // Changed file_a should have a different inode.
-    assert_ne!(
-        inode_of(&backup_1.join("file_a.txt")),
-        inode_of(&backup_0.join("file_a.txt")),
-        "modified file_a.txt should NOT be hard-linked"
-    );
+    assert_not_hard_linked(&backup_1.join("file_a.txt"), &backup_0.join("file_a.txt"));
 
     // Both snapshots should be complete.
     assert!(backup_0.join("file_a.txt").exists());
@@ -1079,7 +707,6 @@ async fn test_interop_link_dest_snapshot_rotation() {
     assert!(backup_1.join("file_a.txt").exists());
     assert!(backup_1.join("file_b.txt").exists());
 
-    // Verify content correctness.
     assert_eq!(
         std::fs::read(backup_0.join("file_a.txt")).unwrap(),
         b"original\n"
@@ -1088,74 +715,44 @@ async fn test_interop_link_dest_snapshot_rotation() {
         std::fs::read(backup_1.join("file_a.txt")).unwrap(),
         b"modified\n"
     );
+
+    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
 async fn test_interop_link_dest_rerun_idempotent() {
-    skip_if_no_rsync!();
+    skip_if_no_ssh!();
 
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    let prev = tmp.path().join("prev");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"idempotent\n", Some(1_700_000_000))
+        .build();
 
-    std::fs::write(src.join("file.txt"), "idempotent\n").unwrap();
-    set_mtime(&src.join("file.txt"), 1_700_000_000);
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
 
-    // First pull: src/ -> dst/ (no link-dest).
-    {
-        let opts = TransferOptions::builder()
-            .recursive(true)
-            .preserve_times(true)
-            .source(src.clone())
-            .dest(dst.clone())
-            .build();
-
-        let server_opts = build_server_options(&opts, false);
-        let transport = RsyncServerTransport::new(false, &server_opts, &src);
-        let fs = Box::new(UnixFileSystem::new());
-        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => panic!("first pull failed: {e}"),
-            Err(_) => panic!("first pull timed out"),
-        }
-    }
+    // First pull: no link-dest.
+    let remote_path = format!("{remote_dir}/");
+    pull_archive(&remote_path, &env.dst(), 30).await;
 
     // Create prev/ as a copy of dst/ with matching content and mtimes.
+    let prev = env.dir().join("prev");
     std::fs::create_dir_all(&prev).unwrap();
-    std::fs::copy(dst.join("file.txt"), prev.join("file.txt")).unwrap();
+    std::fs::copy(env.dst().join("file.txt"), prev.join("file.txt")).unwrap();
     set_mtime(&prev.join("file.txt"), 1_700_000_000);
 
     // Re-run pull with link-dest=prev into a fresh dst.
-    let dst2 = tmp.path().join("dst2");
+    let dst2 = env.dir().join("dst2");
     std::fs::create_dir_all(&dst2).unwrap();
-    {
-        let opts = TransferOptions::builder()
-            .recursive(true)
-            .preserve_times(true)
-            .link_dest(&prev)
-            .source(src.clone())
-            .dest(dst2.clone())
-            .build();
 
-        let server_opts = build_server_options(&opts, false);
-        let transport = RsyncServerTransport::new(false, &server_opts, &src);
-        let fs = Box::new(UnixFileSystem::new());
-        let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
-
-        let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-        match result {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => panic!("re-run pull failed: {e}"),
-            Err(_) => panic!("re-run pull timed out"),
-        }
-    }
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .link_dest(&prev)
+        .dest(dst2.clone())
+        .build();
+    pull_with_opts(opts, &remote_path, 30).await;
 
     let content = std::fs::read(dst2.join("file.txt")).unwrap();
     assert_eq!(content, b"idempotent\n");
+
+    remote_cleanup(&remote_dir).await;
 }

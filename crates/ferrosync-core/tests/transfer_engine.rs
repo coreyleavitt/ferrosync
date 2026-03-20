@@ -7,6 +7,8 @@
 //! MetadataExt).
 #![cfg(unix)]
 
+mod common;
+
 use std::path::Path;
 
 use ferrosync_core::delta::ProtocolContext;
@@ -15,6 +17,9 @@ use ferrosync_core::engine::transfer::execute_transfer;
 use ferrosync_core::fs::unix::UnixFileSystem;
 use ferrosync_core::options::TransferOptions;
 use ferrosync_core::protocol::handshake::ChecksumType;
+
+use crate::common::assertions::assert_trees_equal;
+use crate::common::env::TestEnv;
 
 /// Create a temp source directory with known test files.
 fn create_test_tree(dir: &Path) {
@@ -28,59 +33,6 @@ fn create_test_tree(dir: &Path) {
         vec![0x42; 32 * 1024], // 32 KiB
     )
     .unwrap();
-}
-
-/// Create a single file for simple tests.
-fn create_single_file(dir: &Path, name: &str, content: &[u8]) {
-    std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join(name), content).unwrap();
-}
-
-/// Assert two directory trees are identical (file names and contents).
-fn assert_trees_equal(expected: &Path, actual: &Path) {
-    let expected_files = collect_files(expected, expected);
-    let actual_files = collect_files(actual, actual);
-
-    assert_eq!(
-        expected_files.len(),
-        actual_files.len(),
-        "file count mismatch: expected {:?}, got {:?}",
-        expected_files.keys().collect::<Vec<_>>(),
-        actual_files.keys().collect::<Vec<_>>(),
-    );
-
-    for (rel_path, expected_content) in &expected_files {
-        let actual_content = actual_files
-            .get(rel_path)
-            .unwrap_or_else(|| panic!("missing file in dest: {rel_path}"));
-        assert_eq!(
-            expected_content, actual_content,
-            "content mismatch for {rel_path}"
-        );
-    }
-}
-
-/// Collect all files in a directory tree as (relative_path, contents).
-fn collect_files(root: &Path, current: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-    let mut files = std::collections::BTreeMap::new();
-    if !current.is_dir() {
-        return files;
-    }
-    for entry in std::fs::read_dir(current).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        if path.is_dir() {
-            files.extend(collect_files(root, &path));
-        } else if path.is_file() {
-            files.insert(rel, std::fs::read(&path).unwrap());
-        }
-    }
-    files
 }
 
 /// Run a transfer from source to dest using the direct engine.
@@ -103,23 +55,20 @@ async fn run_transfer(opts: &TransferOptions) -> ferrosync_core::Result<()> {
 
 #[tokio::test]
 async fn test_transfer_single_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    create_single_file(&src, "test.txt", b"pull test content\n");
+    let env = TestEnv::builder()
+        .with_src_file("test.txt", b"pull test content\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let dest_content = std::fs::read(dst.join("test.txt")).unwrap();
+    let dest_content = std::fs::read(env.dst().join("test.txt")).unwrap();
     assert_eq!(dest_content, b"pull test content\n");
 }
 
@@ -146,24 +95,21 @@ async fn test_transfer_directory_recursive() {
 
 #[tokio::test]
 async fn test_transfer_preserves_times() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    create_single_file(&src, "timed.txt", b"time-test content\n");
+    let env = TestEnv::builder()
+        .with_src_file("timed.txt", b"time-test content\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let src_meta = std::fs::metadata(src.join("timed.txt")).unwrap();
-    let dst_meta = std::fs::metadata(dst.join("timed.txt")).unwrap();
+    let src_meta = std::fs::metadata(env.src().join("timed.txt")).unwrap();
+    let dst_meta = std::fs::metadata(env.dst().join("timed.txt")).unwrap();
 
     use std::os::unix::fs::MetadataExt;
     // Allow 2 seconds of slop for filesystem timestamp granularity.
@@ -177,13 +123,9 @@ async fn test_transfer_preserves_times() {
 
 #[tokio::test]
 async fn test_transfer_preserves_permissions() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder().build();
 
-    let file_path = src.join("exec.sh");
+    let file_path = env.src().join("exec.sh");
     std::fs::write(&file_path, "#!/bin/sh\necho hello\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -192,13 +134,13 @@ async fn test_transfer_preserves_permissions() {
         .recursive(true)
         .preserve_perms(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let dst_meta = std::fs::metadata(dst.join("exec.sh")).unwrap();
+    let dst_meta = std::fs::metadata(env.dst().join("exec.sh")).unwrap();
     let mode = dst_meta.permissions().mode() & 0o777;
     assert_eq!(mode, 0o755, "expected 0o755, got {mode:#o}");
 }
@@ -233,155 +175,134 @@ async fn test_transfer_with_exclude() {
 
 #[tokio::test]
 async fn test_transfer_delta() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder().build();
 
     // Create a basis file in the destination.
     let mut basis_data = vec![0u8; 10_000];
     for (i, b) in basis_data.iter_mut().enumerate() {
         *b = (i % 256) as u8;
     }
-    std::fs::write(dst.join("delta.dat"), &basis_data).unwrap();
+    std::fs::write(env.dst().join("delta.dat"), &basis_data).unwrap();
 
     // Create a slightly modified version in the source.
     let mut source_data = basis_data.clone();
     source_data[5000] = 0xFF;
     source_data[5001] = 0xFF;
-    std::fs::write(src.join("delta.dat"), &source_data).unwrap();
+    std::fs::write(env.src().join("delta.dat"), &source_data).unwrap();
 
     // Use checksum mode to force re-transfer even if mtime/size look the same.
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
         .checksum_mode(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let result = std::fs::read(dst.join("delta.dat")).unwrap();
+    let result = std::fs::read(env.dst().join("delta.dat")).unwrap();
     assert_eq!(result, source_data);
 }
 
 #[tokio::test]
 async fn test_transfer_whole_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    create_single_file(&src, "whole.txt", b"whole file content\n");
+    let env = TestEnv::builder()
+        .with_src_file("whole.txt", b"whole file content\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
         .whole_file(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let dest_content = std::fs::read(dst.join("whole.txt")).unwrap();
+    let dest_content = std::fs::read(env.dst().join("whole.txt")).unwrap();
     assert_eq!(dest_content, b"whole file content\n");
 }
 
 #[tokio::test]
 async fn test_transfer_checksum_mode() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    create_single_file(&src, "check.txt", b"checksum mode content\n");
+    let env = TestEnv::builder()
+        .with_src_file("check.txt", b"checksum mode content\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
         .checksum_mode(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let dest_content = std::fs::read(dst.join("check.txt")).unwrap();
+    let dest_content = std::fs::read(env.dst().join("check.txt")).unwrap();
     assert_eq!(dest_content, b"checksum mode content\n");
 }
 
 #[tokio::test]
 async fn test_transfer_empty_directory() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(src.join("empty_subdir")).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder().with_src_dir("empty_subdir").build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
     assert!(
-        dst.join("empty_subdir").is_dir(),
+        env.dst().join("empty_subdir").is_dir(),
         "empty subdirectory should be created"
     );
 }
 
 #[tokio::test]
 async fn test_transfer_large_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    // 256 KiB file.
     let data: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
-    create_single_file(&src, "big.dat", &data);
+    let env = TestEnv::builder()
+        .with_src_file("big.dat", &data, None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let dest_content = std::fs::read(dst.join("big.dat")).unwrap();
+    let dest_content = std::fs::read(env.dst().join("big.dat")).unwrap();
     assert_eq!(dest_content.len(), data.len());
     assert_eq!(dest_content, data);
 }
 
 #[tokio::test]
 async fn test_transfer_dry_run() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    create_single_file(&src, "dryrun.txt", b"should not be written\n");
+    let env = TestEnv::builder()
+        .with_src_file("dryrun.txt", b"should not be written\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
         .dry_run(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
     assert!(
-        !dst.join("dryrun.txt").exists(),
+        !env.dst().join("dryrun.txt").exists(),
         "dry run should not write files"
     );
 }
@@ -408,28 +329,24 @@ async fn test_transfer_archive_mode() {
 
 #[tokio::test]
 async fn test_transfer_multiple_files_flat() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    std::fs::write(src.join("a.txt"), "aaa\n").unwrap();
-    std::fs::write(src.join("b.txt"), "bbb\n").unwrap();
-    std::fs::write(src.join("c.txt"), "ccc\n").unwrap();
+    let env = TestEnv::builder()
+        .with_src_file("a.txt", b"aaa\n", None)
+        .with_src_file("b.txt", b"bbb\n", None)
+        .with_src_file("c.txt", b"ccc\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"aaa\n");
-    assert_eq!(std::fs::read(dst.join("b.txt")).unwrap(), b"bbb\n");
-    assert_eq!(std::fs::read(dst.join("c.txt")).unwrap(), b"ccc\n");
+    assert_eq!(std::fs::read(env.dst().join("a.txt")).unwrap(), b"aaa\n");
+    assert_eq!(std::fs::read(env.dst().join("b.txt")).unwrap(), b"bbb\n");
+    assert_eq!(std::fs::read(env.dst().join("c.txt")).unwrap(), b"ccc\n");
 }
 
 #[tokio::test]
@@ -459,49 +376,43 @@ async fn test_transfer_idempotent() {
 
 #[tokio::test]
 async fn test_transfer_empty_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&dst).unwrap();
-
-    create_single_file(&src, "empty.txt", b"");
+    let env = TestEnv::builder()
+        .with_src_file("empty.txt", b"", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    let dest_content = std::fs::read(dst.join("empty.txt")).unwrap();
+    let dest_content = std::fs::read(env.dst().join("empty.txt")).unwrap();
     assert!(dest_content.is_empty(), "empty file should remain empty");
 }
 
 #[tokio::test]
 async fn test_transfer_symlink() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder()
+        .with_src_file("target.txt", b"symlink target content\n", None)
+        .build();
 
-    std::fs::write(src.join("target.txt"), "symlink target content\n").unwrap();
-    std::os::unix::fs::symlink("target.txt", src.join("link.txt")).unwrap();
+    std::os::unix::fs::symlink("target.txt", env.src().join("link.txt")).unwrap();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
         .preserve_links(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
-    assert!(dst.join("target.txt").exists());
-    let link_path = dst.join("link.txt");
+    assert!(env.dst().join("target.txt").exists());
+    let link_path = env.dst().join("link.txt");
     let link_meta = std::fs::symlink_metadata(&link_path).unwrap();
     assert!(
         link_meta.file_type().is_symlink(),
@@ -517,41 +428,33 @@ async fn test_transfer_symlink() {
 
 #[tokio::test]
 async fn test_transfer_many_small_files() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder().build();
 
     // Create 100 small files.
     for i in 0..100 {
         let content = format!("file number {i}\n");
-        std::fs::write(src.join(format!("f_{i:03}.txt")), content.as_bytes()).unwrap();
+        std::fs::write(env.src().join(format!("f_{i:03}.txt")), content.as_bytes()).unwrap();
     }
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
     for i in 0..100 {
         let expected = format!("file number {i}\n");
-        let actual = std::fs::read(dst.join(format!("f_{i:03}.txt"))).unwrap();
+        let actual = std::fs::read(env.dst().join(format!("f_{i:03}.txt"))).unwrap();
         assert_eq!(actual, expected.as_bytes(), "mismatch for f_{i:03}.txt");
     }
 }
 
 #[tokio::test]
 async fn test_transfer_many_files_delta() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
+    let env = TestEnv::builder().build();
 
     // Create basis files at dest and modified versions at source.
     for i in 0..30 {
@@ -559,20 +462,20 @@ async fn test_transfer_many_files_delta() {
         for (j, b) in basis.iter_mut().enumerate() {
             *b = ((i * 7 + j) % 256) as u8;
         }
-        std::fs::write(dst.join(format!("d_{i:02}.bin")), &basis).unwrap();
+        std::fs::write(env.dst().join(format!("d_{i:02}.bin")), &basis).unwrap();
 
         let mut modified = basis;
         modified[1024] = 0xFF;
         modified[1025] = 0xFE;
-        std::fs::write(src.join(format!("d_{i:02}.bin")), &modified).unwrap();
+        std::fs::write(env.src().join(format!("d_{i:02}.bin")), &modified).unwrap();
     }
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
         .checksum_mode(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
@@ -584,43 +487,38 @@ async fn test_transfer_many_files_delta() {
         }
         expected[1024] = 0xFF;
         expected[1025] = 0xFE;
-        let actual = std::fs::read(dst.join(format!("d_{i:02}.bin"))).unwrap();
+        let actual = std::fs::read(env.dst().join(format!("d_{i:02}.bin"))).unwrap();
         assert_eq!(actual, expected, "mismatch for d_{i:02}.bin");
     }
 }
 
 #[tokio::test]
 async fn test_transfer_special_characters_in_filenames() {
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src");
-    let dst = tmp.path().join("dst");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::create_dir_all(&dst).unwrap();
-
-    // Files with spaces and special characters.
-    std::fs::write(src.join("file with spaces.txt"), "spaces\n").unwrap();
-    std::fs::write(src.join("file-with-dashes.txt"), "dashes\n").unwrap();
-    std::fs::write(src.join("file_with_underscores.txt"), "underscores\n").unwrap();
+    let env = TestEnv::builder()
+        .with_src_file("file with spaces.txt", b"spaces\n", None)
+        .with_src_file("file-with-dashes.txt", b"dashes\n", None)
+        .with_src_file("file_with_underscores.txt", b"underscores\n", None)
+        .build();
 
     let options = TransferOptions::builder()
         .recursive(true)
         .preserve_times(true)
-        .source(src.clone())
-        .dest(dst.clone())
+        .source(env.src())
+        .dest(env.dst())
         .build();
 
     run_transfer(&options).await.unwrap();
 
     assert_eq!(
-        std::fs::read(dst.join("file with spaces.txt")).unwrap(),
+        std::fs::read(env.dst().join("file with spaces.txt")).unwrap(),
         b"spaces\n"
     );
     assert_eq!(
-        std::fs::read(dst.join("file-with-dashes.txt")).unwrap(),
+        std::fs::read(env.dst().join("file-with-dashes.txt")).unwrap(),
         b"dashes\n"
     );
     assert_eq!(
-        std::fs::read(dst.join("file_with_underscores.txt")).unwrap(),
+        std::fs::read(env.dst().join("file_with_underscores.txt")).unwrap(),
         b"underscores\n"
     );
 }

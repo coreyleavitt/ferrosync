@@ -1,7 +1,9 @@
-//! End-to-end tests: ferrosync client to ferrosync server.
+//! Daemon tests: ferrosync client to ferrosync server.
 //!
 //! These tests spin up a ferrosync daemon server on a random port, then
 //! connect a ferrosync client to it and verify full transfer correctness.
+
+mod common;
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -172,11 +174,11 @@ async fn ferrosync_client_push_inner(
 }
 
 // ---------------------------------------------------------------------------
-// E2E tests
+// Daemon tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn test_e2e_pull_single_file() {
+async fn test_daemon_pull_single_file() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -194,7 +196,7 @@ async fn test_e2e_pull_single_file() {
 }
 
 #[tokio::test]
-async fn test_e2e_pull_directory_recursive() {
+async fn test_daemon_pull_directory_recursive() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -222,7 +224,7 @@ async fn test_e2e_pull_directory_recursive() {
 }
 
 #[tokio::test]
-async fn test_e2e_push_single_file() {
+async fn test_daemon_push_single_file() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -240,7 +242,7 @@ async fn test_e2e_push_single_file() {
 }
 
 #[tokio::test]
-async fn test_e2e_push_directory_recursive() {
+async fn test_daemon_push_directory_recursive() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -269,10 +271,7 @@ async fn test_e2e_push_directory_recursive() {
 }
 
 #[tokio::test]
-async fn test_e2e_pull_with_checksums() {
-    // Verify that pull works correctly with different checksum algorithms.
-    // ferrosync-to-ferrosync negotiates blake3 by default, so this implicitly
-    // tests blake3. We verify correctness by content comparison.
+async fn test_daemon_pull_with_checksums() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -288,9 +287,7 @@ async fn test_e2e_pull_with_checksums() {
 }
 
 #[tokio::test]
-async fn test_e2e_delta_transfer() {
-    // First sync, then modify a file on the server, then sync again.
-    // The second sync should transfer only the delta.
+async fn test_daemon_delta_transfer() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -336,7 +333,7 @@ async fn test_e2e_delta_transfer() {
 }
 
 #[tokio::test]
-async fn test_e2e_idempotent_pull() {
+async fn test_daemon_idempotent_pull() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -360,7 +357,7 @@ async fn test_e2e_idempotent_pull() {
 }
 
 #[tokio::test]
-async fn test_e2e_empty_module() {
+async fn test_daemon_empty_module() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -376,14 +373,10 @@ async fn test_e2e_empty_module() {
 
 // ---------------------------------------------------------------------------
 // Archive mode tests (-a = -rlptgoD)
-//
-// These exercise uid/gid name list exchange and preserve_owner/group flags
-// that the basic tests above don't cover.
 // ---------------------------------------------------------------------------
 
-/// Push with archive mode to exercise uid/gid name list encoding.
 #[tokio::test]
-async fn test_e2e_push_archive_mode() {
+async fn test_daemon_push_archive_mode() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -392,7 +385,6 @@ async fn test_e2e_push_archive_mode() {
 
     let (addr, shutdown) = start_test_server(server_dir.path(), false).await;
 
-    // Build archive-mode options.
     let opts = TransferOptions::builder()
         .archive()
         .source(client_dir.path().to_path_buf())
@@ -428,19 +420,13 @@ async fn test_e2e_push_archive_mode() {
 
 // ---------------------------------------------------------------------------
 // Pipelining stress tests
-//
-// These tests exercise the concurrent generator/receiver pipeline by
-// transferring many files (where the generator can send signatures for
-// file N+1 while the receiver is still processing file N's delta).
 // ---------------------------------------------------------------------------
 
-/// Pull many small files to exercise generator/receiver pipelining.
 #[tokio::test]
-async fn test_e2e_pull_many_small_files() {
+async fn test_daemon_pull_many_small_files() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
-    // Create 50 small files on the server.
     let file_count = 50;
     for i in 0..file_count {
         let content = format!("file {i} content -- small file pipelining test\n");
@@ -455,7 +441,6 @@ async fn test_e2e_pull_many_small_files() {
     ferrosync_client_pull(addr, "test", client_dir.path()).await;
     let _ = shutdown.send(true);
 
-    // Verify all files arrived correctly.
     for i in 0..file_count {
         let expected = format!("file {i} content -- small file pipelining test\n");
         let actual = std::fs::read(client_dir.path().join(format!("file_{i:03}.txt"))).unwrap();
@@ -463,13 +448,11 @@ async fn test_e2e_pull_many_small_files() {
     }
 }
 
-/// Push many small files to exercise server-side pipelined receiver.
 #[tokio::test]
-async fn test_e2e_push_many_small_files() {
+async fn test_daemon_push_many_small_files() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
-    // Create 50 small files on the client.
     let file_count = 50;
     for i in 0..file_count {
         let content = format!("pushed file {i}\n");
@@ -491,14 +474,11 @@ async fn test_e2e_push_many_small_files() {
     }
 }
 
-/// Pull a mix of large and small files to stress the pipeline with
-/// varied per-file processing times.
 #[tokio::test]
-async fn test_e2e_pull_mixed_file_sizes() {
+async fn test_daemon_pull_mixed_file_sizes() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
-    // Small files interspersed with larger ones.
     std::fs::write(server_dir.path().join("tiny_1.txt"), b"a").unwrap();
     let medium: Vec<u8> = (0..8192).map(|i| (i % 251) as u8).collect();
     std::fs::write(server_dir.path().join("medium.bin"), &medium).unwrap();
@@ -538,10 +518,8 @@ async fn test_e2e_pull_mixed_file_sizes() {
     );
 }
 
-/// Pull with delta: many files where the basis already exists at the
-/// destination. Exercises pipelining with non-trivial block matching.
 #[tokio::test]
-async fn test_e2e_pull_many_files_delta() {
+async fn test_daemon_pull_many_files_delta() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
@@ -592,9 +570,8 @@ async fn test_e2e_pull_many_files_delta() {
     }
 }
 
-/// Pull with archive mode to exercise uid/gid name list decoding.
 #[tokio::test]
-async fn test_e2e_pull_archive_mode() {
+async fn test_daemon_pull_archive_mode() {
     let server_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
 
