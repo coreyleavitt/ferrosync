@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use tokio::io::AsyncRead;
 
+use crate::engine::delete;
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::wire_transfer::{self, LocalFileOps, LocalFileReader};
 use crate::error::FsError;
@@ -588,6 +589,26 @@ async fn run_pull(
         sanitize_path(&dest, &name_str)?;
     }
 
+    // Delete extraneous files before/during the transfer.
+    let filters =
+        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    let delete_excluded = options.delete() == DeleteMode::Excluded;
+
+    if matches!(
+        options.delete(),
+        DeleteMode::Before | DeleteMode::During | DeleteMode::Excluded
+    ) {
+        let deleted = delete::delete_extraneous(
+            &*fs,
+            &dest,
+            entries.iter(),
+            &filters,
+            options.dry_run(),
+            delete_excluded,
+        )?;
+        stats.files_deleted = deleted;
+    }
+
     // Handle dry-run: just count files, don't do wire protocol.
     if options.dry_run() {
         for (idx, entry) in entries.iter().enumerate() {
@@ -630,6 +651,19 @@ async fn run_pull(
                 stats.symlinks += 1;
             }
         }
+    }
+
+    // Delete extraneous files after the transfer.
+    if options.delete() == DeleteMode::After {
+        let deleted = delete::delete_extraneous(
+            &*fs,
+            &dest,
+            entries.iter(),
+            &filters,
+            options.dry_run(),
+            false,
+        )?;
+        stats.files_deleted = deleted;
     }
 
     // Phase exchange.

@@ -4,7 +4,6 @@
 //! applies filter rules, determines which files need updating, and
 //! runs the delta transfer pipeline for each file.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,6 +17,7 @@ use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::stats::TransferStats;
 
+use super::delete;
 use super::file_decision;
 use super::pipeline;
 use super::progress::{ProgressEvent, ProgressTracker};
@@ -161,10 +161,10 @@ async fn execute_transfer_impl(
     if options.delete() == DeleteMode::Before
         || (delete_excluded && options.delete() == DeleteMode::Excluded)
     {
-        let deleted = delete_extraneous(
+        let deleted = delete::delete_extraneous(
             fs,
             dest,
-            &source_entries,
+            source_entries.iter().map(|item| &item.entry),
             &filters,
             options.dry_run(),
             delete_excluded,
@@ -189,10 +189,10 @@ async fn execute_transfer_impl(
 
             // --delete-during: remove extraneous files in this directory.
             if options.delete() == DeleteMode::During {
-                let deleted = delete_extraneous_in_dir(
+                let deleted = delete::delete_extraneous_in_dir(
                     fs,
                     &dest_path,
-                    &source_entries,
+                    source_entries.iter().map(|item| &item.entry),
                     &item.entry.name,
                     &filters,
                     options.dry_run(),
@@ -463,10 +463,10 @@ async fn execute_transfer_impl(
 
     // Handle --delete-after.
     if options.delete() == DeleteMode::After {
-        let deleted = delete_extraneous(
+        let deleted = delete::delete_extraneous(
             fs,
             dest,
-            &source_entries,
+            source_entries.iter().map(|item| &item.entry),
             &filters,
             options.dry_run(),
             false,
@@ -813,126 +813,6 @@ fn build_file_list_from_file(
     }
 
     Ok(items)
-}
-
-/// Delete files on the receiver that don't exist in the source file list.
-fn delete_extraneous(
-    fs: &dyn FileSystem,
-    dest: &Path,
-    source_entries: &[FileListItem],
-    filters: &FilterRuleList,
-    dry_run: bool,
-    delete_excluded: bool,
-) -> std::result::Result<u64, FsError> {
-    let mut deleted = 0u64;
-
-    // Build a set of source names for quick lookup.
-    let source_names: HashSet<&[u8]> = source_entries
-        .iter()
-        .map(|e| e.entry.name.as_slice())
-        .collect();
-
-    // Walk the destination and remove anything not in source.
-    if let Ok(dest_entries) = fs.read_dir(dest) {
-        for dest_entry in dest_entries {
-            if source_names.contains(dest_entry.name.as_slice()) {
-                continue;
-            }
-
-            // Respect filter rules: excluded files on dest are protected
-            // unless --delete-excluded is in effect.
-            if !delete_excluded {
-                let is_dir = dest_entry.metadata.mode & S_IFMT == S_IFDIR;
-                if !filters.is_included(&dest_entry.name, is_dir) {
-                    continue;
-                }
-            }
-
-            let path = dest.join(FileEntry::name_to_pathbuf(&dest_entry.name));
-            if !dry_run {
-                if dest_entry.metadata.mode & S_IFMT == S_IFDIR {
-                    let _ = fs.remove_dir(&path);
-                } else {
-                    let _ = fs.remove_file(&path);
-                }
-            }
-            deleted += 1;
-        }
-    }
-
-    Ok(deleted)
-}
-
-/// Delete extraneous files within a specific directory (for --delete-during).
-fn delete_extraneous_in_dir(
-    fs: &dyn FileSystem,
-    dest_dir: &Path,
-    source_entries: &[FileListItem],
-    dir_name: &[u8],
-    filters: &FilterRuleList,
-    dry_run: bool,
-    delete_excluded: bool,
-) -> std::result::Result<u64, FsError> {
-    let mut deleted = 0u64;
-
-    let dest_entries = match fs.read_dir(dest_dir) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(0),
-    };
-
-    // Build set of direct children of this directory in the source list.
-    let source_children: HashSet<&[u8]> = source_entries
-        .iter()
-        .filter_map(|e| {
-            let name = &e.entry.name;
-            if dir_name == b"." {
-                // Top-level directory: direct children have no '/'.
-                if !name.contains(&b'/') && name != b"." {
-                    Some(name.as_slice())
-                } else {
-                    None
-                }
-            } else if name.len() > dir_name.len()
-                && name.starts_with(dir_name)
-                && name[dir_name.len()] == b'/'
-            {
-                // Nested dir: child if exactly one more path component.
-                let rest = &name[dir_name.len() + 1..];
-                if !rest.contains(&b'/') {
-                    Some(rest)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    for dest_entry in dest_entries {
-        if source_children.contains(dest_entry.name.as_slice()) {
-            continue;
-        }
-
-        if !delete_excluded {
-            let is_dir = dest_entry.metadata.mode & S_IFMT == S_IFDIR;
-            if !filters.is_included(&dest_entry.name, is_dir) {
-                continue;
-            }
-        }
-
-        let path = dest_dir.join(FileEntry::name_to_pathbuf(&dest_entry.name));
-        if !dry_run {
-            if dest_entry.metadata.mode & S_IFMT == S_IFDIR {
-                let _ = fs.remove_dir(&path);
-            } else {
-                let _ = fs.remove_file(&path);
-            }
-        }
-        deleted += 1;
-    }
-
-    Ok(deleted)
 }
 
 #[cfg(all(test, unix))]

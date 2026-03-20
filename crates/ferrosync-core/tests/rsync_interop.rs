@@ -756,3 +756,217 @@ async fn test_interop_link_dest_rerun_idempotent() {
 
     remote_cleanup(&remote_dir).await;
 }
+
+// ---------------------------------------------------------------------------
+// Delete tests (wire transfer --delete support)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_interop_pull_delete_before() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"aaa\n", None)
+        .with_src_file("file_b.txt", b"bbb\n", None)
+        .build();
+
+    // Push source files to remote.
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Create an extra file in the local destination.
+    std::fs::create_dir_all(env.dst()).unwrap();
+    std::fs::write(env.dst().join("extra.txt"), "should be deleted\n").unwrap();
+
+    // Pull with --delete-before.
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::Before)
+        .dest(env.dst())
+        .build();
+
+    let remote_path = format!("{remote_dir}/");
+    let result = pull_with_opts(opts, &remote_path, 30).await;
+
+    assert!(
+        !env.dst().join("extra.txt").exists(),
+        "extra file should be deleted"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
+        b"aaa\n"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_b.txt")).unwrap(),
+        b"bbb\n"
+    );
+    assert!(result.stats.files_deleted >= 1);
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_delete_during() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"aaa\n", None)
+        .with_src_file("file_b.txt", b"bbb\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    std::fs::create_dir_all(env.dst()).unwrap();
+    std::fs::write(env.dst().join("extra.txt"), "should be deleted\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::During)
+        .dest(env.dst())
+        .build();
+
+    let remote_path = format!("{remote_dir}/");
+    let result = pull_with_opts(opts, &remote_path, 30).await;
+
+    assert!(
+        !env.dst().join("extra.txt").exists(),
+        "extra file should be deleted"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
+        b"aaa\n"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_b.txt")).unwrap(),
+        b"bbb\n"
+    );
+    assert!(result.stats.files_deleted >= 1);
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_delete_after() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"aaa\n", None)
+        .with_src_file("file_b.txt", b"bbb\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    std::fs::create_dir_all(env.dst()).unwrap();
+    std::fs::write(env.dst().join("extra.txt"), "should be deleted\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::After)
+        .dest(env.dst())
+        .build();
+
+    let remote_path = format!("{remote_dir}/");
+    let result = pull_with_opts(opts, &remote_path, 30).await;
+
+    assert!(
+        !env.dst().join("extra.txt").exists(),
+        "extra file should be deleted"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
+        b"aaa\n"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_b.txt")).unwrap(),
+        b"bbb\n"
+    );
+    assert!(result.stats.files_deleted >= 1);
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_delete_with_exclude() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"aaa\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Create extra files locally: one should be deleted, one protected by exclude.
+    std::fs::create_dir_all(env.dst()).unwrap();
+    std::fs::write(env.dst().join("extra.txt"), "delete me\n").unwrap();
+    std::fs::write(env.dst().join("keep.log"), "protected\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::During)
+        .exclude("*.log")
+        .dest(env.dst())
+        .build();
+
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    assert!(
+        !env.dst().join("extra.txt").exists(),
+        "extra.txt should be deleted"
+    );
+    assert!(
+        env.dst().join("keep.log").exists(),
+        "excluded *.log should be preserved"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
+        b"aaa\n"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+#[tokio::test]
+async fn test_interop_pull_delete_excluded() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"aaa\n", None)
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    push_archive(&env.src(), &remote_dir, 30).await;
+
+    // Create extra files locally: both should be deleted with --delete-excluded.
+    std::fs::create_dir_all(env.dst()).unwrap();
+    std::fs::write(env.dst().join("extra.txt"), "delete me\n").unwrap();
+    std::fs::write(env.dst().join("keep.log"), "also delete me\n").unwrap();
+
+    let opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::Excluded)
+        .exclude("*.log")
+        .dest(env.dst())
+        .build();
+
+    let remote_path = format!("{remote_dir}/");
+    pull_with_opts(opts, &remote_path, 30).await;
+
+    assert!(
+        !env.dst().join("extra.txt").exists(),
+        "extra.txt should be deleted"
+    );
+    assert!(
+        !env.dst().join("keep.log").exists(),
+        "excluded *.log should also be deleted"
+    );
+    assert_eq!(
+        std::fs::read(env.dst().join("file_a.txt")).unwrap(),
+        b"aaa\n"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
