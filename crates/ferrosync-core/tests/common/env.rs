@@ -168,3 +168,15 @@ pub fn inode_of(path: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).unwrap().ino()
 }
+
+/// Create a platform-appropriate FileSystem implementation.
+pub fn test_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
+    #[cfg(unix)]
+    {
+        Box::new(ferrosync_core::fs::unix::UnixFileSystem::new())
+    }
+    #[cfg(windows)]
+    {
+        Box::new(ferrosync_core::fs::windows::WindowsFileSystem::new())
+    }
+}

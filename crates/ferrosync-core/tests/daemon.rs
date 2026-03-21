@@ -14,17 +14,7 @@ use tokio::sync::watch;
 use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncSession};
 use ferrosync_core::options::TransferOptions;
 
-/// Create a platform-appropriate FileSystem instance.
-fn new_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
-    #[cfg(unix)]
-    {
-        Box::new(ferrosync_core::fs::unix::UnixFileSystem::new())
-    }
-    #[cfg(windows)]
-    {
-        Box::new(ferrosync_core::fs::windows::WindowsFileSystem::new())
-    }
-}
+use common::env::test_filesystem;
 use ferrosync_core::server::listener::{DaemonListener, ListenerConfig};
 use ferrosync_core::server::module::{AccessControl, Module, ModuleAuth, ModuleRegistry};
 use ferrosync_core::transport::daemon::{DaemonTransport, DaemonTransportConfig};
@@ -108,7 +98,7 @@ async fn ferrosync_client_pull_inner(
 
     // am_sender=false means we are pulling (server is the sender).
     let transport = DaemonTransport::new(config, false, &server_opts);
-    let fs = new_filesystem();
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
     session.run().await?;
     Ok(())
@@ -167,7 +157,7 @@ async fn ferrosync_client_push_inner(
 
     // am_sender=true means we are pushing (we are the sender).
     let transport = DaemonTransport::new(config, true, &server_opts);
-    let fs = new_filesystem();
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
     session.run().await?;
     Ok(())
@@ -403,7 +393,7 @@ async fn test_daemon_push_archive_mode() {
     };
 
     let transport = DaemonTransport::new(config, true, &server_opts);
-    let fs = new_filesystem();
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
     match tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await {
@@ -598,7 +588,7 @@ async fn test_daemon_pull_archive_mode() {
     };
 
     let transport = DaemonTransport::new(config, false, &server_opts);
-    let fs = new_filesystem();
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
     match tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await {

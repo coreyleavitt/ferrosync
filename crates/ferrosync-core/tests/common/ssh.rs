@@ -3,9 +3,10 @@ use std::process::Stdio;
 
 use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncSession};
 use ferrosync_core::engine::transfer::TransferResult;
-use ferrosync_core::fs::unix::UnixFileSystem;
 use ferrosync_core::options::TransferOptions;
 use ferrosync_core::transport::ssh::{KnownHostsPolicy, SshTransport, SshTransportConfig};
+
+use super::env::test_filesystem;
 
 /// Check if SSH interop tests are enabled via environment variable.
 pub fn ssh_test_enabled() -> bool {
@@ -119,7 +120,7 @@ pub async fn push_archive(src: &Path, remote_dir: &str, timeout_secs: u64) -> Tr
 
     let server_opts = build_server_options(&opts, true);
     let transport = SshTransport::new(test_ssh_config(), true, &server_opts, Path::new(remote_dir));
-    let fs = Box::new(UnixFileSystem::new());
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -143,7 +144,7 @@ pub async fn pull_archive(remote_path: &str, dest: &Path, timeout_secs: u64) -> 
         &server_opts,
         Path::new(remote_path),
     );
-    let fs = Box::new(UnixFileSystem::new());
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -161,7 +162,7 @@ pub async fn push_with_opts(
 ) -> TransferResult {
     let server_opts = build_server_options(&opts, true);
     let transport = SshTransport::new(test_ssh_config(), true, &server_opts, Path::new(remote_dir));
-    let fs = Box::new(UnixFileSystem::new());
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -184,7 +185,7 @@ pub async fn pull_with_opts(
         &server_opts,
         Path::new(remote_path),
     );
-    let fs = Box::new(UnixFileSystem::new());
+    let fs = test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {

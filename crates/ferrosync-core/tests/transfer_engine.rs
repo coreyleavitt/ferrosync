@@ -14,12 +14,11 @@ use std::path::Path;
 use ferrosync_core::delta::ProtocolContext;
 use ferrosync_core::engine::progress::ProgressTracker;
 use ferrosync_core::engine::transfer::execute_transfer;
-use ferrosync_core::fs::unix::UnixFileSystem;
 use ferrosync_core::options::TransferOptions;
 use ferrosync_core::protocol::handshake::ChecksumType;
 
 use crate::common::assertions::assert_trees_equal;
-use crate::common::env::{set_mtime, TestEnv};
+use crate::common::env::{set_mtime, test_filesystem, TestEnv};
 
 /// Create a temp source directory with known test files.
 fn create_test_tree(dir: &Path) {
@@ -37,7 +36,7 @@ fn create_test_tree(dir: &Path) {
 
 /// Run a transfer from source to dest using the direct engine.
 async fn run_transfer(opts: &TransferOptions) -> ferrosync_core::Result<()> {
-    let fs = UnixFileSystem::new();
+    let fs = test_filesystem();
     let mut progress = ProgressTracker::new();
     let ctx = ProtocolContext {
         seed: 0,
@@ -45,7 +44,7 @@ async fn run_transfer(opts: &TransferOptions) -> ferrosync_core::Result<()> {
         char_offset: 0,
         proper_seed_order: true,
     };
-    execute_transfer(&fs, opts, &ctx, &mut progress).await?;
+    execute_transfer(&*fs, opts, &ctx, &mut progress).await?;
     Ok(())
 }
 
