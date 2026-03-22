@@ -37,6 +37,8 @@ pub struct ProtocolContext {
     pub checksum_type: ChecksumType,
     pub char_offset: u32,
     pub proper_seed_order: bool,
+    /// Override the heuristic block size with a fixed value (`--block-size`).
+    pub block_size_override: Option<i32>,
 }
 
 impl ProtocolContext {
@@ -52,6 +54,7 @@ impl ProtocolContext {
             checksum_type: proto.checksum,
             char_offset,
             proper_seed_order: proto.proper_seed_order,
+            block_size_override: None,
         }
     }
 
@@ -63,6 +66,7 @@ impl ProtocolContext {
             checksum_type,
             char_offset: checksum::CHAR_OFFSET_V30,
             proper_seed_order: true,
+            block_size_override: None,
         }
     }
 }

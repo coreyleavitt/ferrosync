@@ -166,6 +166,58 @@ struct TransferFlags {
     #[arg(short = 'm', long)]
     prune_empty_dirs: bool,
 
+    /// Follow symlinks, transfer target content
+    #[arg(short = 'L', long)]
+    copy_links: bool,
+
+    /// Skip symlinks that point outside destination
+    #[arg(long)]
+    safe_links: bool,
+
+    /// Keep dir symlinks on receiver
+    #[arg(short = 'K', long)]
+    keep_dirlinks: bool,
+
+    /// Delete source files after successful transfer
+    #[arg(long)]
+    remove_source_files: bool,
+
+    /// Transfer directories without recursing
+    #[arg(short = 'd', long)]
+    dirs: bool,
+
+    /// Timestamp comparison fuzz in seconds
+    #[arg(short = '@', long, value_name = "NUM", default_value_t = 0)]
+    modify_window: u32,
+
+    /// Append mode with checksum verification
+    #[arg(long)]
+    append_verify: bool,
+
+    /// Read exclude patterns from file
+    #[arg(long, value_name = "FILE")]
+    exclude_from: Vec<PathBuf>,
+
+    /// Read include patterns from file
+    #[arg(long, value_name = "FILE")]
+    include_from: Vec<PathBuf>,
+
+    /// Auto-exclude VCS artifacts
+    #[arg(short = 'C', long)]
+    cvs_exclude: bool,
+
+    /// Override delta checksum block size
+    #[arg(short = 'B', long, value_name = "SIZE")]
+    block_size: Option<i32>,
+
+    /// Override permissions on receiver
+    #[arg(long, value_name = "CHMOD")]
+    chmod: Vec<String>,
+
+    /// Override ownership on receiver (USER:GROUP)
+    #[arg(long, value_name = "USER:GROUP")]
+    chown: Option<String>,
+
     /// In-place file updates
     #[arg(long)]
     inplace: bool,
@@ -483,7 +535,62 @@ impl TransferFlags {
             .ignore_times(self.ignore_times)
             .size_only(self.size_only)
             .existing(self.existing)
-            .ignore_existing(self.ignore_existing);
+            .ignore_existing(self.ignore_existing)
+            .copy_links(self.copy_links)
+            .safe_links(self.safe_links)
+            .keep_dirlinks(self.keep_dirlinks)
+            .remove_source_files(self.remove_source_files)
+            .modify_window(self.modify_window)
+            .cvs_exclude(self.cvs_exclude);
+
+        // -d (dirs) vs -r (recursive): -r wins if both set.
+        if self.dirs && !self.archive && !self.recursive {
+            builder = builder.dirs(true);
+        }
+
+        if self.append_verify {
+            builder = builder.append(true).append_verify(true);
+        }
+
+        for spec in self.chmod {
+            builder = builder.chmod(spec);
+        }
+
+        if let Some(n) = self.block_size {
+            builder = builder.block_size(n);
+        }
+
+        for path in self.exclude_from {
+            builder = builder.exclude_from(path);
+        }
+        for path in self.include_from {
+            builder = builder.include_from(path);
+        }
+
+        // --chown parsing: UID:GID (numeric only for now).
+        if let Some(ref chown_spec) = self.chown {
+            let (uid_part, gid_part) = chown_spec
+                .split_once(':')
+                .map(|(u, g)| (u, Some(g)))
+                .unwrap_or((chown_spec.as_str(), None));
+
+            if !uid_part.is_empty() {
+                if let Ok(uid) = uid_part.parse::<u32>() {
+                    builder = builder.chown_uid(uid);
+                } else {
+                    eprintln!("ferrosync: --chown requires numeric UID (got '{uid_part}')");
+                }
+            }
+            if let Some(gid_str) = gid_part {
+                if !gid_str.is_empty() {
+                    if let Ok(gid) = gid_str.parse::<u32>() {
+                        builder = builder.chown_gid(gid);
+                    } else {
+                        eprintln!("ferrosync: --chown requires numeric GID (got '{gid_str}')");
+                    }
+                }
+            }
+        }
 
         let delete_mode = if self.delete_before {
             DeleteMode::Before
@@ -634,6 +741,7 @@ async fn run_sync(
                 checksum_type: ferrosync_core::protocol::handshake::ChecksumType::Blake3,
                 char_offset: 0,
                 proper_seed_order: true,
+                block_size_override: opts.block_size(),
             };
             let result = ferrosync_core::engine::transfer::execute_transfer(
                 &*fs,

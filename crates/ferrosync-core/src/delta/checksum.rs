@@ -277,6 +277,7 @@ mod tests {
             checksum_type: ct,
             char_offset: CHAR_OFFSET_V30,
             proper_seed_order: false,
+            block_size_override: None,
         }
     }
 

@@ -10,10 +10,10 @@ use std::time::Duration;
 use crate::delta::checksum;
 use crate::delta::ProtocolContext;
 use crate::error::FsError;
-use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
+use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFLNK, S_IFMT};
 use crate::filter::FilterRuleList;
 use crate::fs::{DirEntry, FileSystem};
-use crate::options::{DeleteMode, TransferOptions};
+use crate::options::{DeleteMode, DirectoryMode, TransferOptions};
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::stats::TransferStats;
 
@@ -74,7 +74,8 @@ pub async fn execute_transfer_protocol(
     protocol: &NegotiatedProtocol,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
-    let ctx = ProtocolContext::from_protocol(protocol);
+    let mut ctx = ProtocolContext::from_protocol(protocol);
+    ctx.block_size_override = options.block_size();
     execute_transfer(fs, options, &ctx, progress).await
 }
 
@@ -94,7 +95,8 @@ pub async fn execute_transfer_streaming(
     rx: &mut tokio::sync::mpsc::Receiver<FileEntry>,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
-    let ctx = ProtocolContext::from_protocol(protocol);
+    let mut ctx = ProtocolContext::from_protocol(protocol);
+    ctx.block_size_override = options.block_size();
 
     if let Some(timeout_secs) = options.timeout() {
         match tokio::time::timeout(
@@ -126,6 +128,18 @@ async fn execute_transfer_impl(
     let mut stats = TransferStats::new();
     stats.start();
 
+    let chmod_spec = if !options.chmod().is_empty() {
+        Some(
+            crate::chmod::ChmodSpec::parse(&options.chmod().join(",")).map_err(|e| {
+                crate::FerrosyncError::Fs(crate::error::FsError::PermissionDenied {
+                    path: std::path::PathBuf::from(e.spec),
+                })
+            })?,
+        )
+    } else {
+        None
+    };
+
     let source_paths = options.source();
     let dest = options.dest().ok_or_else(|| FsError::NotFound {
         path: PathBuf::from("<no destination>"),
@@ -134,8 +148,17 @@ async fn execute_transfer_impl(
     let resolved_link_dests = file_decision::resolve_link_dest_dirs(options.link_dest(), dest);
 
     // Build filter rules from options.
-    let filters =
+    let mut filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    if options.cvs_exclude() {
+        filters.add_cvs_excludes();
+    }
+    for path in options.exclude_from() {
+        filters.add_excludes_from_file(path)?;
+    }
+    for path in options.include_from() {
+        filters.add_includes_from_file(path)?;
+    }
 
     // Build the source file list.
     let source_entries = if let Some(files_from) = options.files_from() {
@@ -144,9 +167,10 @@ async fn execute_transfer_impl(
         build_file_list(
             fs,
             source_paths,
-            options.recursive(),
+            options.dir_mode(),
             &filters,
             options.one_file_system(),
+            options.copy_links(),
         )?
     };
     stats.total_files = source_entries.len() as u64;
@@ -179,12 +203,27 @@ async fn execute_transfer_impl(
         let dest_path = dest.join(item.entry.path());
 
         if item.entry.is_dir() {
-            if !options.dry_run() {
-                let mode = if options.preserve_perms() {
+            // --keep-dirlinks: if dest is a symlink to a directory, keep it
+            let dir_exists_as_symlink = options.keep_dirlinks()
+                && !options.dry_run()
+                && fs
+                    .lstat(&dest_path)
+                    .map(|m| m.mode & S_IFMT == S_IFLNK)
+                    .unwrap_or(false)
+                && fs
+                    .stat(&dest_path)
+                    .map(|m| m.mode & S_IFMT == S_IFDIR)
+                    .unwrap_or(false);
+
+            if !dir_exists_as_symlink && !options.dry_run() {
+                let mut mode = if options.preserve_perms() {
                     item.entry.mode & 0o7777
                 } else {
                     0o755
                 };
+                if let Some(ref spec) = chmod_spec {
+                    mode = spec.apply(mode, true);
+                }
                 fs.mkdir(&dest_path, mode)?;
             }
             stats.directories_created += 1;
@@ -203,6 +242,15 @@ async fn execute_transfer_impl(
         }
 
         if item.entry.is_symlink() && options.preserve_links() {
+            // --safe-links: skip symlinks that escape the dest tree
+            if options.safe_links() && file_decision::is_unsafe_symlink(&item.entry.link_target) {
+                tracing::warn!(
+                    path = %dest_path.display(),
+                    "skipping unsafe symlink"
+                );
+                stats.files_skipped += 1;
+                continue;
+            }
             if !options.dry_run() && !item.entry.link_target.is_empty() {
                 fs.create_symlink(&item.entry.link_target, &dest_path)?;
             }
@@ -242,7 +290,8 @@ async fn execute_transfer_impl(
 
         // --compare-dest: skip if identical file exists in any compare-dest dir.
         if !options.compare_dest().is_empty()
-            && file_decision::check_alt_dest(fs, &item.entry, options.compare_dest()).is_some()
+            && file_decision::check_alt_dest(fs, &item.entry, options.compare_dest(), options)
+                .is_some()
         {
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
@@ -255,7 +304,7 @@ async fn execute_transfer_impl(
         // --link-dest: hard-link from alt dir if unchanged.
         if !resolved_link_dests.is_empty() && !options.dry_run() {
             if let Some(alt_path) =
-                file_decision::check_alt_dest(fs, &item.entry, &resolved_link_dests)
+                file_decision::check_alt_dest(fs, &item.entry, &resolved_link_dests, options)
             {
                 let _ = fs.remove_file(&dest_path);
                 if fs.hard_link(&alt_path, &dest_path).is_ok() {
@@ -274,7 +323,7 @@ async fn execute_transfer_impl(
         // --copy-dest: copy from alt dir if unchanged (also use as basis).
         if !options.copy_dest().is_empty() && !options.dry_run() {
             if let Some(alt_path) =
-                file_decision::check_alt_dest(fs, &item.entry, options.copy_dest())
+                file_decision::check_alt_dest(fs, &item.entry, options.copy_dest(), options)
             {
                 if fs.copy_file(&alt_path, &dest_path).is_ok() {
                     stats.files_transferred += 1;
@@ -349,8 +398,8 @@ async fn execute_transfer_impl(
         // Read basis file (if it exists on the receiver side).
         let basis_data = fs.map_file(&dest_path).unwrap_or_default();
 
-        // --append: if dest exists and source is longer, only transfer the tail.
-        if options.append() && !basis_data.is_empty() {
+        // --append / --append-verify: if dest exists and source is longer, only transfer the tail.
+        if (options.append() || options.append_verify()) && !basis_data.is_empty() {
             let dest_len = basis_data.len();
             let source_data = fs.map_file(&item.source_path)?;
             if source_data.len() > dest_len {
@@ -362,19 +411,45 @@ async fn execute_transfer_impl(
                 };
                 fs.append_file(&dest_path, append_data, mode)?;
 
-                let literal_bytes = append_data.len() as u64;
-                stats.files_transferred += 1;
-                stats.total_size += item.entry.len as u64;
-                stats.literal_data += literal_bytes;
-                stats.bytes_sent += literal_bytes;
-
-                progress.emit(ProgressEvent::FileComplete {
-                    index: item.index,
-                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                    literal_bytes,
-                    matched_bytes: dest_len as u64,
-                });
-                continue;
+                if options.append_verify() {
+                    // Verify the whole file matches after append.
+                    let dest_data = fs.map_file(&dest_path)?;
+                    if dest_data.as_ref() != source_data.as_ref() {
+                        tracing::debug!(
+                            path = %dest_path.display(),
+                            "append-verify mismatch, retransferring"
+                        );
+                        // Fall through to full transfer below
+                    } else {
+                        // Verification passed
+                        let literal_bytes = append_data.len() as u64;
+                        stats.files_transferred += 1;
+                        stats.total_size += item.entry.len as u64;
+                        stats.literal_data += literal_bytes;
+                        stats.bytes_sent += literal_bytes;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index: item.index,
+                            name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
+                            literal_bytes,
+                            matched_bytes: dest_len as u64,
+                        });
+                        continue;
+                    }
+                } else {
+                    // Original append path (no verification)
+                    let literal_bytes = append_data.len() as u64;
+                    stats.files_transferred += 1;
+                    stats.total_size += item.entry.len as u64;
+                    stats.literal_data += literal_bytes;
+                    stats.bytes_sent += literal_bytes;
+                    progress.emit(ProgressEvent::FileComplete {
+                        index: item.index,
+                        name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
+                        literal_bytes,
+                        matched_bytes: dest_len as u64,
+                    });
+                    continue;
+                }
             } else {
                 // Source is same length or shorter -- skip.
                 stats.files_skipped += 1;
@@ -436,7 +511,14 @@ async fn execute_transfer_impl(
         };
 
         // Write the file (choosing method based on options).
-        file_decision::write_file_with_options(fs, &write_path, result_data, &item.entry, options)?;
+        file_decision::write_file_with_options(
+            fs,
+            &write_path,
+            result_data,
+            &item.entry,
+            options,
+            chmod_spec.as_ref(),
+        )?;
 
         // --partial-dir: move from partial dir to final destination.
         if options.partial_dir().is_some() && write_path != dest_path {
@@ -445,6 +527,17 @@ async fn execute_transfer_impl(
 
         // Set metadata.
         file_decision::set_file_metadata(fs, &dest_path, &item.entry, options);
+
+        // --remove-source-files: delete source after successful transfer.
+        if options.remove_source_files() && !options.dry_run() {
+            if let Err(e) = fs.remove_file(&item.source_path) {
+                tracing::warn!(
+                    path = %item.source_path.display(),
+                    error = %e,
+                    "failed to remove source file"
+                );
+            }
+        }
 
         stats.files_transferred += 1;
         stats.total_size += item.entry.len as u64;
@@ -502,12 +595,33 @@ async fn execute_transfer_streaming_impl(
     let mut stats = TransferStats::new();
     stats.start();
 
+    let chmod_spec = if !options.chmod().is_empty() {
+        Some(
+            crate::chmod::ChmodSpec::parse(&options.chmod().join(",")).map_err(|e| {
+                crate::FerrosyncError::Fs(crate::error::FsError::PermissionDenied {
+                    path: std::path::PathBuf::from(e.spec),
+                })
+            })?,
+        )
+    } else {
+        None
+    };
+
     let dest = options.dest().ok_or_else(|| FsError::NotFound {
         path: PathBuf::from("<no destination>"),
     })?;
 
-    let filters =
+    let mut filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    if options.cvs_exclude() {
+        filters.add_cvs_excludes();
+    }
+    for path in options.exclude_from() {
+        filters.add_excludes_from_file(path)?;
+    }
+    for path in options.include_from() {
+        filters.add_includes_from_file(path)?;
+    }
 
     let mut index = 0i32;
 
@@ -521,11 +635,14 @@ async fn execute_transfer_streaming_impl(
 
         if entry.is_dir() {
             if !options.dry_run() {
-                let mode = if options.preserve_perms() {
+                let mut mode = if options.preserve_perms() {
                     entry.mode & 0o7777
                 } else {
                     0o755
                 };
+                if let Some(ref spec) = chmod_spec {
+                    mode = spec.apply(mode, true);
+                }
                 fs.mkdir(&dest_path, mode)?;
             }
             stats.directories_created += 1;
@@ -622,15 +739,26 @@ struct FileListItem {
 fn build_file_list(
     fs: &dyn FileSystem,
     source_paths: &[PathBuf],
-    recursive: bool,
+    dir_mode: DirectoryMode,
     filters: &FilterRuleList,
     one_file_system: bool,
+    copy_links: bool,
 ) -> std::result::Result<Vec<FileListItem>, FsError> {
     let mut items = Vec::new();
     let mut index = 0i32;
 
     for source in source_paths {
-        let meta = fs.lstat(source)?;
+        let meta = if copy_links {
+            match fs.stat(source) {
+                Ok(m) => m,
+                Err(_) => {
+                    tracing::warn!(path = %source.display(), "skipping broken symlink");
+                    continue;
+                }
+            }
+        } else {
+            fs.lstat(source)?
+        };
         let name = source
             .file_name()
             .map(|n| {
@@ -651,17 +779,40 @@ fn build_file_list(
         }
 
         if meta.mode & S_IFMT == S_IFDIR {
-            if recursive {
-                let root_dev = if one_file_system {
-                    Some(meta.dev)
-                } else {
-                    None
-                };
-                collect_directory(fs, source, &[], &mut items, &mut index, filters, root_dev)?;
+            match dir_mode {
+                DirectoryMode::Recurse => {
+                    let root_dev = if one_file_system {
+                        Some(meta.dev)
+                    } else {
+                        None
+                    };
+                    collect_directory(
+                        fs,
+                        source,
+                        &[],
+                        &mut items,
+                        &mut index,
+                        filters,
+                        root_dev,
+                        copy_links,
+                    )?;
+                }
+                DirectoryMode::List => {
+                    let entry = meta.to_file_entry(name);
+                    items.push(FileListItem {
+                        index,
+                        entry,
+                        source_path: source.to_path_buf(),
+                    });
+                    index += 1;
+                }
+                DirectoryMode::Skip => {}
             }
         } else {
             let mut entry = meta.to_file_entry(name);
-            if meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == s_iflnk() {
+            if !copy_links
+                && (meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == s_iflnk())
+            {
                 entry.link_target = fs.read_link(source).unwrap_or_default();
             }
 
@@ -678,6 +829,7 @@ fn build_file_list(
 }
 
 /// Recursively collect directory entries.
+#[allow(clippy::too_many_arguments)]
 fn collect_directory(
     fs: &dyn FileSystem,
     dir_path: &Path,
@@ -686,6 +838,7 @@ fn collect_directory(
     index: &mut i32,
     filters: &FilterRuleList,
     root_dev: Option<u64>,
+    copy_links: bool,
 ) -> std::result::Result<(), FsError> {
     // Check filesystem boundary (--one-file-system).
     #[cfg(unix)]
@@ -700,7 +853,11 @@ fn collect_directory(
     let _ = root_dev;
 
     // Add the directory itself.
-    let dir_meta = fs.lstat(dir_path)?;
+    let dir_meta = if copy_links {
+        fs.stat(dir_path)?
+    } else {
+        fs.lstat(dir_path)?
+    };
     let dir_name = if prefix.is_empty() {
         b".".to_vec()
     } else {
@@ -728,13 +885,26 @@ fn collect_directory(
             n
         };
 
-        let is_dir = dir_entry.metadata.mode & S_IFMT == S_IFDIR;
+        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&dir_entry.name));
+
+        // When --copy-links, re-stat to follow symlinks.
+        let child_meta = if copy_links {
+            match fs.stat(&child_path) {
+                Ok(m) => m,
+                Err(_) => {
+                    tracing::warn!(path = %child_path.display(), "skipping broken symlink");
+                    continue;
+                }
+            }
+        } else {
+            dir_entry.metadata.clone()
+        };
+
+        let is_dir = child_meta.mode & S_IFMT == S_IFDIR;
 
         if !filters.is_included(&child_name, is_dir) {
             continue;
         }
-
-        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&dir_entry.name));
 
         if is_dir {
             collect_directory(
@@ -745,11 +915,13 @@ fn collect_directory(
                 index,
                 filters,
                 root_dev,
+                copy_links,
             )?;
         } else {
-            let mut entry = dir_entry.metadata.to_file_entry(child_name);
-            if dir_entry.metadata.mode & S_IFMT == entry::WIRE_S_IFLNK
-                || dir_entry.metadata.mode & S_IFMT == s_iflnk()
+            let mut entry = child_meta.to_file_entry(child_name);
+            if !copy_links
+                && (child_meta.mode & S_IFMT == entry::WIRE_S_IFLNK
+                    || child_meta.mode & S_IFMT == s_iflnk())
             {
                 entry.link_target = fs.read_link(&child_path).unwrap_or_default();
             }
@@ -842,6 +1014,7 @@ mod tests {
             checksum_type: crate::protocol::handshake::ChecksumType::Md5,
             char_offset: 0,
             proper_seed_order: true,
+            block_size_override: None,
         };
         execute_transfer(&fs, &opts, &ctx, &mut progress)
             .await
@@ -1496,6 +1669,7 @@ mod tests {
             checksum_type: crate::protocol::handshake::ChecksumType::Md5,
             char_offset: 0,
             proper_seed_order: true,
+            block_size_override: None,
         };
         execute_transfer(&fs, &opts, &ctx, &mut progress)
             .await

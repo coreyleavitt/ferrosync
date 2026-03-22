@@ -43,6 +43,7 @@ async fn run_transfer(opts: &TransferOptions) -> ferrosync_core::Result<()> {
         checksum_type: ChecksumType::Blake3,
         char_offset: 0,
         proper_seed_order: true,
+        block_size_override: None,
     };
     execute_transfer(&*fs, opts, &ctx, &mut progress).await?;
     Ok(())
@@ -693,4 +694,225 @@ async fn test_transfer_prune_empty_dirs() {
         "empty top-level dir should be pruned"
     );
     assert!(env.dst().join("a").exists(), "non-empty dir should remain");
+}
+
+// ---------------------------------------------------------------------------
+// Batch 2 flag tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_transfer_copy_links() {
+    let env = TestEnv::builder()
+        .with_src_file("target.txt", b"real content\n", None)
+        .build();
+
+    std::os::unix::fs::symlink("target.txt", env.src().join("link.txt")).unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .copy_links(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // link.txt should be a regular file with target's content (not a symlink).
+    let content = std::fs::read(env.dst().join("link.txt")).unwrap();
+    assert_eq!(content, b"real content\n");
+    let meta = std::fs::symlink_metadata(env.dst().join("link.txt")).unwrap();
+    assert!(meta.is_file(), "should be a regular file, not a symlink");
+}
+
+#[tokio::test]
+async fn test_transfer_safe_links_skips_unsafe() {
+    let env = TestEnv::builder()
+        .with_src_file("safe_target.txt", b"safe\n", None)
+        .build();
+
+    // Create a safe symlink and an unsafe one (pointing outside the tree).
+    std::os::unix::fs::symlink("safe_target.txt", env.src().join("safe_link.txt")).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", env.src().join("unsafe_link.txt")).unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .preserve_links(true)
+        .safe_links(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(
+        env.dst().join("safe_link.txt").exists(),
+        "safe symlink should be transferred"
+    );
+    assert!(
+        !env.dst().join("unsafe_link.txt").exists(),
+        "unsafe symlink should be skipped"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_dirs_without_recursion() {
+    let env = TestEnv::builder()
+        .with_src_file("top.txt", b"top\n", None)
+        .with_src_file("subdir/nested.txt", b"nested\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .dirs(true)
+        .preserve_times(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // With -d, the source dir entry itself should be created but not recursed.
+    // Since we pass the source dir as a single source path, build_file_list
+    // with DirectoryMode::List adds the dir entry without recursing.
+    // The dir entry gets created on dest but files inside are not transferred.
+    assert!(
+        !env.dst().join("top.txt").exists(),
+        "-d should not transfer files inside directories"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_remove_source_files() {
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"content\n", None)
+        .with_src_file("subdir/nested.txt", b"nested\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .remove_source_files(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // Files should be transferred and source deleted.
+    assert!(env.dst().join("file.txt").exists());
+    assert!(
+        !env.src().join("file.txt").exists(),
+        "source should be deleted"
+    );
+    // Directories should NOT be deleted.
+    assert!(
+        env.src().join("subdir").exists(),
+        "source dir should remain"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_exclude_from() {
+    let env = TestEnv::builder()
+        .with_src_file("keep.txt", b"keep\n", None)
+        .with_src_file("skip.log", b"skip\n", None)
+        .with_src_file("skip.tmp", b"skip\n", None)
+        .build();
+
+    let exclude_file = env.dir().join("excludes.txt");
+    std::fs::write(&exclude_file, "*.log\n*.tmp\n").unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .exclude_from(&exclude_file)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(env.dst().join("keep.txt").exists());
+    assert!(!env.dst().join("skip.log").exists());
+    assert!(!env.dst().join("skip.tmp").exists());
+}
+
+#[tokio::test]
+async fn test_transfer_cvs_exclude() {
+    let env = TestEnv::builder()
+        .with_src_file("main.rs", b"fn main() {}\n", None)
+        .with_src_file("main.o", b"\x00\x00\x00", None)
+        .build();
+
+    std::fs::create_dir_all(env.src().join(".git")).unwrap();
+    std::fs::write(env.src().join(".git/config"), "gitconfig").unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .cvs_exclude(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(env.dst().join("main.rs").exists());
+    assert!(!env.dst().join("main.o").exists(), "*.o should be excluded");
+    assert!(!env.dst().join(".git").exists(), ".git/ should be excluded");
+}
+
+#[tokio::test]
+async fn test_transfer_modify_window() {
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"src data\n", Some(1_700_000_000))
+        .build();
+
+    // Dest has same size, mtime differs by 1 second.
+    std::fs::write(env.dst().join("file.txt"), b"dst data\n").unwrap();
+    set_mtime(&env.dst().join("file.txt"), 1_700_000_001);
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .modify_window(1)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // With modify_window=1, 1-second difference should be treated as equal -> skip.
+    let content = std::fs::read(env.dst().join("file.txt")).unwrap();
+    assert_eq!(
+        content, b"dst data\n",
+        "modify-window=1 should skip files within 1s"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_chmod() {
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"content\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .preserve_perms(true)
+        .chmod("a+x")
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(env.dst().join("file.txt"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert!(mode & 0o111 != 0, "chmod a+x should set execute bits");
 }

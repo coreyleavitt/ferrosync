@@ -886,6 +886,7 @@ fn sync_files(
                 checksum_type: rust_checksum,
                 char_offset: 0,
                 proper_seed_order: true,
+                block_size_override: None,
             };
             let result = transfer::execute_transfer(&fs, &rust_opts, &ctx, &mut progress)
                 .await

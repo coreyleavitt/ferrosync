@@ -10,6 +10,7 @@ fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {
         checksum_type: ct,
         char_offset: 0,
         proper_seed_order: true,
+        block_size_override: None,
     }
 }
 

@@ -246,6 +246,7 @@ pub struct LocalFileOps {
     dest: PathBuf,
     options: crate::options::TransferOptions,
     resolved_link_dests: Vec<PathBuf>,
+    chmod_spec: Option<crate::chmod::ChmodSpec>,
 }
 
 impl LocalFileOps {
@@ -256,11 +257,17 @@ impl LocalFileOps {
     ) -> Self {
         let resolved_link_dests =
             super::file_decision::resolve_link_dest_dirs(options.link_dest(), &dest);
+        let chmod_spec = if !options.chmod().is_empty() {
+            crate::chmod::ChmodSpec::parse(&options.chmod().join(",")).ok()
+        } else {
+            None
+        };
         Self {
             fs,
             dest,
             options,
             resolved_link_dests,
+            chmod_spec,
         }
     }
 }
@@ -283,6 +290,7 @@ impl FileOps for LocalFileOps {
             data,
             entry,
             &self.options,
+            self.chmod_spec.as_ref(),
         )
     }
 
@@ -311,11 +319,14 @@ impl FileOps for LocalFileOps {
 
     fn mkdir(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
         let dest_path = self.dest_path(entry);
-        let mode = if self.options.preserve_perms() {
+        let mut mode = if self.options.preserve_perms() {
             entry.mode & 0o7777
         } else {
             0o755
         };
+        if let Some(ref spec) = self.chmod_spec {
+            mode = spec.apply(mode, true);
+        }
         self.fs.mkdir(&dest_path, mode)
     }
 
@@ -360,9 +371,12 @@ impl FileOps for LocalFileOps {
         if self.resolved_link_dests.is_empty() || self.options.dry_run() {
             return false;
         }
-        if let Some(alt_path) =
-            super::file_decision::check_alt_dest(&*self.fs, entry, &self.resolved_link_dests)
-        {
+        if let Some(alt_path) = super::file_decision::check_alt_dest(
+            &*self.fs,
+            entry,
+            &self.resolved_link_dests,
+            &self.options,
+        ) {
             let dest_path = self.dest_path(entry);
             // Remove existing dest if present (rsync does this before hard-linking)
             let _ = self.fs.remove_file(&dest_path);
@@ -460,12 +474,14 @@ pub async fn sender_loop<R, W>(
     protocol: &NegotiatedProtocol,
     stats: &mut TransferStats,
     progress: &mut ProgressTracker,
+    block_size_override: Option<i32>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let ctx = ProtocolContext::from_protocol(protocol);
+    let mut ctx = ProtocolContext::from_protocol(protocol);
+    ctx.block_size_override = block_size_override;
     let int_codec = protocol.wire.int_codec;
     let wire = &protocol.wire;
 
@@ -713,12 +729,14 @@ pub async fn receiver_loop<R, W>(
     protocol: &NegotiatedProtocol,
     stats: &mut TransferStats,
     progress: &mut ProgressTracker,
+    block_size_override: Option<i32>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let ctx = ProtocolContext::from_protocol(protocol);
+    let mut ctx = ProtocolContext::from_protocol(protocol);
+    ctx.block_size_override = block_size_override;
     let int_codec = protocol.wire.int_codec;
     let wire = &protocol.wire;
 
@@ -878,12 +896,14 @@ pub async fn receiver_loop_pipelined<R, W>(
     protocol: &NegotiatedProtocol,
     stats: &mut TransferStats,
     progress: &mut ProgressTracker,
+    block_size_override: Option<i32>,
 ) -> Result<(R, MplexWriter<W>)>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let ctx = ProtocolContext::from_protocol(protocol);
+    let mut ctx = ProtocolContext::from_protocol(protocol);
+    ctx.block_size_override = block_size_override;
     let int_codec = protocol.wire.int_codec;
     let has_iflags = protocol.wire.has_iflags;
 

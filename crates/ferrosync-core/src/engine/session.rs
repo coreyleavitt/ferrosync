@@ -114,6 +114,18 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     if opts.prune_empty_dirs() {
         condensed.push('m');
     }
+    if opts.copy_links() {
+        condensed.push('L');
+    }
+    if opts.keep_dirlinks() {
+        condensed.push('K');
+    }
+    if opts.dirs() {
+        condensed.push('d');
+    }
+    if opts.cvs_exclude() {
+        condensed.push('C');
+    }
     match opts.verbosity() {
         crate::options::Verbosity::Quiet => condensed.push('q'),
         crate::options::Verbosity::Verbose => condensed.push('v'),
@@ -165,6 +177,35 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     }
     if let Some(n) = opts.max_delete() {
         args.push(format!("--max-delete={n}"));
+    }
+    if opts.safe_links() {
+        args.push("--safe-links".into());
+    }
+    if opts.remove_source_files() {
+        args.push("--remove-source-files".into());
+    }
+    if opts.append_verify() {
+        args.push("--append-verify".into());
+    }
+    if opts.modify_window() > 0 {
+        args.push(format!("--modify-window={}", opts.modify_window()));
+    }
+    if let Some(n) = opts.block_size() {
+        args.push(format!("--block-size={n}"));
+    }
+    for spec in opts.chmod() {
+        args.push(format!("--chmod={spec}"));
+    }
+    if opts.chown_uid().is_some() || opts.chown_gid().is_some() {
+        let uid = opts.chown_uid().map_or(String::new(), |u| u.to_string());
+        let gid = opts.chown_gid().map_or(String::new(), |g| g.to_string());
+        args.push(format!("--chown={uid}:{gid}"));
+    }
+    for path in opts.exclude_from() {
+        args.push(format!("--exclude-from={}", path.display()));
+    }
+    for path in opts.include_from() {
+        args.push(format!("--include-from={}", path.display()));
     }
 
     match opts.delete() {
@@ -268,6 +309,18 @@ pub fn parse_server_args(
             'm' => {
                 builder = builder.prune_empty_dirs(true);
             }
+            'L' => {
+                builder = builder.copy_links(true);
+            }
+            'K' => {
+                builder = builder.keep_dirlinks(true);
+            }
+            'd' => {
+                builder = builder.dirs(true);
+            }
+            'C' => {
+                builder = builder.cvs_exclude(true);
+            }
             'v' => {
                 // Verbosity is cumulative but we just set it once here.
                 // Multiple v's are handled by the Verbosity enum already
@@ -311,11 +364,55 @@ pub fn parse_server_args(
             "--delete-excluded" => {
                 builder = builder.delete(DeleteMode::Excluded);
             }
+            "--safe-links" => {
+                builder = builder.safe_links(true);
+            }
+            "--remove-source-files" => {
+                builder = builder.remove_source_files(true);
+            }
+            "--append-verify" => {
+                builder = builder.append_verify(true);
+            }
             _ if opt.starts_with("--max-delete=") => {
                 let n = &opt["--max-delete=".len()..];
                 if let Ok(val) = n.parse::<u64>() {
                     builder = builder.max_delete(val);
                 }
+            }
+            _ if opt.starts_with("--modify-window=") => {
+                let n = &opt["--modify-window=".len()..];
+                if let Ok(val) = n.parse::<u32>() {
+                    builder = builder.modify_window(val);
+                }
+            }
+            _ if opt.starts_with("--block-size=") => {
+                let n = &opt["--block-size=".len()..];
+                if let Ok(val) = n.parse::<i32>() {
+                    builder = builder.block_size(val);
+                }
+            }
+            _ if opt.starts_with("--chmod=") => {
+                let spec = &opt["--chmod=".len()..];
+                builder = builder.chmod(spec);
+            }
+            _ if opt.starts_with("--chown=") => {
+                let val = &opt["--chown=".len()..];
+                if let Some((uid_s, gid_s)) = val.split_once(':') {
+                    if let Ok(uid) = uid_s.parse::<u32>() {
+                        builder = builder.chown_uid(uid);
+                    }
+                    if let Ok(gid) = gid_s.parse::<u32>() {
+                        builder = builder.chown_gid(gid);
+                    }
+                }
+            }
+            _ if opt.starts_with("--exclude-from=") => {
+                let path = &opt["--exclude-from=".len()..];
+                builder = builder.exclude_from(std::path::PathBuf::from(path));
+            }
+            _ if opt.starts_with("--include-from=") => {
+                let path = &opt["--include-from=".len()..];
+                builder = builder.include_from(std::path::PathBuf::from(path));
             }
             _ if opt.starts_with("--link-dest=") => {
                 let dir = &opt["--link-dest=".len()..];
@@ -549,6 +646,7 @@ async fn run_push(
         protocol,
         &mut stats,
         progress,
+        options.block_size(),
     )
     .await?;
 
@@ -638,8 +736,17 @@ async fn run_pull(
     }
 
     // Delete extraneous files before/during the transfer.
-    let filters =
+    let mut filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    if options.cvs_exclude() {
+        filters.add_cvs_excludes();
+    }
+    for path in options.exclude_from() {
+        filters.add_excludes_from_file(path)?;
+    }
+    for path in options.include_from() {
+        filters.add_includes_from_file(path)?;
+    }
     let delete_excluded = options.delete() == DeleteMode::Excluded;
     let delete_budget = delete::DeleteBudget::new(options.max_delete());
     let deleter = delete::Deleter::new(
@@ -683,7 +790,15 @@ async fn run_pull(
         ));
 
         let (dr, mo) = wire_transfer::receiver_loop_pipelined(
-            demux_read, mplex_out, &entries, &entry_ndx, file_ops, protocol, &mut stats, progress,
+            demux_read,
+            mplex_out,
+            &entries,
+            &entry_ndx,
+            file_ops,
+            protocol,
+            &mut stats,
+            progress,
+            options.block_size(),
         )
         .await?;
         demux_read = dr;
@@ -802,13 +917,32 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
 /// Build FileEntry list from source paths in options.
 fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Result<Vec<FileEntry>> {
     let source_paths = options.source();
-    let filters =
+    let mut filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    if options.cvs_exclude() {
+        filters.add_cvs_excludes();
+    }
+    for path in options.exclude_from() {
+        filters.add_excludes_from_file(path)?;
+    }
+    for path in options.include_from() {
+        filters.add_includes_from_file(path)?;
+    }
 
     let mut entries = Vec::new();
 
     for source in source_paths {
-        let meta = fs.lstat(source)?;
+        let meta = if options.copy_links() {
+            match fs.stat(source) {
+                Ok(m) => m,
+                Err(_) => {
+                    tracing::warn!(path = %source.display(), "skipping broken symlink");
+                    continue;
+                }
+            }
+        } else {
+            fs.lstat(source)?
+        };
         let name = source
             .file_name()
             .map(|n| {
@@ -835,10 +969,11 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
                 &[],
                 &mut entries,
                 &filters,
+                options.copy_links(),
             )?;
         } else {
             let mut entry = meta.to_file_entry(name);
-            if entry.is_symlink() {
+            if !options.copy_links() && entry.is_symlink() {
                 entry.link_target = fs.read_link(source).unwrap_or_default();
             }
             entries.push(entry);
@@ -1002,5 +1137,39 @@ mod tests {
         assert!(parsed.ignore_existing());
         assert_eq!(parsed.max_delete(), Some(99));
         assert!(parsed.prune_empty_dirs());
+    }
+
+    #[test]
+    fn test_roundtrip_batch2_flags() {
+        let opts = TransferOptions::builder()
+            .copy_links(true)
+            .safe_links(true)
+            .keep_dirlinks(true)
+            .remove_source_files(true)
+            .dirs(true)
+            .cvs_exclude(true)
+            .modify_window(2)
+            .append_verify(true)
+            .block_size(4096)
+            .chmod("Du+rwx")
+            .chown_uid(1000)
+            .chown_gid(1000)
+            .build();
+
+        let args = build_server_options(&opts, true);
+        let parsed = parse_server_args(&args, "/tmp/test".into(), true);
+
+        assert!(parsed.copy_links());
+        assert!(parsed.safe_links());
+        assert!(parsed.keep_dirlinks());
+        assert!(parsed.remove_source_files());
+        assert!(parsed.dirs());
+        assert!(parsed.cvs_exclude());
+        assert_eq!(parsed.modify_window(), 2);
+        assert!(parsed.append_verify());
+        assert_eq!(parsed.block_size(), Some(4096));
+        assert_eq!(parsed.chmod(), &["Du+rwx"]);
+        assert_eq!(parsed.chown_uid(), Some(1000));
+        assert_eq!(parsed.chown_gid(), Some(1000));
     }
 }

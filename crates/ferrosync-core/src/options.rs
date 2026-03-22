@@ -38,13 +38,25 @@ pub enum Verbosity {
     Debug,
 }
 
+/// Directory traversal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DirectoryMode {
+    /// Neither `-d` nor `-r`: directories in source list are skipped.
+    #[default]
+    Skip,
+    /// `-d`: include directory entries but don't recurse into them.
+    List,
+    /// `-r`: full recursive traversal.
+    Recurse,
+}
+
 /// Transfer options controlling rsync behavior.
 ///
 /// Construct via [`TransferOptions::builder()`]. Access fields via getter methods.
 #[derive(Debug, Clone)]
 pub struct TransferOptions {
     // --- Archive mode components ---
-    recursive: bool,
+    dir_mode: DirectoryMode,
     preserve_links: bool,
     preserve_perms: bool,
     preserve_times: bool,
@@ -122,6 +134,33 @@ pub struct TransferOptions {
     // --- Post-transfer ---
     prune_empty_dirs: bool,
 
+    // --- Symlink behavior ---
+    copy_links: bool,
+    safe_links: bool,
+    keep_dirlinks: bool,
+
+    // --- Source cleanup ---
+    remove_source_files: bool,
+
+    // --- Timestamp comparison ---
+    modify_window: u32,
+
+    // --- Append verification ---
+    append_verify: bool,
+
+    // --- Filter files ---
+    exclude_from: Vec<PathBuf>,
+    include_from: Vec<PathBuf>,
+    cvs_exclude: bool,
+
+    // --- Delta tuning ---
+    block_size: Option<i32>,
+
+    // --- Permission/ownership override ---
+    chmod: Vec<String>,
+    chown_uid: Option<u32>,
+    chown_gid: Option<u32>,
+
     // --- Misc ---
     one_file_system: bool,
     numeric_ids: bool,
@@ -131,7 +170,7 @@ pub struct TransferOptions {
 impl Default for TransferOptions {
     fn default() -> Self {
         Self {
-            recursive: false,
+            dir_mode: DirectoryMode::Skip,
             preserve_links: false,
             preserve_perms: false,
             preserve_times: false,
@@ -176,6 +215,19 @@ impl Default for TransferOptions {
             ignore_existing: false,
             max_delete: None,
             prune_empty_dirs: false,
+            copy_links: false,
+            safe_links: false,
+            keep_dirlinks: false,
+            remove_source_files: false,
+            modify_window: 0,
+            append_verify: false,
+            exclude_from: Vec::new(),
+            include_from: Vec::new(),
+            cvs_exclude: false,
+            block_size: None,
+            chmod: Vec::new(),
+            chown_uid: None,
+            chown_gid: None,
             one_file_system: false,
             numeric_ids: false,
             sparse: false,
@@ -191,7 +243,7 @@ impl TransferOptions {
 
     /// Returns `true` if archive mode flags are all set (`-a` = `-rlptgoD`).
     pub fn is_archive(&self) -> bool {
-        self.recursive
+        self.dir_mode == DirectoryMode::Recurse
             && self.preserve_links
             && self.preserve_perms
             && self.preserve_times
@@ -205,7 +257,15 @@ impl TransferOptions {
 
     /// Recurse into directories (`-r`).
     pub fn recursive(&self) -> bool {
-        self.recursive
+        self.dir_mode == DirectoryMode::Recurse
+    }
+    /// Transfer directories without recursing (`-d`).
+    pub fn dirs(&self) -> bool {
+        self.dir_mode == DirectoryMode::List
+    }
+    /// Directory traversal mode.
+    pub fn dir_mode(&self) -> DirectoryMode {
+        self.dir_mode
     }
     /// Preserve symlinks as symlinks (`-l`).
     pub fn preserve_links(&self) -> bool {
@@ -379,6 +439,58 @@ impl TransferOptions {
     pub fn prune_empty_dirs(&self) -> bool {
         self.prune_empty_dirs
     }
+    /// Follow symlinks during file list building (`-L`).
+    pub fn copy_links(&self) -> bool {
+        self.copy_links
+    }
+    /// Skip symlinks that point outside the destination tree (`--safe-links`).
+    pub fn safe_links(&self) -> bool {
+        self.safe_links
+    }
+    /// Keep symlinks to directories on receiver (`-K`).
+    pub fn keep_dirlinks(&self) -> bool {
+        self.keep_dirlinks
+    }
+    /// Delete source files after successful transfer (`--remove-source-files`).
+    pub fn remove_source_files(&self) -> bool {
+        self.remove_source_files
+    }
+    /// Timestamp comparison fuzz in seconds (`-@`).
+    pub fn modify_window(&self) -> u32 {
+        self.modify_window
+    }
+    /// Append mode with post-transfer checksum verification (`--append-verify`).
+    pub fn append_verify(&self) -> bool {
+        self.append_verify
+    }
+    /// Files containing exclude patterns (`--exclude-from`).
+    pub fn exclude_from(&self) -> &[PathBuf] {
+        &self.exclude_from
+    }
+    /// Files containing include patterns (`--include-from`).
+    pub fn include_from(&self) -> &[PathBuf] {
+        &self.include_from
+    }
+    /// Auto-exclude VCS artifacts (`-C`).
+    pub fn cvs_exclude(&self) -> bool {
+        self.cvs_exclude
+    }
+    /// Override automatic block size for delta checksums (`-B`).
+    pub fn block_size(&self) -> Option<i32> {
+        self.block_size
+    }
+    /// Permission override specs (`--chmod`).
+    pub fn chmod(&self) -> &[String] {
+        &self.chmod
+    }
+    /// Override owner uid (`--chown`).
+    pub fn chown_uid(&self) -> Option<u32> {
+        self.chown_uid
+    }
+    /// Override owner gid (`--chown`).
+    pub fn chown_gid(&self) -> Option<u32> {
+        self.chown_gid
+    }
     /// Don't cross filesystem boundaries (`-x`).
     pub fn one_file_system(&self) -> bool {
         self.one_file_system
@@ -406,7 +518,7 @@ pub struct TransferOptionsBuilder {
 impl TransferOptionsBuilder {
     /// Enable archive mode (`-a` = `-rlptgoD`).
     pub fn archive(mut self) -> Self {
-        self.opts.recursive = true;
+        self.opts.dir_mode = DirectoryMode::Recurse;
         self.opts.preserve_links = true;
         self.opts.preserve_perms = true;
         self.opts.preserve_times = true;
@@ -419,7 +531,19 @@ impl TransferOptionsBuilder {
 
     /// Enable or disable recursive directory traversal (`-r`).
     pub fn recursive(mut self, v: bool) -> Self {
-        self.opts.recursive = v;
+        self.opts.dir_mode = if v {
+            DirectoryMode::Recurse
+        } else {
+            DirectoryMode::Skip
+        };
+        self
+    }
+
+    /// Enable or disable directory listing without recursion (`-d`).
+    pub fn dirs(mut self, v: bool) -> Self {
+        if v {
+            self.opts.dir_mode = DirectoryMode::List;
+        }
         self
     }
 
@@ -624,6 +748,84 @@ impl TransferOptionsBuilder {
     /// Enable or disable empty directory pruning (`-m`).
     pub fn prune_empty_dirs(mut self, v: bool) -> Self {
         self.opts.prune_empty_dirs = v;
+        self
+    }
+
+    /// Enable or disable following symlinks during scan (`-L`).
+    pub fn copy_links(mut self, v: bool) -> Self {
+        self.opts.copy_links = v;
+        self
+    }
+
+    /// Enable or disable safe-links mode (`--safe-links`).
+    pub fn safe_links(mut self, v: bool) -> Self {
+        self.opts.safe_links = v;
+        self
+    }
+
+    /// Enable or disable keeping dir symlinks on receiver (`-K`).
+    pub fn keep_dirlinks(mut self, v: bool) -> Self {
+        self.opts.keep_dirlinks = v;
+        self
+    }
+
+    /// Enable or disable source file deletion after transfer (`--remove-source-files`).
+    pub fn remove_source_files(mut self, v: bool) -> Self {
+        self.opts.remove_source_files = v;
+        self
+    }
+
+    /// Set the timestamp comparison fuzz in seconds (`-@`).
+    pub fn modify_window(mut self, n: u32) -> Self {
+        self.opts.modify_window = n;
+        self
+    }
+
+    /// Enable or disable append-verify mode (`--append-verify`).
+    pub fn append_verify(mut self, v: bool) -> Self {
+        self.opts.append_verify = v;
+        self
+    }
+
+    /// Add a file containing exclude patterns (`--exclude-from`).
+    pub fn exclude_from(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.exclude_from.push(path.into());
+        self
+    }
+
+    /// Add a file containing include patterns (`--include-from`).
+    pub fn include_from(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.include_from.push(path.into());
+        self
+    }
+
+    /// Enable or disable CVS exclude patterns (`-C`).
+    pub fn cvs_exclude(mut self, v: bool) -> Self {
+        self.opts.cvs_exclude = v;
+        self
+    }
+
+    /// Set the delta checksum block size (`-B`).
+    pub fn block_size(mut self, n: i32) -> Self {
+        self.opts.block_size = Some(n);
+        self
+    }
+
+    /// Add a permission override spec (`--chmod`).
+    pub fn chmod(mut self, spec: impl Into<String>) -> Self {
+        self.opts.chmod.push(spec.into());
+        self
+    }
+
+    /// Set the owner uid override (`--chown`).
+    pub fn chown_uid(mut self, uid: u32) -> Self {
+        self.opts.chown_uid = Some(uid);
+        self
+    }
+
+    /// Set the owner gid override (`--chown`).
+    pub fn chown_gid(mut self, gid: u32) -> Self {
+        self.opts.chown_gid = Some(gid);
         self
     }
 

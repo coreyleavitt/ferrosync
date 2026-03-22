@@ -138,6 +138,89 @@ impl FilterRuleList {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+
+    /// Add exclude patterns from a file (`--exclude-from`).
+    ///
+    /// Reads the file line by line, skipping blank lines and comments
+    /// (lines starting with `#` or `;`).
+    pub fn add_excludes_from_file(&mut self, path: &std::path::Path) -> Result<(), FilterError> {
+        let content = std::fs::read_to_string(path).map_err(|e| FilterError::ReadFile {
+            path: path.to_path_buf(),
+            source: std::sync::Arc::new(e),
+        })?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            self.add_exclude(line)?;
+        }
+        Ok(())
+    }
+
+    /// Add include patterns from a file (`--include-from`).
+    pub fn add_includes_from_file(&mut self, path: &std::path::Path) -> Result<(), FilterError> {
+        let content = std::fs::read_to_string(path).map_err(|e| FilterError::ReadFile {
+            path: path.to_path_buf(),
+            source: std::sync::Arc::new(e),
+        })?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            self.add_include(line)?;
+        }
+        Ok(())
+    }
+
+    /// Add the standard CVS exclude patterns (`-C`).
+    ///
+    /// These patterns match VCS metadata, editor backups, and common build
+    /// artifacts. Matches rsync's built-in CVS exclude list.
+    pub fn add_cvs_excludes(&mut self) {
+        const CVS_EXCLUDE_PATTERNS: &[&str] = &[
+            "RCS",
+            "SCCS",
+            "CVS",
+            "CVS.adm",
+            "RCSLOG",
+            "cvslog.*",
+            "tags",
+            "TAGS",
+            ".make.state",
+            ".nse_depinfo",
+            "*~",
+            "#*",
+            ".#*",
+            ",*",
+            "_$*",
+            "*.old",
+            "*.bak",
+            "*.BAK",
+            "*.orig",
+            "*.rej",
+            ".del-*",
+            "*.a",
+            "*.olb",
+            "*.o",
+            "*.obj",
+            "*.so",
+            "*.exe",
+            "*.Z",
+            "*.elc",
+            "*.ln",
+            "core",
+            ".svn/",
+            ".git/",
+            ".hg/",
+            ".bzr/",
+        ];
+        for pattern in CVS_EXCLUDE_PATTERNS {
+            // These patterns are known-valid, unwrap is safe.
+            let _ = self.add_exclude(pattern);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -233,5 +316,51 @@ mod tests {
 
         assert!(!list.is_included(b"build", true));
         assert!(list.is_included(b"build", false)); // file named "build" is ok
+    }
+
+    #[test]
+    fn test_add_excludes_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("excludes.txt");
+        std::fs::write(&file, "*.tmp\n# comment\n\n*.log\n; also comment\n").unwrap();
+
+        let mut list = FilterRuleList::new();
+        list.add_excludes_from_file(&file).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(!list.is_included(b"foo.tmp", false));
+        assert!(!list.is_included(b"bar.log", false));
+        assert!(list.is_included(b"main.rs", false));
+    }
+
+    #[test]
+    fn test_add_includes_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("includes.txt");
+        std::fs::write(&file, "*.rs\n*.toml\n").unwrap();
+
+        let mut list = FilterRuleList::new();
+        list.add_includes_from_file(&file).unwrap();
+        list.add_exclude("*").unwrap();
+        assert!(list.is_included(b"main.rs", false));
+        assert!(list.is_included(b"Cargo.toml", false));
+        assert!(!list.is_included(b"data.bin", false));
+    }
+
+    #[test]
+    fn test_cvs_excludes() {
+        let mut list = FilterRuleList::new();
+        list.add_cvs_excludes();
+        assert!(!list.is_included(b".git", true));
+        assert!(!list.is_included(b"foo.o", false));
+        assert!(!list.is_included(b"backup.bak", false));
+        assert!(list.is_included(b"main.rs", false));
+    }
+
+    #[test]
+    fn test_excludes_from_file_missing() {
+        let mut list = FilterRuleList::new();
+        assert!(list
+            .add_excludes_from_file(std::path::Path::new("/nonexistent"))
+            .is_err());
     }
 }

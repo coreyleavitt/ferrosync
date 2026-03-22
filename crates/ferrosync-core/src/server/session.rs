@@ -261,6 +261,7 @@ impl ServerSession {
             protocol,
             &mut stats,
             progress,
+            None,
         )
         .await?;
 
@@ -335,6 +336,7 @@ impl ServerSession {
 
         let (dr, mo) = wire_transfer::receiver_loop_pipelined(
             demux_read, mplex_out, &entries, &entry_ndx, file_ops, protocol, &mut stats, progress,
+            None,
         )
         .await?;
         demux_read = dr;
@@ -463,6 +465,7 @@ fn build_module_entries(
                 &[],
                 &mut entries,
                 &filters,
+                false,
             )?;
         } else {
             // Non-recursive: add the directory itself and its immediate

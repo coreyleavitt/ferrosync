@@ -66,8 +66,9 @@ pub fn quick_check_skip(
         return true;
     }
 
-    // Same size and same mtime -> skip.
-    if dest_meta.mtime == src_entry.mtime {
+    // Same size and mtime within --modify-window tolerance -> skip.
+    let window = options.modify_window() as i64;
+    if (dest_meta.mtime - src_entry.mtime).abs() <= window {
         return true;
     }
 
@@ -81,11 +82,13 @@ pub fn check_alt_dest(
     fs: &dyn FileSystem,
     src_entry: &FileEntry,
     alt_dirs: &[PathBuf],
+    options: &TransferOptions,
 ) -> Option<PathBuf> {
+    let window = options.modify_window() as i64;
     for dir in alt_dirs {
         let alt_path = dir.join(src_entry.path());
         if let Ok(meta) = fs.lstat(&alt_path) {
-            if meta.len == src_entry.len && meta.mtime == src_entry.mtime {
+            if meta.len == src_entry.len && (meta.mtime - src_entry.mtime).abs() <= window {
                 return Some(alt_path);
             }
         }
@@ -127,6 +130,40 @@ pub fn check_size_limits(entry: &FileEntry, options: &TransferOptions) -> bool {
     false
 }
 
+/// Check if a symlink target is unsafe (would escape the transfer tree).
+///
+/// A symlink is unsafe if:
+/// - It points to an absolute path
+/// - Relative path components (`..`) would escape the transfer root
+pub fn is_unsafe_symlink(target: &[u8]) -> bool {
+    let target_str = String::from_utf8_lossy(target);
+    let target_path = std::path::Path::new(target_str.as_ref());
+
+    // Absolute targets are always unsafe.
+    if target_path.is_absolute() {
+        return true;
+    }
+
+    // Count depth: normal components add depth, ParentDir subtracts.
+    // If depth ever goes negative, the symlink escapes the tree.
+    let mut depth: i32 = 0;
+    for component in target_path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            std::path::Component::Normal(_) => {
+                depth += 1;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Create a backup of a file before overwriting.
 pub fn create_backup(
     fs: &dyn FileSystem,
@@ -154,12 +191,20 @@ pub fn write_file_with_options(
     data: &[u8],
     entry: &FileEntry,
     options: &TransferOptions,
+    chmod: Option<&crate::chmod::ChmodSpec>,
 ) -> std::result::Result<(), crate::FerrosyncError> {
     let mode = if options.preserve_perms() {
         Some(entry.mode & 0o7777)
     } else {
         None
     };
+    let mode = mode.map(|m| {
+        if let Some(spec) = chmod {
+            spec.apply(m, entry.is_dir())
+        } else {
+            m
+        }
+    });
 
     if options.sparse() {
         fs.write_file_sparse(dest_path, data, mode)?;
@@ -200,9 +245,16 @@ pub fn set_file_metadata(
         }
     }
     #[cfg(unix)]
-    if options.preserve_owner() {
-        if let Err(e) = fs.set_owner(dest_path, entry.uid, entry.gid) {
-            tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
+    {
+        let uid = options.chown_uid().unwrap_or(entry.uid);
+        let gid = options.chown_gid().unwrap_or(entry.gid);
+        if options.preserve_owner()
+            || options.chown_uid().is_some()
+            || options.chown_gid().is_some()
+        {
+            if let Err(e) = fs.set_owner(dest_path, uid, gid) {
+                tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
+            }
         }
     }
 }

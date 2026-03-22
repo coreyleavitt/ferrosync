@@ -26,8 +26,13 @@ pub fn collect_directory_entries(
     prefix: &[u8],
     entries: &mut Vec<FileEntry>,
     filters: &FilterRuleList,
+    copy_links: bool,
 ) -> Result<(), FsError> {
-    let dir_meta = fs.lstat(dir_path)?;
+    let dir_meta = if copy_links {
+        fs.stat(dir_path)?
+    } else {
+        fs.lstat(dir_path)?
+    };
     let dir_name = if prefix.is_empty() {
         b".".to_vec()
     } else {
@@ -48,18 +53,30 @@ pub fn collect_directory_entries(
             n
         };
 
-        let is_dir = child.metadata.mode & S_IFMT == S_IFDIR;
+        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&child.name));
+
+        let child_meta = if copy_links {
+            match fs.stat(&child_path) {
+                Ok(m) => m,
+                Err(_) => {
+                    tracing::warn!(path = %child_path.display(), "skipping broken symlink");
+                    continue;
+                }
+            }
+        } else {
+            child.metadata.clone()
+        };
+
+        let is_dir = child_meta.mode & S_IFMT == S_IFDIR;
         if !filters.is_included(&child_name, is_dir) {
             continue;
         }
 
-        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&child.name));
-
         if is_dir {
-            collect_directory_entries(fs, &child_path, &child_name, entries, filters)?;
+            collect_directory_entries(fs, &child_path, &child_name, entries, filters, copy_links)?;
         } else {
-            let mut entry = child.metadata.to_file_entry(child_name);
-            if entry.is_symlink() {
+            let mut entry = child_meta.to_file_entry(child_name);
+            if !copy_links && entry.is_symlink() {
                 entry.link_target = fs.read_link(&child_path).unwrap_or_default();
             }
             entries.push(entry);

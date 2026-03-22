@@ -96,7 +96,9 @@ pub fn compute_signatures(data: &[u8], ctx: &ProtocolContext) -> SumStruct {
     }
 
     let file_len = data.len() as i64;
-    let blength = compute_block_length(file_len);
+    let blength = ctx
+        .block_size_override
+        .unwrap_or_else(|| compute_block_length(file_len));
     let s2length = compute_s2length(file_len, blength);
 
     let mut sums = Vec::new();
