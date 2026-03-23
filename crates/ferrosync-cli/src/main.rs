@@ -306,9 +306,33 @@ struct TransferFlags {
     #[arg(long, value_name = "DIR")]
     compare_dest: Vec<PathBuf>,
 
+    /// Keep partially transferred files
+    #[arg(long)]
+    partial: bool,
+
     /// Directory for partial transfers
     #[arg(long, value_name = "DIR")]
     partial_dir: Option<PathBuf>,
+
+    /// Use relative path names
+    #[arg(short = 'R', long)]
+    relative: bool,
+
+    /// Shorthand for --partial --progress
+    #[arg(short = 'P')]
+    short_partial: bool,
+
+    /// Per-directory .rsync-filter merge files
+    #[arg(short = 'F', action = clap::ArgAction::Count)]
+    filter_merge: u8,
+
+    /// List files without transferring
+    #[arg(long)]
+    list_only: bool,
+
+    /// Find similar basis files for delta transfer
+    #[arg(short = 'y', long)]
+    fuzzy: bool,
 
     /// Append data to shorter files
     #[arg(long)]
@@ -649,9 +673,18 @@ impl TransferFlags {
         if let Some(bd) = self.backup_dir {
             builder = builder.backup_dir(bd);
         }
+        builder = builder.partial(self.partial || self.short_partial);
+        if self.short_partial {
+            builder = builder.progress(true);
+        }
         if let Some(pd) = self.partial_dir {
             builder = builder.partial_dir(pd);
         }
+        builder = builder
+            .relative(self.relative)
+            .filter_merge_files(self.filter_merge)
+            .list_only(self.list_only)
+            .fuzzy(self.fuzzy);
         if let Some(ff) = self.files_from {
             builder = builder.files_from(ff);
         }

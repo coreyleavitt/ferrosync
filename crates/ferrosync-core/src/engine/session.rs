@@ -114,6 +114,9 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     if opts.prune_empty_dirs() {
         condensed.push('m');
     }
+    if opts.relative() {
+        condensed.push('R');
+    }
     if opts.copy_links() {
         condensed.push('L');
     }
@@ -125,6 +128,12 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     }
     if opts.cvs_exclude() {
         condensed.push('C');
+    }
+    if opts.fuzzy() {
+        condensed.push('y');
+    }
+    for _ in 0..opts.filter_merge_files() {
+        condensed.push('F');
     }
     match opts.verbosity() {
         crate::options::Verbosity::Quiet => condensed.push('q'),
@@ -208,6 +217,16 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
         args.push(format!("--include-from={}", path.display()));
     }
 
+    if opts.partial() {
+        args.push("--partial".into());
+    }
+    if let Some(pd) = opts.partial_dir() {
+        args.push(format!("--partial-dir={}", pd.display()));
+    }
+    if opts.list_only() {
+        args.push("--list-only".into());
+    }
+
     match opts.delete() {
         DeleteMode::Before => args.push("--delete-before".into()),
         DeleteMode::During => args.push("--delete-during".into()),
@@ -259,6 +278,7 @@ pub fn parse_server_args(
         &condensed[1..]
     };
 
+    let mut filter_merge_count = 0u8;
     for ch in flags_part.chars() {
         match ch {
             'l' => {
@@ -318,8 +338,17 @@ pub fn parse_server_args(
             'd' => {
                 builder = builder.dirs(true);
             }
+            'R' => {
+                builder = builder.relative(true);
+            }
             'C' => {
                 builder = builder.cvs_exclude(true);
+            }
+            'y' => {
+                builder = builder.fuzzy(true);
+            }
+            'F' => {
+                filter_merge_count = filter_merge_count.saturating_add(1);
             }
             'v' => {
                 // Verbosity is cumulative but we just set it once here.
@@ -329,6 +358,10 @@ pub fn parse_server_args(
             }
             _ => {}
         }
+    }
+
+    if filter_merge_count > 0 {
+        builder = builder.filter_merge_files(filter_merge_count);
     }
 
     // Parse long-form options.
@@ -367,8 +400,14 @@ pub fn parse_server_args(
             "--safe-links" => {
                 builder = builder.safe_links(true);
             }
+            "--list-only" => {
+                builder = builder.list_only(true);
+            }
             "--remove-source-files" => {
                 builder = builder.remove_source_files(true);
+            }
+            "--partial" => {
+                builder = builder.partial(true);
             }
             "--append-verify" => {
                 builder = builder.append_verify(true);
@@ -417,6 +456,10 @@ pub fn parse_server_args(
             _ if opt.starts_with("--link-dest=") => {
                 let dir = &opt["--link-dest=".len()..];
                 builder = builder.link_dest(std::path::PathBuf::from(dir));
+            }
+            _ if opt.starts_with("--partial-dir=") => {
+                let dir = &opt["--partial-dir=".len()..];
+                builder = builder.partial_dir(std::path::PathBuf::from(dir));
             }
             _ => {}
         }
@@ -632,6 +675,18 @@ async fn run_push(
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
 
+    // --list-only: print file list and return without transferring.
+    if options.list_only() {
+        for entry in &entries {
+            println!("{}", entry.format_list_entry());
+        }
+        // Skip sender loop but complete protocol.
+        wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+        let _ = demux_handle.await;
+        stats.finish();
+        return Ok(TransferResult { stats });
+    }
+
     // Sender loop via wire_transfer.
     // C ref: send_files (sender.c), called from main.c:1157
     let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, options.recursive());
@@ -733,6 +788,26 @@ async fn run_pull(
     for entry in &entries {
         let name_str = String::from_utf8_lossy(&entry.name);
         sanitize_path(&dest, &name_str)?;
+    }
+
+    // --list-only: print file list and return without transferring.
+    if options.list_only() {
+        for entry in &entries {
+            println!("{}", entry.format_list_entry());
+        }
+        // Skip transfer but complete protocol handshake.
+        wire_transfer::receiver_phase_exchange(
+            &mut demux_read,
+            &mut mplex_out,
+            protocol,
+            received_flist.num_flists,
+        )
+        .await?;
+        wire_transfer::read_stats(&mut demux_read, protocol).await?;
+        wire_transfer::receiver_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+        let _ = demux_handle.await;
+        stats.finish();
+        return Ok(TransferResult { stats });
     }
 
     // Delete extraneous files before/during the transfer.
@@ -943,33 +1018,30 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
         } else {
             fs.lstat(source)?
         };
-        let name = source
-            .file_name()
-            .map(|n| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStrExt;
-                    n.as_bytes().to_vec()
-                }
-                #[cfg(not(unix))]
-                {
-                    n.to_string_lossy().as_bytes().to_vec()
-                }
-            })
-            .unwrap_or_default();
+        let name = crate::filelist::entry::compute_entry_name(source, options.relative());
 
         if !filters.is_included(&name, meta.mode & S_IFMT == S_IFDIR) {
             continue;
         }
 
         if meta.mode & S_IFMT == S_IFDIR && options.recursive() {
+            let prefix = if options.relative() {
+                name.clone()
+            } else {
+                Vec::new()
+            };
+            let walk_opts = crate::filelist::walk::WalkOptions {
+                copy_links: options.copy_links(),
+                one_file_system: false,
+                filter_merge_files: options.filter_merge_files(),
+            };
             crate::filelist::walk::collect_directory_entries(
                 fs,
                 source,
-                &[],
+                &prefix,
                 &mut entries,
-                &filters,
-                options.copy_links(),
+                &mut filters,
+                &walk_opts,
             )?;
         } else {
             let mut entry = meta.to_file_entry(name);
@@ -1171,5 +1243,25 @@ mod tests {
         assert_eq!(parsed.chmod(), &["Du+rwx"]);
         assert_eq!(parsed.chown_uid(), Some(1000));
         assert_eq!(parsed.chown_gid(), Some(1000));
+    }
+
+    #[test]
+    fn test_roundtrip_batch3_flags() {
+        let opts = TransferOptions::builder()
+            .partial(true)
+            .relative(true)
+            .filter_merge_files(2)
+            .list_only(true)
+            .fuzzy(true)
+            .build();
+
+        let args = build_server_options(&opts, true);
+        let parsed = parse_server_args(&args, "/tmp/test".into(), true);
+
+        assert!(parsed.partial());
+        assert!(parsed.relative());
+        assert_eq!(parsed.filter_merge_files(), 2);
+        assert!(parsed.list_only());
+        assert!(parsed.fuzzy());
     }
 }

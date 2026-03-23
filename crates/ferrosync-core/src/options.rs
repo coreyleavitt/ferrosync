@@ -111,6 +111,7 @@ pub struct TransferOptions {
     suffix: String,
 
     // --- Partial ---
+    partial: bool,
     partial_dir: Option<PathBuf>,
 
     // --- Append ---
@@ -161,6 +162,18 @@ pub struct TransferOptions {
     chown_uid: Option<u32>,
     chown_gid: Option<u32>,
 
+    // --- Path handling ---
+    relative: bool,
+
+    // --- Filter merge ---
+    filter_merge_files: u8,
+
+    // --- Output ---
+    list_only: bool,
+
+    // --- Basis search ---
+    fuzzy: bool,
+
     // --- Misc ---
     one_file_system: bool,
     numeric_ids: bool,
@@ -205,6 +218,7 @@ impl Default for TransferOptions {
             backup: false,
             backup_dir: None,
             suffix: "~".to_string(),
+            partial: false,
             partial_dir: None,
             append: false,
             files_from: None,
@@ -228,6 +242,10 @@ impl Default for TransferOptions {
             chmod: Vec::new(),
             chown_uid: None,
             chown_gid: None,
+            relative: false,
+            filter_merge_files: 0,
+            list_only: false,
+            fuzzy: false,
             one_file_system: false,
             numeric_ids: false,
             sparse: false,
@@ -403,6 +421,10 @@ impl TransferOptions {
     pub fn suffix(&self) -> &str {
         &self.suffix
     }
+    /// Keep partial files on interruption (`--partial`).
+    pub fn partial(&self) -> bool {
+        self.partial
+    }
     /// Partial transfer directory.
     pub fn partial_dir(&self) -> Option<&PathBuf> {
         self.partial_dir.as_ref()
@@ -490,6 +512,22 @@ impl TransferOptions {
     /// Override owner gid (`--chown`).
     pub fn chown_gid(&self) -> Option<u32> {
         self.chown_gid
+    }
+    /// Preserve full source path at destination (`-R`).
+    pub fn relative(&self) -> bool {
+        self.relative
+    }
+    /// Per-directory .rsync-filter merge file level (`-F`).
+    pub fn filter_merge_files(&self) -> u8 {
+        self.filter_merge_files
+    }
+    /// List files without transferring (`--list-only`).
+    pub fn list_only(&self) -> bool {
+        self.list_only
+    }
+    /// Search for similar basis files for delta (`-y`).
+    pub fn fuzzy(&self) -> bool {
+        self.fuzzy
     }
     /// Don't cross filesystem boundaries (`-x`).
     pub fn one_file_system(&self) -> bool {
@@ -829,6 +867,30 @@ impl TransferOptionsBuilder {
         self
     }
 
+    /// Enable or disable relative path preservation (`-R`).
+    pub fn relative(mut self, v: bool) -> Self {
+        self.opts.relative = v;
+        self
+    }
+
+    /// Set per-directory filter merge file level (`-F`).
+    pub fn filter_merge_files(mut self, n: u8) -> Self {
+        self.opts.filter_merge_files = n;
+        self
+    }
+
+    /// Enable or disable list-only mode (`--list-only`).
+    pub fn list_only(mut self, v: bool) -> Self {
+        self.opts.list_only = v;
+        self
+    }
+
+    /// Enable or disable fuzzy basis search (`-y`).
+    pub fn fuzzy(mut self, v: bool) -> Self {
+        self.opts.fuzzy = v;
+        self
+    }
+
     /// Enable or disable single-filesystem mode (`-x`).
     pub fn one_file_system(mut self, v: bool) -> Self {
         self.opts.one_file_system = v;
@@ -889,6 +951,12 @@ impl TransferOptionsBuilder {
     /// Set the suffix for backup files (`--suffix`).
     pub fn suffix(mut self, s: impl Into<String>) -> Self {
         self.opts.suffix = s.into();
+        self
+    }
+
+    /// Enable or disable keeping partial files (`--partial`).
+    pub fn partial(mut self, v: bool) -> Self {
+        self.opts.partial = v;
         self
     }
 

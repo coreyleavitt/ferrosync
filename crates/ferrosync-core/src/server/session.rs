@@ -453,19 +453,24 @@ fn build_module_entries(
     module_path: &std::path::Path,
     recursive: bool,
 ) -> Result<Vec<FileEntry>, SessionError> {
-    let filters = FilterRuleList::new();
+    let mut filters = FilterRuleList::new();
     let mut entries = Vec::new();
 
     let meta = fs.lstat(module_path)?;
     if meta.mode & S_IFMT == S_IFDIR {
         if recursive {
+            let walk_opts = crate::filelist::walk::WalkOptions {
+                copy_links: false,
+                one_file_system: false,
+                filter_merge_files: 0,
+            };
             crate::filelist::walk::collect_directory_entries(
                 fs,
                 module_path,
                 &[],
                 &mut entries,
-                &filters,
-                false,
+                &mut filters,
+                &walk_opts,
             )?;
         } else {
             // Non-recursive: add the directory itself and its immediate

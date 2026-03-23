@@ -61,11 +61,15 @@ impl FilterRule {
 #[derive(Debug, Clone, Default)]
 pub struct FilterRuleList {
     rules: Vec<FilterRule>,
+    scope_stack: Vec<usize>,
 }
 
 impl FilterRuleList {
     pub fn new() -> Self {
-        Self { rules: Vec::new() }
+        Self {
+            rules: Vec::new(),
+            scope_stack: Vec::new(),
+        }
     }
 
     /// Add an exclude pattern (from `--exclude`).
@@ -221,6 +225,40 @@ impl FilterRuleList {
             let _ = self.add_exclude(pattern);
         }
     }
+
+    /// Save the current rule count for later restoration.
+    ///
+    /// Used by the directory walker for per-directory filter merge files (-F).
+    /// Call `pop_scope()` to remove rules added after this point.
+    pub fn push_scope(&mut self) {
+        self.scope_stack.push(self.rules.len());
+    }
+
+    /// Restore rule count to the last saved scope.
+    pub fn pop_scope(&mut self) {
+        if let Some(len) = self.scope_stack.pop() {
+            self.rules.truncate(len);
+        }
+    }
+
+    /// Merge filter rules from a file (for .rsync-filter merge files).
+    ///
+    /// Reads the file and adds each non-comment, non-blank line as a
+    /// filter rule using the standard `+ pattern` / `- pattern` syntax.
+    pub fn merge_filter_file(&mut self, path: &std::path::Path) -> Result<(), FilterError> {
+        let content = std::fs::read_to_string(path).map_err(|e| FilterError::ReadFile {
+            path: path.to_path_buf(),
+            source: std::sync::Arc::new(e),
+        })?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            self.add_rule(line)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +400,57 @@ mod tests {
         assert!(list
             .add_excludes_from_file(std::path::Path::new("/nonexistent"))
             .is_err());
+    }
+
+    #[test]
+    fn test_push_pop_scope() {
+        let mut list = FilterRuleList::new();
+        list.add_exclude("*.tmp").unwrap();
+        assert_eq!(list.len(), 1);
+
+        list.push_scope();
+        list.add_exclude("*.log").unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(!list.is_included(b"foo.log", false));
+
+        list.pop_scope();
+        assert_eq!(list.len(), 1);
+        assert!(list.is_included(b"foo.log", false)); // rule removed
+        assert!(!list.is_included(b"foo.tmp", false)); // original rule kept
+    }
+
+    #[test]
+    fn test_merge_filter_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".rsync-filter");
+        std::fs::write(&file, "- *.o\n+ important.o\n# comment\n").unwrap();
+
+        let mut list = FilterRuleList::new();
+        list.merge_filter_file(&file).unwrap();
+
+        // First rule is exclude *.o, second is include important.o
+        // But first match wins, so *.o matches first -> excluded
+        assert!(!list.is_included(b"foo.o", false));
+        // important.o also matches *.o first
+        assert!(!list.is_included(b"important.o", false));
+    }
+
+    #[test]
+    fn test_nested_scope() {
+        let mut list = FilterRuleList::new();
+        list.add_exclude("*.bak").unwrap();
+
+        list.push_scope();
+        list.add_exclude("*.tmp").unwrap();
+
+        list.push_scope();
+        list.add_exclude("*.log").unwrap();
+        assert_eq!(list.len(), 3);
+
+        list.pop_scope();
+        assert_eq!(list.len(), 2);
+
+        list.pop_scope();
+        assert_eq!(list.len(), 1);
     }
 }

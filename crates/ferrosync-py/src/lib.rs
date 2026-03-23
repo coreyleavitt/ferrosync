@@ -230,7 +230,9 @@ impl TransferOptions {
         backup = false,
         backup_dir = None,
         suffix = String::from("~"),
+        partial = false,
         partial_dir = None,
+        relative = false,
         append = false,
         files_from = None,
         one_file_system = false,
@@ -275,7 +277,9 @@ impl TransferOptions {
         backup: bool,
         backup_dir: Option<String>,
         suffix: String,
+        partial: bool,
         partial_dir: Option<String>,
+        relative: bool,
         append: bool,
         files_from: Option<String>,
         one_file_system: bool,
@@ -343,9 +347,11 @@ impl TransferOptions {
         if let Some(v) = backup_dir {
             builder = builder.backup_dir(PathBuf::from(v));
         }
+        builder = builder.partial(partial);
         if let Some(v) = partial_dir {
             builder = builder.partial_dir(PathBuf::from(v));
         }
+        builder = builder.relative(relative);
         if let Some(v) = files_from {
             builder = builder.files_from(PathBuf::from(v));
         }
@@ -514,10 +520,18 @@ impl TransferOptions {
         self.inner.suffix().to_owned()
     }
     #[getter]
+    fn partial(&self) -> bool {
+        self.inner.partial()
+    }
+    #[getter]
     fn partial_dir(&self) -> Option<String> {
         self.inner
             .partial_dir()
             .map(|p| p.to_string_lossy().into_owned())
+    }
+    #[getter]
+    fn relative(&self) -> bool {
+        self.inner.relative()
     }
     #[getter]
     fn append(&self) -> bool {

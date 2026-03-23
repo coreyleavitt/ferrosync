@@ -916,3 +916,92 @@ async fn test_transfer_chmod() {
         & 0o777;
     assert!(mode & 0o111 != 0, "chmod a+x should set execute bits");
 }
+
+// ---------------------------------------------------------------------------
+// Batch 3 flag tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_transfer_relative_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("base");
+    let src = base.join("sub/dir");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    std::fs::write(src.join("file.txt"), b"content\n").unwrap();
+
+    // Use /./ marker: source path base/./sub/dir means "sub/dir" is relative
+    let source_with_marker = format!("{}/./sub/dir", base.display());
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .relative(true)
+        .source(std::path::PathBuf::from(&source_with_marker))
+        .dest(&dst)
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // With -R and /./ marker, "sub/dir/file.txt" should be at dest.
+    assert!(
+        dst.join("sub/dir/file.txt").exists(),
+        "relative path with /./ marker should preserve structure"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_list_only() {
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"content\n", None)
+        .with_src_file("subdir/nested.txt", b"nested\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .list_only(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // --list-only should NOT transfer any files.
+    assert!(
+        !env.dst().join("file.txt").exists(),
+        "list-only should not create files"
+    );
+    assert!(
+        !env.dst().join("subdir").exists(),
+        "list-only should not create dirs"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_filter_merge_files() {
+    let env = TestEnv::builder()
+        .with_src_file("keep.txt", b"keep\n", None)
+        .with_src_file("skip.o", b"object\n", None)
+        .build();
+
+    // Create a .rsync-filter file in the source directory.
+    std::fs::write(env.src().join(".rsync-filter"), "- *.o\n").unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_times(true)
+        .filter_merge_files(1)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(env.dst().join("keep.txt").exists());
+    assert!(
+        !env.dst().join("skip.o").exists(),
+        "-F should apply .rsync-filter rules"
+    );
+}

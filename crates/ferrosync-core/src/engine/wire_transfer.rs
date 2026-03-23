@@ -238,6 +238,16 @@ pub trait FileOps: Send + Sync {
         let _ = entry;
         false
     }
+
+    /// Search for a similar file to use as delta basis (`--fuzzy`).
+    ///
+    /// When the destination file doesn't exist, searches the same directory
+    /// for files with matching size+mtime (exact match) or similar names
+    /// (fuzzy match) to use as a delta basis.
+    fn find_fuzzy_basis(&self, entry: &FileEntry) -> Option<FileData> {
+        let _ = entry;
+        None
+    }
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
@@ -298,16 +308,41 @@ impl FileOps for LocalFileOps {
         &self,
         entry: &FileEntry,
     ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
-        let dest_path = self.dest_path(entry);
+        let write_path = if let Some(partial_dir) = self.options.partial_dir() {
+            // --partial-dir: write to partial_dir/basename, rename in finish_file.
+            self.fs.mkdir(partial_dir, 0o755)?;
+            partial_dir.join(
+                entry
+                    .path()
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("partial")),
+            )
+        } else {
+            // --partial or default: write directly to final destination.
+            self.dest_path(entry)
+        };
         let mode = if self.options.preserve_perms() {
             Some(entry.mode & 0o7777)
         } else {
             None
         };
-        Ok(self.fs.write_file_stream(&dest_path, mode)?)
+        Ok(self.fs.write_file_stream(&write_path, mode)?)
     }
 
     fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError> {
+        // --partial-dir: move from partial dir to final destination.
+        if let Some(partial_dir) = self.options.partial_dir() {
+            let partial_path = partial_dir.join(
+                entry
+                    .path()
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("partial")),
+            );
+            let dest_path = self.dest_path(entry);
+            if partial_path != dest_path {
+                self.fs.rename(&partial_path, &dest_path)?;
+            }
+        }
         self.set_metadata(entry);
         Ok(())
     }
@@ -385,6 +420,42 @@ impl FileOps for LocalFileOps {
             }
         }
         false
+    }
+
+    fn find_fuzzy_basis(&self, entry: &FileEntry) -> Option<FileData> {
+        if !self.options.fuzzy() {
+            return None;
+        }
+        let dest_path = self.dest_path(entry);
+        let parent = dest_path.parent()?;
+        let target_name = dest_path.file_name()?;
+
+        let dir_entries = self.fs.read_dir(parent).ok()?;
+
+        // Pass 1: find file with same size and mtime.
+        for e in &dir_entries {
+            if e.metadata.len == entry.len && e.metadata.mtime == entry.mtime {
+                let path = parent.join(FileEntry::name_to_pathbuf(&e.name));
+                if let Ok(data) = self.fs.map_file(&path) {
+                    return Some(data);
+                }
+            }
+        }
+
+        // Pass 2: find file with most similar name.
+        let target_bytes = target_name.as_encoded_bytes();
+        let mut best_score = 0.5f64; // Minimum threshold
+        let mut best_path: Option<std::path::PathBuf> = None;
+
+        for e in &dir_entries {
+            let score = super::file_decision::fuzzy_score(target_bytes, &e.name);
+            if score > best_score {
+                best_score = score;
+                best_path = Some(parent.join(FileEntry::name_to_pathbuf(&e.name)));
+            }
+        }
+
+        best_path.and_then(|p| self.fs.map_file(&p).ok())
     }
 }
 
@@ -772,8 +843,13 @@ where
             continue;
         }
 
-        // Read existing basis file (if any).
+        // Read existing basis file (if any), with fuzzy fallback.
         let basis_data = file_ops.read_basis(entry);
+        let basis_data = if basis_data.is_empty() {
+            file_ops.find_fuzzy_basis(entry).unwrap_or(basis_data)
+        } else {
+            basis_data
+        };
 
         // Send generator output: NDX + iflags + sum_head + block sigs.
         let file_ndx = entry_ndx[idx];
@@ -953,8 +1029,13 @@ where
                 continue; // Don't send NDX to sender -- no delta needed
             }
 
-            // Read existing basis file for delta computation.
+            // Read existing basis file for delta computation, with fuzzy fallback.
             let basis_data = gen_file_ops.read_basis(entry);
+            let basis_data = if basis_data.is_empty() {
+                gen_file_ops.find_fuzzy_basis(entry).unwrap_or(basis_data)
+            } else {
+                basis_data
+            };
 
             // Compute block signatures.
             let sigs = sum::compute_signatures(&basis_data, &ctx);

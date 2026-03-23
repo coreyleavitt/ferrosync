@@ -110,6 +110,16 @@ impl FileEntry {
         Self::name_to_pathbuf(&self.name)
     }
 
+    /// Format this entry for `--list-only` output (rsync ls -l style).
+    pub fn format_list_entry(&self) -> String {
+        let mode_str = format_mode(self.mode);
+        let size = self.len;
+        let name = String::from_utf8_lossy(&self.name);
+        // Format mtime as YYYY/MM/DD HH:MM:SS
+        let mtime_str = format_mtime(self.mtime);
+        format!("{mode_str} {size:>12} {mtime_str} {name}")
+    }
+
     /// Convert a byte slice to a [`PathBuf`].
     ///
     /// On Unix, uses `OsStr::from_bytes` to preserve arbitrary byte sequences.
@@ -183,6 +193,163 @@ pub fn from_wire_mode(mode: u32) -> u32 {
 #[cfg(not(unix))]
 pub fn from_wire_mode(mode: u32) -> u32 {
     mode
+}
+
+/// Compute the entry name from a source path, optionally preserving the
+/// full relative path structure.
+///
+/// When `relative` is true (corresponding to rsync's `-R` / `--relative`
+/// flag), the entry name includes intermediate directories so that the
+/// receiver can recreate the source's directory hierarchy. If the path
+/// contains a `/./` marker (the rsync convention for splitting implied
+/// dirs from the transfer root), everything after the marker becomes the
+/// name. Otherwise the full path minus the leading `/` is used.
+///
+/// When `relative` is false, only the basename is returned (standard
+/// rsync behavior for single-source transfers).
+pub fn compute_entry_name(source: &std::path::Path, relative: bool) -> Vec<u8> {
+    if relative {
+        let s = source.to_string_lossy();
+        // Check for /./ marker (rsync convention for splitting the path).
+        if let Some(pos) = s.find("/./") {
+            let after = &s[pos + 3..];
+            return after.as_bytes().to_vec();
+        }
+        // Strip leading / if present, use full path.
+        let s = s.strip_prefix('/').unwrap_or(&s);
+        return s.as_bytes().to_vec();
+    }
+
+    // Default: basename only.
+    source
+        .file_name()
+        .map(|n| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                n.as_bytes().to_vec()
+            }
+            #[cfg(not(unix))]
+            {
+                n.to_string_lossy().as_bytes().to_vec()
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Format a Unix mode as a human-readable permission string (e.g., "drwxr-xr-x").
+fn format_mode(mode: u32) -> String {
+    let file_type = match mode & S_IFMT {
+        S_IFDIR => 'd',
+        0o120000 => 'l', // S_IFLNK
+        0o060000 => 'b', // S_IFBLK
+        0o020000 => 'c', // S_IFCHR
+        0o010000 => 'p', // S_IFIFO
+        0o140000 => 's', // S_IFSOCK
+        _ => '-',        // S_IFREG or unknown
+    };
+
+    let perms = mode & 0o7777;
+    let mut s = String::with_capacity(10);
+    s.push(file_type);
+    s.push(if perms & 0o400 != 0 { 'r' } else { '-' });
+    s.push(if perms & 0o200 != 0 { 'w' } else { '-' });
+    s.push(if perms & 0o4000 != 0 {
+        if perms & 0o100 != 0 {
+            's'
+        } else {
+            'S'
+        }
+    } else if perms & 0o100 != 0 {
+        'x'
+    } else {
+        '-'
+    });
+    s.push(if perms & 0o040 != 0 { 'r' } else { '-' });
+    s.push(if perms & 0o020 != 0 { 'w' } else { '-' });
+    s.push(if perms & 0o2000 != 0 {
+        if perms & 0o010 != 0 {
+            's'
+        } else {
+            'S'
+        }
+    } else if perms & 0o010 != 0 {
+        'x'
+    } else {
+        '-'
+    });
+    s.push(if perms & 0o004 != 0 { 'r' } else { '-' });
+    s.push(if perms & 0o002 != 0 { 'w' } else { '-' });
+    s.push(if perms & 0o1000 != 0 {
+        if perms & 0o001 != 0 {
+            't'
+        } else {
+            'T'
+        }
+    } else if perms & 0o001 != 0 {
+        'x'
+    } else {
+        '-'
+    });
+    s
+}
+
+/// Format a Unix timestamp as YYYY/MM/DD HH:MM:SS.
+fn format_mtime(mtime: i64) -> String {
+    // Simple UTC formatting without external dependencies.
+    // Approximate: days since epoch, then break into Y/M/D.
+    let secs_per_day = 86400i64;
+    let days = mtime / secs_per_day;
+    let time_of_day = (mtime % secs_per_day) as u32;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant).
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}/{m:02}/{d:02} {hours:02}:{minutes:02}:{seconds:02}")
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn test_format_mode_regular_file() {
+        assert_eq!(format_mode(0o100644), "-rw-r--r--");
+    }
+
+    #[test]
+    fn test_format_mode_directory() {
+        assert_eq!(format_mode(0o040755), "drwxr-xr-x");
+    }
+
+    #[test]
+    fn test_format_mode_executable() {
+        assert_eq!(format_mode(0o100755), "-rwxr-xr-x");
+    }
+
+    #[test]
+    fn test_format_mode_symlink() {
+        assert_eq!(format_mode(0o120777), "lrwxrwxrwx");
+    }
+
+    #[test]
+    fn test_format_mtime() {
+        // 2024-01-15 11:50:45 UTC = 1705319445
+        let s = format_mtime(1705319445);
+        assert_eq!(s, "2024/01/15 11:50:45");
+    }
 }
 
 #[cfg(test)]

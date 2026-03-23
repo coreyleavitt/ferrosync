@@ -317,6 +317,38 @@ pub fn compute_itemized(
     }
 }
 
+/// Compute a fuzzy similarity score between two byte strings.
+///
+/// Returns the length of the longest common subsequence divided by the
+/// maximum length. Returns 0.0 for empty inputs, 1.0 for identical strings.
+pub fn fuzzy_score(a: &[u8], b: &[u8]) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let max_len = a.len().max(b.len());
+    let lcs_len = longest_common_subsequence_len(a, b);
+    lcs_len as f64 / max_len as f64
+}
+
+fn longest_common_subsequence_len(a: &[u8], b: &[u8]) -> usize {
+    // Space-optimized LCS: only need previous and current row.
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut curr = vec![0usize; b.len() + 1];
+
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            curr[j] = if a[i - 1] == b[j - 1] {
+                prev[j - 1] + 1
+            } else {
+                prev[j].max(curr[j - 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.fill(0);
+    }
+    prev[b.len()]
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

@@ -168,9 +168,11 @@ async fn execute_transfer_impl(
             fs,
             source_paths,
             options.dir_mode(),
-            &filters,
+            &mut filters,
             options.one_file_system(),
             options.copy_links(),
+            options.relative(),
+            options.filter_merge_files(),
         )?
     };
     stats.total_files = source_entries.len() as u64;
@@ -178,6 +180,15 @@ async fn execute_transfer_impl(
     // Calculate total bytes for progress.
     let total_bytes: i64 = source_entries.iter().map(|e| e.entry.len).sum();
     progress.set_totals(stats.total_files, total_bytes as u64);
+
+    // --list-only: print file list and return without transferring.
+    if options.list_only() {
+        for item in &source_entries {
+            println!("{}", item.entry.format_list_entry());
+        }
+        stats.finish();
+        return Ok(TransferResult { stats });
+    }
 
     let delete_excluded = options.delete() == DeleteMode::Excluded;
     let delete_budget = delete::DeleteBudget::new(options.max_delete());
@@ -736,13 +747,16 @@ struct FileListItem {
 }
 
 /// Build a file list from one or more source paths.
+#[allow(clippy::too_many_arguments)]
 fn build_file_list(
     fs: &dyn FileSystem,
     source_paths: &[PathBuf],
     dir_mode: DirectoryMode,
-    filters: &FilterRuleList,
+    filters: &mut FilterRuleList,
     one_file_system: bool,
     copy_links: bool,
+    relative: bool,
+    filter_merge_files: u8,
 ) -> std::result::Result<Vec<FileListItem>, FsError> {
     let mut items = Vec::new();
     let mut index = 0i32;
@@ -759,20 +773,7 @@ fn build_file_list(
         } else {
             fs.lstat(source)?
         };
-        let name = source
-            .file_name()
-            .map(|n| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStrExt;
-                    n.as_bytes().to_vec()
-                }
-                #[cfg(not(unix))]
-                {
-                    n.to_string_lossy().as_bytes().to_vec()
-                }
-            })
-            .unwrap_or_default();
+        let name = entry::compute_entry_name(source, relative);
 
         if !filters.is_included(&name, meta.mode & S_IFMT == S_IFDIR) {
             continue;
@@ -786,15 +787,17 @@ fn build_file_list(
                     } else {
                         None
                     };
+                    let prefix = if relative { name.clone() } else { Vec::new() };
                     collect_directory(
                         fs,
                         source,
-                        &[],
+                        &prefix,
                         &mut items,
                         &mut index,
                         filters,
                         root_dev,
                         copy_links,
+                        filter_merge_files,
                     )?;
                 }
                 DirectoryMode::List => {
@@ -836,9 +839,10 @@ fn collect_directory(
     prefix: &[u8],
     items: &mut Vec<FileListItem>,
     index: &mut i32,
-    filters: &FilterRuleList,
+    filters: &mut FilterRuleList,
     root_dev: Option<u64>,
     copy_links: bool,
+    filter_merge_files: u8,
 ) -> std::result::Result<(), FsError> {
     // Check filesystem boundary (--one-file-system).
     #[cfg(unix)]
@@ -870,6 +874,19 @@ fn collect_directory(
         source_path: dir_path.to_path_buf(),
     });
     *index += 1;
+
+    // Per-directory filter merge (-F).
+    let filter_path = dir_path.join(".rsync-filter");
+    let merged = if filter_merge_files > 0 && filter_path.exists() {
+        filters.push_scope();
+        let _ = filters.merge_filter_file(&filter_path);
+        if filter_merge_files >= 2 {
+            let _ = filters.add_exclude(".rsync-filter");
+        }
+        true
+    } else {
+        false
+    };
 
     let mut entries: Vec<DirEntry> = fs.read_dir(dir_path)?;
     // Sort for deterministic order.
@@ -916,6 +933,7 @@ fn collect_directory(
                 filters,
                 root_dev,
                 copy_links,
+                filter_merge_files,
             )?;
         } else {
             let mut entry = child_meta.to_file_entry(child_name);
@@ -933,6 +951,10 @@ fn collect_directory(
             });
             *index += 1;
         }
+    }
+
+    if merged {
+        filters.pop_scope();
     }
 
     Ok(())
