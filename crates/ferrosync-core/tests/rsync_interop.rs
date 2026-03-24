@@ -1819,7 +1819,6 @@ async fn test_interop_pull_dry_run() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: append wire semantics need protocol investigation (#126)
 async fn test_interop_pull_append() {
     skip_if_no_ssh!();
 

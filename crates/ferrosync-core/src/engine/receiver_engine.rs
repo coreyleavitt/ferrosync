@@ -199,6 +199,29 @@ impl ReceiverEngine {
     ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
+        // --append: open file in append mode, preserving existing content.
+        // The remote sender sends only the tail portion as literal data;
+        // we append it after the existing bytes.
+        if self.options.append() || self.options.append_verify() {
+            // Ensure parent directory exists.
+            if let Some(parent) = dest_path.parent() {
+                if !self.fs.lexists(parent) {
+                    self.fs.mkdir(parent, 0o755)?;
+                }
+            }
+            let file = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&dest_path)
+                .map_err(|e| {
+                    crate::FerrosyncError::Fs(crate::error::FsError::Io {
+                        path: dest_path.clone(),
+                        source: std::sync::Arc::new(e),
+                    })
+                })?;
+            return Ok(Box::new(std::io::BufWriter::new(file)));
+        }
+
         // --backup: create backup BEFORE writing (before AtomicFileWriter
         // renames the temp file to dest on drop).
         if self.options.backup() && self.fs.lexists(&dest_path) {

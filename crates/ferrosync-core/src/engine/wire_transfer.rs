@@ -257,6 +257,11 @@ pub trait FileOps: Send + Sync {
     fn needs_buffered_receive(&self) -> bool {
         false
     }
+
+    /// Whether append mode is active (`--append` or `--append-verify`).
+    fn is_append_mode(&self) -> bool {
+        false
+    }
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
@@ -373,6 +378,10 @@ impl FileOps for LocalFileOps {
 
     fn needs_buffered_receive(&self) -> bool {
         self.engine.needs_buffered_receive()
+    }
+
+    fn is_append_mode(&self) -> bool {
+        self.engine.options().append() || self.engine.options().append_verify()
     }
 }
 
@@ -847,7 +856,14 @@ where
             varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
         }
         let sigs = sum::compute_signatures(&basis_data, &ctx);
-        sum::write_sums(&mut sig_buf, &sigs).await?;
+        if file_ops.is_append_mode() {
+            // Append mode: sender reads sum_head but skips block sigs
+            // (rsync sender.c receive_sums: if (append_mode > 0) return).
+            // Only send the header, not block checksums.
+            sum::write_sum_head(&mut sig_buf, &sigs.head).await?;
+        } else {
+            sum::write_sums(&mut sig_buf, &sigs).await?;
+        }
         mplex_out.write_data(&sig_buf).await?;
         mplex_out.flush().await?;
 
@@ -1057,7 +1073,11 @@ where
                 const ITEM_TRANSFER: u16 = 1 << 15;
                 varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
             }
-            sum::write_sums(&mut sig_buf, &sigs).await?;
+            if gen_file_ops.is_append_mode() {
+                sum::write_sum_head(&mut sig_buf, &sigs.head).await?;
+            } else {
+                sum::write_sums(&mut sig_buf, &sigs).await?;
+            }
             mplex_out.write_data(&sig_buf).await?;
             mplex_out.flush().await?;
 
