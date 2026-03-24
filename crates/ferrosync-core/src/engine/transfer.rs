@@ -489,6 +489,7 @@ async fn execute_transfer_impl(
                 &basis_data,
                 ctx,
                 options.compress_level(),
+                crate::protocol::handshake::CompressType::Zlib,
             )
             .await
             .map_err(crate::FerrosyncError::Protocol)?;

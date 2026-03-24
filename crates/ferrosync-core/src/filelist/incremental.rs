@@ -112,7 +112,7 @@ impl IncrementalReceiver {
         let mut hlink_decoder = HardLinkDecoder::new();
 
         loop {
-            match recv_file_entry(r, delta_state, opts, &mut hlink_decoder, &entries).await? {
+            match recv_file_entry(r, delta_state, opts, &mut hlink_decoder, &entries, None).await? {
                 ReadEntryResult::Entry(entry) => {
                     self.next_ndx += 1;
                     entries.push(entry);
@@ -180,6 +180,7 @@ impl IncrementalSender {
                 &mut hlink_encoder,
                 None,
                 i as i32,
+                None,
             )
             .await?;
             self.next_ndx += 1;

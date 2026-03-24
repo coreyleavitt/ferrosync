@@ -299,6 +299,8 @@ pub async fn client_handshake<R, W>(
     w: &mut W,
     am_sender: bool,
     use_compress: bool,
+    checksum_choice: Option<&str>,
+    compress_choice: Option<&str>,
 ) -> Result<NegotiatedProtocol>
 where
     R: AsyncRead + Unpin,
@@ -344,25 +346,37 @@ where
     };
 
     if do_negotiated_strings {
+        // Replace default lists with user-specified choices if set.
+        let our_checksum_list = checksum_choice.unwrap_or(CHECKSUM_LIST);
+        let our_compress_list = compress_choice.unwrap_or(COMPRESS_LIST);
+
         // Checksum negotiation: both sides exchange lists.
-        write_vstring(w, CHECKSUM_LIST).await?;
+        write_vstring(w, our_checksum_list).await?;
         let remote_checksums = read_vstring(r).await?;
 
         checksum = if am_sender {
-            negotiate_algorithm(CHECKSUM_LIST, &remote_checksums, ChecksumType::from_name)?
+            negotiate_algorithm(
+                our_checksum_list,
+                &remote_checksums,
+                ChecksumType::from_name,
+            )?
         } else {
-            negotiate_algorithm(&remote_checksums, CHECKSUM_LIST, ChecksumType::from_name)?
+            negotiate_algorithm(
+                &remote_checksums,
+                our_checksum_list,
+                ChecksumType::from_name,
+            )?
         };
 
         // Compression negotiation (only if compressing).
         if use_compress {
-            write_vstring(w, COMPRESS_LIST).await?;
+            write_vstring(w, our_compress_list).await?;
             let remote_compress = read_vstring(r).await?;
 
             compress = if am_sender {
-                negotiate_algorithm(COMPRESS_LIST, &remote_compress, CompressType::from_name)?
+                negotiate_algorithm(our_compress_list, &remote_compress, CompressType::from_name)?
             } else {
-                negotiate_algorithm(&remote_compress, COMPRESS_LIST, CompressType::from_name)?
+                negotiate_algorithm(&remote_compress, our_compress_list, CompressType::from_name)?
             };
         }
 
@@ -635,6 +649,8 @@ mod tests {
             &mut client_write,
             false, // am_sender = false (pulling)
             false, // no compression
+            None,  // checksum_choice
+            None,  // compress_choice
         )
         .await
         .unwrap();

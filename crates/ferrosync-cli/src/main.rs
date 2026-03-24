@@ -350,6 +350,26 @@ struct TransferFlags {
     #[arg(long)]
     fake_super: bool,
 
+    /// Override checksum algorithm (e.g., blake3, xxh3, md5)
+    #[arg(long, visible_alias = "cc", value_name = "NAME")]
+    checksum_choice: Option<String>,
+
+    /// Override compression algorithm (e.g., zstd, lz4, zlib)
+    #[arg(long, visible_alias = "zc", value_name = "NAME")]
+    compress_choice: Option<String>,
+
+    /// Filename encoding conversion charset
+    #[arg(long, value_name = "CHARSET")]
+    iconv: Option<String>,
+
+    /// Record transfer to batch file
+    #[arg(long, value_name = "FILE")]
+    write_batch: Option<PathBuf>,
+
+    /// Replay transfer from batch file
+    #[arg(long, value_name = "FILE")]
+    read_batch: Option<PathBuf>,
+
     /// Append data to shorter files
     #[arg(long)]
     append: bool,
@@ -705,6 +725,21 @@ impl TransferFlags {
             .preserve_acls(self.acls)
             .preserve_xattrs(self.xattrs)
             .fake_super(self.fake_super);
+        if let Some(cc) = self.checksum_choice {
+            builder = builder.checksum_choice(cc);
+        }
+        if let Some(zc) = self.compress_choice {
+            builder = builder.compress_choice(zc);
+        }
+        if let Some(charset) = self.iconv {
+            builder = builder.iconv(charset);
+        }
+        if let Some(wb) = self.write_batch {
+            builder = builder.write_batch(wb);
+        }
+        if let Some(rb) = self.read_batch {
+            builder = builder.read_batch(rb);
+        }
         if let Some(ff) = self.files_from {
             builder = builder.files_from(ff);
         }

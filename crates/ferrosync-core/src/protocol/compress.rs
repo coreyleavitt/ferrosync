@@ -14,6 +14,7 @@ use std::io::Write;
 use zstd::stream::raw::Operation;
 
 use crate::error::ProtocolError;
+use crate::protocol::handshake::CompressType;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -312,6 +313,16 @@ pub enum CompressorType {
 }
 
 impl Compressor {
+    /// Create a compressor for the negotiated compression type.
+    pub fn from_type(compress_type: CompressType, level: u32) -> Result<Self> {
+        match compress_type {
+            CompressType::Zlib | CompressType::Zlibx => Ok(Self::new(level)),
+            CompressType::Zstd => Self::new_zstd(level as i32),
+            CompressType::Lz4 => Ok(Self::new_lz4()),
+            CompressType::None => Ok(Self::new(level)), // fallback, shouldn't happen
+        }
+    }
+
     /// Create a new zlib compressor (backward-compatible constructor).
     pub fn new(level: u32) -> Self {
         Self {
@@ -385,6 +396,16 @@ enum DecompressorKind {
 }
 
 impl Decompressor {
+    /// Create a decompressor for the negotiated compression type.
+    pub fn from_type(compress_type: CompressType) -> Result<Self> {
+        match compress_type {
+            CompressType::Zlib | CompressType::Zlibx => Ok(Self::new()),
+            CompressType::Zstd => Self::new_zstd(),
+            CompressType::Lz4 => Ok(Self::new_lz4()),
+            CompressType::None => Ok(Self::new()), // fallback
+        }
+    }
+
     /// Create a new zlib decompressor (backward-compatible constructor).
     pub fn new() -> Self {
         Self {

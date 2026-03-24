@@ -231,6 +231,7 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     opts: &FileListOptions,
     hlink_decoder: &mut HardLinkDecoder,
     prev_entries: &[FileEntry],
+    iconv: Option<&crate::filelist::iconv::FilenameConverter>,
 ) -> Result<ReadEntryResult> {
     // Read XMIT flags.
     let flags = match opts.wire.flags_codec {
@@ -310,6 +311,13 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
         name.resize(start + suffix_len, 0);
         r.read_exact(&mut name[start..]).await?;
     }
+
+    // --- Filename encoding conversion (--iconv) ---
+    let name = if let Some(conv) = iconv {
+        conv.from_wire(&name)
+    } else {
+        name
+    };
 
     // --- Hard-link back-reference (proto >= 28) ---
     if opts.preserve_hard_links && (flags & XMIT_HLINKED) != 0 {
@@ -521,6 +529,7 @@ async fn read_rdev<R: AsyncRead + Unpin>(
 // ---------------------------------------------------------------------------
 
 /// Encode a file entry to the wire format.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     w: &mut W,
     entry: &FileEntry,
@@ -529,9 +538,17 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     hlink_encoder: &mut HardLinkEncoder,
     hlink_info: Option<&HardLinkInfo>,
     entry_index: i32,
+    iconv: Option<&crate::filelist::iconv::FilenameConverter>,
 ) -> Result<()> {
     // Raw version for varint functions that still require it.
     let codec = opts.wire.int_codec;
+
+    // --- Filename encoding conversion (--iconv) ---
+    let wire_name = if let Some(conv) = iconv {
+        conv.to_wire(&entry.name)
+    } else {
+        entry.name.clone()
+    };
 
     // --- Hard-link action ---
     let hlink_action = if opts.preserve_hard_links {
@@ -559,11 +576,11 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     }
 
     // Filename prefix compression.
-    let common_prefix = common_prefix_len(&state.prev_name, &entry.name);
+    let common_prefix = common_prefix_len(&state.prev_name, &wire_name);
     if common_prefix > 0 {
         flags |= XMIT_SAME_NAME;
     }
-    let suffix_len = entry.name.len() - common_prefix;
+    let suffix_len = wire_name.len() - common_prefix;
     if suffix_len > 255 {
         flags |= XMIT_LONG_NAME;
     }
@@ -632,13 +649,14 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     } else {
         write_byte(w, suffix_len as u8).await?;
     }
-    w.write_all(&entry.name[common_prefix..]).await?;
+    w.write_all(&wire_name[common_prefix..]).await?;
 
     // --- Hard-link index ---
     if let HardLinkAction::DuplicateOf(first_ndx) = hlink_action {
         write_varint(w, first_ndx as u32).await?;
         // Duplicate: skip remaining fields, update delta state and return.
         update_delta_state(state, entry);
+        state.prev_name = wire_name;
         return Ok(());
     }
     if let HardLinkAction::FirstOccurrence = hlink_action {
@@ -716,6 +734,7 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
             w.write_all(&padded).await?;
             // Update delta state and return.
             update_delta_state(state, entry);
+            state.prev_name = wire_name;
             return Ok(());
         };
         w.write_all(csum).await?;
@@ -723,6 +742,7 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
 
     // Update delta state.
     update_delta_state(state, entry);
+    state.prev_name = wire_name;
     Ok(())
 }
 
@@ -879,6 +899,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -892,6 +913,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -913,6 +935,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -960,6 +983,7 @@ mod tests {
                 &mut HardLinkEncoder::new(),
                 None,
                 0,
+                None,
             )
             .await
             .unwrap();
@@ -975,6 +999,7 @@ mod tests {
                 &opts,
                 &mut HardLinkDecoder::new(),
                 &[],
+                None,
             )
             .await
             .unwrap()
@@ -1012,6 +1037,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1025,6 +1051,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1069,6 +1096,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1082,6 +1110,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1122,6 +1151,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1135,6 +1165,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1175,6 +1206,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1188,6 +1220,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1228,6 +1261,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1240,6 +1274,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             1,
+            None,
         )
         .await
         .unwrap();
@@ -1260,6 +1295,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1273,6 +1309,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1308,6 +1345,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1321,6 +1359,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1347,6 +1386,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1375,6 +1415,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()
@@ -1417,6 +1458,7 @@ mod tests {
             &mut HardLinkEncoder::new(),
             None,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1430,6 +1472,7 @@ mod tests {
             &opts,
             &mut HardLinkDecoder::new(),
             &[],
+            None,
         )
         .await
         .unwrap()

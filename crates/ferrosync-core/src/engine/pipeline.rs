@@ -117,6 +117,7 @@ pub async fn transfer_file_compressed(
     basis_data: &[u8],
     ctx: &ProtocolContext,
     compress_level: u32,
+    compress_type: crate::protocol::handshake::CompressType,
 ) -> Result<Vec<u8>> {
     let (gen_write, gen_read) = tokio::io::duplex(64 * 1024);
     let (send_write, send_read) = tokio::io::duplex(64 * 1024);
@@ -139,7 +140,7 @@ pub async fn transfer_file_compressed(
     let send_handle = tokio::spawn(async move {
         let mut r = gen_read;
         let mut w = send_write;
-        let compressor = Compressor::new(compress_level);
+        let compressor = Compressor::from_type(compress_type, compress_level)?;
 
         let result = async {
             let idx = generator::recv_file_index(&mut r).await?;
@@ -180,7 +181,7 @@ pub async fn transfer_file_compressed(
             700
         };
 
-        let decompressor = Decompressor::new();
+        let decompressor = Decompressor::from_type(compress_type)?;
         let mut reader = crate::delta::token::CompressedTokenReader::new(decompressor);
         receiver::recv_file_delta_with(&mut r, &mut reader, &recv_basis, blength, &ctx).await
     });
@@ -197,7 +198,7 @@ pub async fn transfer_file_compressed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::handshake::ChecksumType;
+    use crate::protocol::handshake::{ChecksumType, CompressType};
 
     #[tokio::test]
     async fn test_transfer_new_file() {
@@ -313,6 +314,7 @@ mod tests {
             b"",
             &ProtocolContext::test_default(42, ChecksumType::Md5),
             6,
+            CompressType::Zlib,
         )
         .await
         .unwrap();
@@ -334,6 +336,7 @@ mod tests {
             &basis,
             &ProtocolContext::test_default(7, ChecksumType::Md5),
             6,
+            CompressType::Zlib,
         )
         .await
         .unwrap();
@@ -348,6 +351,7 @@ mod tests {
             &data,
             &ProtocolContext::test_default(99, ChecksumType::Md5),
             6,
+            CompressType::Zlib,
         )
         .await
         .unwrap();

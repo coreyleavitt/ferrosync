@@ -238,6 +238,15 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     if opts.fake_super() {
         args.push("--fake-super".into());
     }
+    if let Some(cc) = opts.checksum_choice() {
+        args.push(format!("--checksum-choice={cc}"));
+    }
+    if let Some(zc) = opts.compress_choice() {
+        args.push(format!("--compress-choice={zc}"));
+    }
+    if let Some(charset) = opts.iconv() {
+        args.push(format!("--iconv={charset}"));
+    }
 
     match opts.delete() {
         DeleteMode::Before => args.push("--delete-before".into()),
@@ -427,6 +436,18 @@ pub fn parse_server_args(
             "--fake-super" => {
                 builder = builder.fake_super(true);
             }
+            _ if opt.starts_with("--checksum-choice=") => {
+                let name = &opt["--checksum-choice=".len()..];
+                builder = builder.checksum_choice(name);
+            }
+            _ if opt.starts_with("--compress-choice=") => {
+                let name = &opt["--compress-choice=".len()..];
+                builder = builder.compress_choice(name);
+            }
+            _ if opt.starts_with("--iconv=") => {
+                let charset = &opt["--iconv=".len()..];
+                builder = builder.iconv(charset);
+            }
             "--remove-source-files" => {
                 builder = builder.remove_source_files(true);
             }
@@ -572,6 +593,8 @@ impl<T: Transport> SyncSession<T> {
             &mut streams.writer,
             am_sender,
             options.compress(),
+            options.checksum_choice(),
+            options.compress_choice(),
         )
         .await
         .map_err(crate::FerrosyncError::Protocol)?;

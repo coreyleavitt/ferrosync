@@ -180,6 +180,17 @@ pub struct TransferOptions {
     preserve_xattrs: bool,
     fake_super: bool,
 
+    // --- Algorithm negotiation ---
+    checksum_choice: Option<String>,
+    compress_choice: Option<String>,
+
+    // --- Filename encoding ---
+    iconv: Option<String>,
+
+    // --- Batch mode ---
+    write_batch: Option<PathBuf>,
+    read_batch: Option<PathBuf>,
+
     // --- Misc ---
     one_file_system: bool,
     numeric_ids: bool,
@@ -256,6 +267,11 @@ impl Default for TransferOptions {
             preserve_acls: false,
             preserve_xattrs: false,
             fake_super: false,
+            checksum_choice: None,
+            compress_choice: None,
+            iconv: None,
+            write_batch: None,
+            read_batch: None,
             one_file_system: false,
             numeric_ids: false,
             sparse: false,
@@ -554,6 +570,26 @@ impl TransferOptions {
     /// Store privileged metadata in xattrs (`--fake-super`).
     pub fn fake_super(&self) -> bool {
         self.fake_super
+    }
+    /// Override checksum algorithm (`--checksum-choice`).
+    pub fn checksum_choice(&self) -> Option<&str> {
+        self.checksum_choice.as_deref()
+    }
+    /// Override compression algorithm (`--compress-choice`).
+    pub fn compress_choice(&self) -> Option<&str> {
+        self.compress_choice.as_deref()
+    }
+    /// Filename encoding conversion charset (`--iconv`).
+    pub fn iconv(&self) -> Option<&str> {
+        self.iconv.as_deref()
+    }
+    /// Record transfer to batch file (`--write-batch`).
+    pub fn write_batch(&self) -> Option<&PathBuf> {
+        self.write_batch.as_ref()
+    }
+    /// Replay transfer from batch file (`--read-batch`).
+    pub fn read_batch(&self) -> Option<&PathBuf> {
+        self.read_batch.as_ref()
     }
     /// Don't cross filesystem boundaries (`-x`).
     pub fn one_file_system(&self) -> bool {
@@ -938,6 +974,36 @@ impl TransferOptionsBuilder {
     /// Enable or disable fake-super mode (`--fake-super`).
     pub fn fake_super(mut self, v: bool) -> Self {
         self.opts.fake_super = v;
+        self
+    }
+
+    /// Set the checksum algorithm choice (`--checksum-choice`).
+    pub fn checksum_choice(mut self, name: impl Into<String>) -> Self {
+        self.opts.checksum_choice = Some(name.into());
+        self
+    }
+
+    /// Set the compression algorithm choice (`--compress-choice`).
+    pub fn compress_choice(mut self, name: impl Into<String>) -> Self {
+        self.opts.compress_choice = Some(name.into());
+        self
+    }
+
+    /// Set the filename encoding charset (`--iconv`).
+    pub fn iconv(mut self, charset: impl Into<String>) -> Self {
+        self.opts.iconv = Some(charset.into());
+        self
+    }
+
+    /// Set the batch recording file path (`--write-batch`).
+    pub fn write_batch(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.write_batch = Some(path.into());
+        self
+    }
+
+    /// Set the batch replay file path (`--read-batch`).
+    pub fn read_batch(mut self, path: impl Into<PathBuf>) -> Self {
+        self.opts.read_batch = Some(path.into());
         self
     }
 

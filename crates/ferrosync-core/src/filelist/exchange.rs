@@ -74,6 +74,7 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
             &mut hlink_encoder,
             None,
             i as i32,
+            None,
         )
         .await?;
     }
@@ -115,6 +116,7 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
             &mut hlink_encoder,
             None,
             i as i32,
+            None,
         )
         .await?;
         sender.next_ndx += 1;
@@ -192,8 +194,15 @@ async fn recv_file_list_batch<R: AsyncRead + Unpin>(
     let mut delta_state = DeltaState::default();
     let mut hlink_decoder = HardLinkDecoder::new();
 
-    while let ReadEntryResult::Entry(entry) =
-        recv_file_entry(r, &mut delta_state, opts, &mut hlink_decoder, &entries).await?
+    while let ReadEntryResult::Entry(entry) = recv_file_entry(
+        r,
+        &mut delta_state,
+        opts,
+        &mut hlink_decoder,
+        &entries,
+        None,
+    )
+    .await?
     {
         entries.push(entry);
     }
@@ -321,7 +330,16 @@ async fn recv_file_list_batch_streaming<R: AsyncRead + Unpin>(
 
     #[allow(clippy::while_let_loop)]
     loop {
-        match recv_file_entry(r, &mut delta_state, opts, &mut hlink_decoder, &entries).await? {
+        match recv_file_entry(
+            r,
+            &mut delta_state,
+            opts,
+            &mut hlink_decoder,
+            &entries,
+            None,
+        )
+        .await?
+        {
             ReadEntryResult::Entry(entry) => {
                 entries.push(entry.clone());
                 if tx.send(entry).await.is_err() {

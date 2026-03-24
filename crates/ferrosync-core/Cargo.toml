@@ -30,6 +30,7 @@ webpki-roots = { workspace = true }
 rustls-pki-types = { workspace = true }
 snow = { workspace = true }
 quinn = { workspace = true }
+encoding_rs = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 filetime = "0.2"
