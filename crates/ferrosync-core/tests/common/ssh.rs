@@ -194,3 +194,110 @@ pub async fn pull_with_opts(
         Err(_) => panic!("SSH pull timed out after {timeout_secs}s"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reverse interop helpers: rsync client → ferrosync --server
+// ---------------------------------------------------------------------------
+
+/// Result of running an rsync CLI command.
+pub struct RsyncResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Check if ferrosync binary is available on the SSH target.
+pub async fn ferrosync_available_on_target() -> bool {
+    let output = ssh_cmd(&["which", "ferrosync"]).await;
+    !output.trim().is_empty()
+}
+
+/// SSH command prefix for rsync -e flag.
+fn rsync_ssh_args() -> String {
+    "ssh -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR".to_string()
+}
+
+/// Push local files to remote using rsync client → ferrosync --server.
+pub async fn rsync_push(
+    local_src: &Path,
+    remote_dest: &str,
+    extra_args: &[&str],
+    timeout_secs: u64,
+) -> RsyncResult {
+    let host = ssh_host();
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("rsync")
+            .arg("-a")
+            .arg("--rsync-path=ferrosync")
+            .args(extra_args)
+            .arg("-e")
+            .arg(rsync_ssh_args())
+            .arg(format!("{}/", local_src.display()))
+            .arg(format!("root@{host}:{remote_dest}/"))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("rsync push timed out after {timeout_secs}s"))
+    .expect("failed to run rsync command");
+
+    RsyncResult {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    }
+}
+
+/// Pull remote files to local using rsync client → ferrosync --server.
+pub async fn rsync_pull(
+    remote_src: &str,
+    local_dest: &Path,
+    extra_args: &[&str],
+    timeout_secs: u64,
+) -> RsyncResult {
+    let host = ssh_host();
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("rsync")
+            .arg("-a")
+            .arg("--rsync-path=ferrosync")
+            .args(extra_args)
+            .arg("-e")
+            .arg(rsync_ssh_args())
+            .arg(format!("root@{host}:{remote_src}/"))
+            .arg(format!("{}/", local_dest.display()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("rsync pull timed out after {timeout_secs}s"))
+    .expect("failed to run rsync command");
+
+    RsyncResult {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    }
+}
+
+/// Skip macro for reverse interop tests.
+///
+/// Skips if SSH tests are not enabled or if ferrosync binary is not
+/// available on the SSH target.
+#[macro_export]
+macro_rules! skip_if_no_reverse {
+    () => {
+        if !$crate::common::ssh::ssh_test_enabled() {
+            eprintln!("skipping: FERROSYNC_SSH_TEST not set");
+            return;
+        }
+        $crate::common::ssh::init_tracing();
+        if !$crate::common::ssh::ferrosync_available_on_target().await {
+            eprintln!("skipping: ferrosync not found on SSH target (run cargo build -p ferrosync-cli first)");
+            return;
+        }
+    };
+}

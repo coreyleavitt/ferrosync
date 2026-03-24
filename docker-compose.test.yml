@@ -1,3 +1,6 @@
+volumes:
+  build-cache:
+
 services:
   ferrosync-dev:
     build:
@@ -5,6 +8,7 @@ services:
       dockerfile: Dockerfile.dev
     volumes:
       - ".:/workspace"
+      - build-cache:/tmp/ferrosync-target
     depends_on:
       rsync-ssh-target:
         condition: service_started
@@ -18,3 +22,5 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.rsync-ssh
+    volumes:
+      - build-cache:/tmp/ferrosync-target:ro
