@@ -262,7 +262,12 @@ async fn write_vstring<W: AsyncWrite + Unpin>(w: &mut W, s: &str) -> Result<()> 
 const CHECKSUM_LIST: &str = "blake3 xxh128 xxh3 md5 md4 none";
 
 /// Our supported compression algorithms in priority order.
-const COMPRESS_LIST: &str = "zstd lz4 zlibx zlib none";
+///
+/// Only zlib-family algorithms are listed because our token codec only
+/// implements the DEFLATED_DATA wire framing. rsync uses separate
+/// `send_zstd_token` / `recv_zstd_token` functions with a different
+/// wire format that we don't support yet.
+const COMPRESS_LIST: &str = "zlibx zlib none";
 
 /// Negotiate an algorithm: pick the first entry from the sender's list that
 /// the receiver also supports.

@@ -1340,7 +1340,6 @@ async fn test_interop_push_compress() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: compression token framing needs investigation (#124)
 async fn test_interop_pull_compress() {
     skip_if_no_ssh!();
 

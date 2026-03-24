@@ -106,8 +106,12 @@ impl ZlibDecompressor {
         }
     }
 
-    fn decompress(&mut self, compressed: &[u8], expected_len: usize) -> Result<Vec<u8>> {
-        let mut output = vec![0u8; expected_len + expected_len / 10 + 64];
+    fn decompress(&mut self, compressed: &[u8], _expected_len: usize) -> Result<Vec<u8>> {
+        // Always consume ALL input to ensure the zlib stream reaches a sync
+        // point. Exiting early with unconsumed input (including the
+        // Z_SYNC_FLUSH trailer) corrupts the decompressor state for the
+        // next frame.
+        let mut output = vec![0u8; compressed.len() * 4 + 256];
 
         let before_in = self.inner.total_in();
         let before_out = self.inner.total_out();
@@ -116,7 +120,7 @@ impl ZlibDecompressor {
             let in_consumed = (self.inner.total_in() - before_in) as usize;
             let out_produced = (self.inner.total_out() - before_out) as usize;
 
-            if output.len() - out_produced < 64 {
+            if output.len() - out_produced < 256 {
                 output.resize(output.len() * 2, 0);
             }
 
@@ -129,12 +133,10 @@ impl ZlibDecompressor {
                 )
                 .map_err(|e| ProtocolError::Io(std::sync::Arc::new(std::io::Error::other(e))))?;
 
-            let total_out = (self.inner.total_out() - before_out) as usize;
-
             match status {
                 Status::Ok | Status::BufError => {
-                    if in_consumed >= compressed.len() || total_out >= expected_len {
-                        break;
+                    if in_consumed >= compressed.len() {
+                        break; // All input consumed -- sync point reached.
                     }
                 }
                 Status::StreamEnd => break,
