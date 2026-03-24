@@ -30,12 +30,15 @@ pub struct ReceiverEngine {
     options: TransferOptions,
     chmod_spec: Option<ChmodSpec>,
     resolved_link_dests: Vec<PathBuf>,
+    /// Backup directory resolved relative to dest (if relative path given).
+    resolved_backup_dir: Option<PathBuf>,
 }
 
 impl ReceiverEngine {
     /// Create a new receiver engine.
     ///
-    /// Resolves `--link-dest` directories and parses `--chmod` specs upfront.
+    /// Resolves `--link-dest` directories, `--backup-dir` path, and
+    /// parses `--chmod` specs upfront.
     pub fn new(fs: Arc<dyn FileSystem>, dest: PathBuf, options: TransferOptions) -> Self {
         let resolved_link_dests = file_decision::resolve_link_dest_dirs(options.link_dest(), &dest);
         let chmod_spec = if !options.chmod().is_empty() {
@@ -43,13 +46,26 @@ impl ReceiverEngine {
         } else {
             None
         };
+        let resolved_backup_dir = options.backup_dir().map(|bd| {
+            if bd.is_relative() {
+                dest.join(bd)
+            } else {
+                bd.clone()
+            }
+        });
         Self {
             fs,
             dest,
             options,
             chmod_spec,
             resolved_link_dests,
+            resolved_backup_dir,
         }
+    }
+
+    /// Resolved backup directory (relative paths joined to dest).
+    pub fn backup_dir(&self) -> Option<&Path> {
+        self.resolved_backup_dir.as_deref()
     }
 
     /// Resolve the destination path for an entry.
@@ -127,7 +143,7 @@ impl ReceiverEngine {
                 &*self.fs,
                 &dest_path,
                 self.options.suffix(),
-                self.options.backup_dir().map(|p| p.as_path()),
+                self.backup_dir(),
             )?;
         }
 
@@ -183,6 +199,17 @@ impl ReceiverEngine {
     ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
+        // --backup: create backup BEFORE writing (before AtomicFileWriter
+        // renames the temp file to dest on drop).
+        if self.options.backup() && self.fs.lexists(&dest_path) {
+            file_decision::create_backup(
+                &*self.fs,
+                &dest_path,
+                self.options.suffix(),
+                self.backup_dir(),
+            )?;
+        }
+
         let write_path = if self.options.inplace() {
             dest_path.clone()
         } else if let Some(partial_dir) = self.options.partial_dir() {
@@ -227,17 +254,10 @@ impl ReceiverEngine {
     ) -> std::result::Result<(), crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
-        // FIRST: create backup of existing dest file before any overwrite/rename.
-        if self.options.backup() && self.fs.lexists(&dest_path) {
-            file_decision::create_backup(
-                &*self.fs,
-                &dest_path,
-                self.options.suffix(),
-                self.options.backup_dir().map(|p| p.as_path()),
-            )?;
-        }
+        // Backup was already created in create_writer() (before the write).
+        // Proceed with partial-dir rename and metadata.
 
-        // THEN: --partial-dir rename (this overwrites dest with the new content).
+        // --partial-dir rename (this overwrites dest with the new content).
         if let Some(partial_dir) = self.options.partial_dir() {
             let partial_path = partial_dir.join(
                 dest_path
@@ -403,6 +423,7 @@ pub struct ReceiverRef<'a> {
     options: &'a TransferOptions,
     chmod_spec: Option<ChmodSpec>,
     resolved_link_dests: Vec<PathBuf>,
+    resolved_backup_dir: Option<PathBuf>,
 }
 
 impl<'a> ReceiverRef<'a> {
@@ -414,13 +435,26 @@ impl<'a> ReceiverRef<'a> {
         } else {
             None
         };
+        let resolved_backup_dir = options.backup_dir().map(|bd| {
+            if bd.is_relative() {
+                dest.join(bd)
+            } else {
+                bd.clone()
+            }
+        });
         Self {
             fs,
             dest,
             options,
             chmod_spec,
             resolved_link_dests,
+            resolved_backup_dir,
         }
+    }
+
+    /// Resolved backup directory.
+    pub fn backup_dir(&self) -> Option<&Path> {
+        self.resolved_backup_dir.as_deref()
     }
 
     /// Resolve the destination path for an entry.
@@ -480,7 +514,7 @@ impl<'a> ReceiverRef<'a> {
                 self.fs,
                 &dest_path,
                 self.options.suffix(),
-                self.options.backup_dir().map(|p| p.as_path()),
+                self.backup_dir(),
             )?;
         }
 

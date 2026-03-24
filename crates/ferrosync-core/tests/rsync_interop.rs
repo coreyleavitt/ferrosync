@@ -1312,7 +1312,6 @@ async fn test_interop_pull_whole_file() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_push_compress() {
     skip_if_no_ssh!();
 
@@ -1341,7 +1340,7 @@ async fn test_interop_push_compress() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
+#[ignore] // TODO: compression token framing needs investigation (#124)
 async fn test_interop_pull_compress() {
     skip_if_no_ssh!();
 
@@ -1372,7 +1371,6 @@ async fn test_interop_pull_compress() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_pull_update() {
     skip_if_no_ssh!();
 
@@ -1405,7 +1403,6 @@ async fn test_interop_pull_update() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_pull_inplace() {
     skip_if_no_ssh!();
 
@@ -1441,7 +1438,6 @@ async fn test_interop_pull_inplace() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_pull_sparse() {
     skip_if_no_ssh!();
 
@@ -1485,7 +1481,6 @@ async fn test_interop_pull_sparse() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_push_numeric_ids() {
     skip_if_no_ssh!();
 
@@ -1579,7 +1574,6 @@ async fn test_interop_pull_exclude() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_pull_include_exclude() {
     skip_if_no_ssh!();
 
@@ -1654,7 +1648,6 @@ async fn test_interop_pull_filter() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_pull_compare_dest() {
     skip_if_no_ssh!();
 
@@ -1726,7 +1719,6 @@ async fn test_interop_pull_copy_dest() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
 async fn test_interop_pull_backup() {
     skip_if_no_ssh!();
 
@@ -1745,14 +1737,16 @@ async fn test_interop_pull_backup() {
         b"version one\n"
     );
 
-    // Push v2.
+    // Push v2 with different mtime to ensure transfer isn't skipped.
     std::fs::write(env.src().join("file.txt"), b"version two\n").unwrap();
+    set_mtime(&env.src().join("file.txt"), 1_800_000_000);
     push_archive(&env.src(), &remote_dir, 30).await;
 
-    // Pull with backup.
+    // Pull with backup and checksum mode to force retransfer.
     let bak_dir = env.dst().join("bak");
     let opts = ferrosync_core::options::TransferOptions::builder()
         .archive()
+        .checksum_mode(true)
         .backup(true)
         .backup_dir(&bak_dir)
         .suffix(".old")
@@ -1770,7 +1764,7 @@ async fn test_interop_pull_backup() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
+#[ignore] // TODO: push dry-run protocol phase exchange (#125)
 async fn test_interop_push_dry_run() {
     skip_if_no_ssh!();
 
@@ -1827,7 +1821,7 @@ async fn test_interop_pull_dry_run() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: wire-level support needed
+#[ignore] // TODO: append wire semantics need protocol investigation (#126)
 async fn test_interop_pull_append() {
     skip_if_no_ssh!();
 
@@ -1873,13 +1867,15 @@ async fn test_interop_pull_itemize() {
     let remote_path = format!("{remote_dir}/");
     pull_archive(&remote_path, &env.dst(), 30).await;
 
-    // Push updated version.
+    // Push updated version with different mtime to ensure transfer.
     std::fs::write(env.src().join("file.txt"), b"modified\n").unwrap();
+    set_mtime(&env.src().join("file.txt"), 1_800_000_000);
     push_archive(&env.src(), &remote_dir, 30).await;
 
-    // Pull with itemize-changes.
+    // Pull with itemize-changes and checksum to force retransfer.
     let opts = ferrosync_core::options::TransferOptions::builder()
         .archive()
+        .checksum_mode(true)
         .itemize_changes(true)
         .dest(env.dst())
         .build();

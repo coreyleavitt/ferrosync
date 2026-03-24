@@ -51,6 +51,13 @@ pub fn quick_check_skip(
         Err(_) => return false, // dest doesn't exist, must transfer
     };
 
+    // --update: skip if dest is newer (regardless of size).
+    // Must be checked before size comparison -- rsync skips when
+    // the receiver is newer even if the files differ in size.
+    if options.update() && dest_meta.mtime > src_entry.mtime {
+        return true;
+    }
+
     // Size differs -> must transfer.
     if dest_meta.len != src_entry.len {
         return false;
@@ -58,11 +65,6 @@ pub fn quick_check_skip(
 
     // --size-only: sizes match -> skip (don't check mtime)
     if options.size_only() {
-        return true;
-    }
-
-    // --update: skip if dest is newer.
-    if options.update() && dest_meta.mtime > src_entry.mtime {
         return true;
     }
 
