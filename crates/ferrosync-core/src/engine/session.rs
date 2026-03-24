@@ -132,6 +132,15 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     if opts.fuzzy() {
         condensed.push('y');
     }
+    if opts.preserve_hard_links() {
+        condensed.push('H');
+    }
+    if opts.preserve_acls() {
+        condensed.push('A');
+    }
+    if opts.preserve_xattrs() {
+        condensed.push('X');
+    }
     for _ in 0..opts.filter_merge_files() {
         condensed.push('F');
     }
@@ -225,6 +234,9 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     }
     if opts.list_only() {
         args.push("--list-only".into());
+    }
+    if opts.fake_super() {
+        args.push("--fake-super".into());
     }
 
     match opts.delete() {
@@ -350,6 +362,15 @@ pub fn parse_server_args(
             'F' => {
                 filter_merge_count = filter_merge_count.saturating_add(1);
             }
+            'H' => {
+                builder = builder.preserve_hard_links(true);
+            }
+            'A' => {
+                builder = builder.preserve_acls(true);
+            }
+            'X' => {
+                builder = builder.preserve_xattrs(true);
+            }
             'v' => {
                 // Verbosity is cumulative but we just set it once here.
                 // Multiple v's are handled by the Verbosity enum already
@@ -402,6 +423,9 @@ pub fn parse_server_args(
             }
             "--list-only" => {
                 builder = builder.list_only(true);
+            }
+            "--fake-super" => {
+                builder = builder.fake_super(true);
             }
             "--remove-source-files" => {
                 builder = builder.remove_source_files(true);
@@ -1263,5 +1287,23 @@ mod tests {
         assert_eq!(parsed.filter_merge_files(), 2);
         assert!(parsed.list_only());
         assert!(parsed.fuzzy());
+    }
+
+    #[test]
+    fn test_roundtrip_batch4_flags() {
+        let opts = TransferOptions::builder()
+            .preserve_hard_links(true)
+            .preserve_acls(true)
+            .preserve_xattrs(true)
+            .fake_super(true)
+            .build();
+
+        let args = build_server_options(&opts, true);
+        let parsed = parse_server_args(&args, "/tmp/test".into(), true);
+
+        assert!(parsed.preserve_hard_links());
+        assert!(parsed.preserve_acls());
+        assert!(parsed.preserve_xattrs());
+        assert!(parsed.fake_super());
     }
 }

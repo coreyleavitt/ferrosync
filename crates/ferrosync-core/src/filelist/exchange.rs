@@ -23,7 +23,7 @@ use crate::protocol::varint;
 
 use super::codec::{
     recv_file_entry, send_file_entry, write_end_of_flist, DeltaState, FileListOptions,
-    ReadEntryResult,
+    HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
 };
 use super::entry::FileEntry;
 use super::incremental::{IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF, NDX_FLIST_OFFSET};
@@ -64,8 +64,18 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
     opts: &FileListOptions,
 ) -> Result<()> {
     let mut delta_state = DeltaState::default();
-    for entry in entries {
-        send_file_entry(w, entry, &mut delta_state, opts).await?;
+    let mut hlink_encoder = HardLinkEncoder::new();
+    for (i, entry) in entries.iter().enumerate() {
+        send_file_entry(
+            w,
+            entry,
+            &mut delta_state,
+            opts,
+            &mut hlink_encoder,
+            None,
+            i as i32,
+        )
+        .await?;
     }
     write_end_of_flist(w, 0, opts).await?;
 
@@ -88,15 +98,25 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     entries: &[FileEntry],
     opts: &FileListOptions,
 ) -> Result<()> {
-    use super::codec::{send_file_entry, write_end_of_flist, DeltaState};
+    use super::codec::{send_file_entry, write_end_of_flist, DeltaState, HardLinkEncoder};
 
     let mut sender = IncrementalSender::default();
+    let mut hlink_encoder = HardLinkEncoder::new();
 
     // First sub-flist (root directory): entries are sent directly without
     // an NDX marker prefix, matching rsync's wire behavior.
     let mut delta_state = DeltaState::default();
-    for entry in entries {
-        send_file_entry(w, entry, &mut delta_state, opts).await?;
+    for (i, entry) in entries.iter().enumerate() {
+        send_file_entry(
+            w,
+            entry,
+            &mut delta_state,
+            opts,
+            &mut hlink_encoder,
+            None,
+            i as i32,
+        )
+        .await?;
         sender.next_ndx += 1;
     }
     write_end_of_flist(w, 0, opts).await?;
@@ -170,8 +190,11 @@ async fn recv_file_list_batch<R: AsyncRead + Unpin>(
 ) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     let mut delta_state = DeltaState::default();
+    let mut hlink_decoder = HardLinkDecoder::new();
 
-    while let ReadEntryResult::Entry(entry) = recv_file_entry(r, &mut delta_state, opts).await? {
+    while let ReadEntryResult::Entry(entry) =
+        recv_file_entry(r, &mut delta_state, opts, &mut hlink_decoder, &entries).await?
+    {
         entries.push(entry);
     }
 
@@ -293,11 +316,20 @@ async fn recv_file_list_batch_streaming<R: AsyncRead + Unpin>(
     tx: mpsc::Sender<FileEntry>,
 ) -> Result<()> {
     let mut delta_state = DeltaState::default();
+    let mut hlink_decoder = HardLinkDecoder::new();
+    let mut entries = Vec::new();
 
-    while let ReadEntryResult::Entry(entry) = recv_file_entry(r, &mut delta_state, opts).await? {
-        if tx.send(entry).await.is_err() {
-            // Receiver dropped -- transfer engine shut down.
-            break;
+    #[allow(clippy::while_let_loop)]
+    loop {
+        match recv_file_entry(r, &mut delta_state, opts, &mut hlink_decoder, &entries).await? {
+            ReadEntryResult::Entry(entry) => {
+                entries.push(entry.clone());
+                if tx.send(entry).await.is_err() {
+                    // Receiver dropped -- transfer engine shut down.
+                    break;
+                }
+            }
+            ReadEntryResult::EndOfList { .. } => break,
         }
     }
 

@@ -33,6 +33,7 @@ quinn = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 filetime = "0.2"
+xattr = "1"
 
 [dev-dependencies]
 tokio-test = { workspace = true }

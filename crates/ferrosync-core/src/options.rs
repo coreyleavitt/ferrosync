@@ -174,6 +174,12 @@ pub struct TransferOptions {
     // --- Basis search ---
     fuzzy: bool,
 
+    // --- Hard-links / metadata preservation ---
+    preserve_hard_links: bool,
+    preserve_acls: bool,
+    preserve_xattrs: bool,
+    fake_super: bool,
+
     // --- Misc ---
     one_file_system: bool,
     numeric_ids: bool,
@@ -246,6 +252,10 @@ impl Default for TransferOptions {
             filter_merge_files: 0,
             list_only: false,
             fuzzy: false,
+            preserve_hard_links: false,
+            preserve_acls: false,
+            preserve_xattrs: false,
+            fake_super: false,
             one_file_system: false,
             numeric_ids: false,
             sparse: false,
@@ -528,6 +538,22 @@ impl TransferOptions {
     /// Search for similar basis files for delta (`-y`).
     pub fn fuzzy(&self) -> bool {
         self.fuzzy
+    }
+    /// Preserve hard-link relationships (`-H`).
+    pub fn preserve_hard_links(&self) -> bool {
+        self.preserve_hard_links
+    }
+    /// Preserve POSIX ACLs (`-A`).
+    pub fn preserve_acls(&self) -> bool {
+        self.preserve_acls
+    }
+    /// Preserve extended attributes (`-X`).
+    pub fn preserve_xattrs(&self) -> bool {
+        self.preserve_xattrs
+    }
+    /// Store privileged metadata in xattrs (`--fake-super`).
+    pub fn fake_super(&self) -> bool {
+        self.fake_super
     }
     /// Don't cross filesystem boundaries (`-x`).
     pub fn one_file_system(&self) -> bool {
@@ -888,6 +914,30 @@ impl TransferOptionsBuilder {
     /// Enable or disable fuzzy basis search (`-y`).
     pub fn fuzzy(mut self, v: bool) -> Self {
         self.opts.fuzzy = v;
+        self
+    }
+
+    /// Enable or disable hard-link preservation (`-H`).
+    pub fn preserve_hard_links(mut self, v: bool) -> Self {
+        self.opts.preserve_hard_links = v;
+        self
+    }
+
+    /// Enable or disable ACL preservation (`-A`).
+    pub fn preserve_acls(mut self, v: bool) -> Self {
+        self.opts.preserve_acls = v;
+        self
+    }
+
+    /// Enable or disable xattr preservation (`-X`).
+    pub fn preserve_xattrs(mut self, v: bool) -> Self {
+        self.opts.preserve_xattrs = v;
+        self
+    }
+
+    /// Enable or disable fake-super mode (`--fake-super`).
+    pub fn fake_super(mut self, v: bool) -> Self {
+        self.opts.fake_super = v;
         self
     }
 

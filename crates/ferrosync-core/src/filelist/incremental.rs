@@ -17,7 +17,7 @@ use crate::protocol::wire_format::IntCodec;
 
 use super::codec::{
     recv_file_entry, send_file_entry, write_end_of_flist, DeltaState, FileListOptions,
-    ReadEntryResult,
+    HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
 };
 use super::entry::FileEntry;
 
@@ -109,9 +109,10 @@ impl IncrementalReceiver {
     ) -> Result<SubFileList> {
         let ndx_start = self.next_ndx;
         let mut entries = Vec::new();
+        let mut hlink_decoder = HardLinkDecoder::new();
 
         loop {
-            match recv_file_entry(r, delta_state, opts).await? {
+            match recv_file_entry(r, delta_state, opts, &mut hlink_decoder, &entries).await? {
                 ReadEntryResult::Entry(entry) => {
                     self.next_ndx += 1;
                     entries.push(entry);
@@ -169,8 +170,18 @@ impl IncrementalSender {
 
         // Write entries.
         let mut delta_state = DeltaState::default();
-        for entry in entries {
-            send_file_entry(w, entry, &mut delta_state, opts).await?;
+        let mut hlink_encoder = HardLinkEncoder::new();
+        for (i, entry) in entries.iter().enumerate() {
+            send_file_entry(
+                w,
+                entry,
+                &mut delta_state,
+                opts,
+                &mut hlink_encoder,
+                None,
+                i as i32,
+            )
+            .await?;
             self.next_ndx += 1;
         }
 

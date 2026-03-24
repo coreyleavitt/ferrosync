@@ -162,6 +162,38 @@ impl FileSystem for UnixFileSystem {
         Ok(m.dev())
     }
 
+    fn list_xattrs(&self, path: &Path) -> Result<Vec<Vec<u8>>> {
+        use std::os::unix::ffi::OsStrExt;
+        match xattr::list(path) {
+            Ok(names) => Ok(names.map(|n| n.as_bytes().to_vec()).collect()),
+            Err(e) => Err(Self::map_io_err(path, e)),
+        }
+    }
+
+    fn get_xattr(&self, path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(name);
+        match xattr::get(path, name) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(Self::map_io_err(path, e)),
+        }
+    }
+
+    fn set_xattr(&self, path: &Path, name: &[u8], value: &[u8]) -> Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(name);
+        xattr::set(path, name, value).map_err(|e| Self::map_io_err(path, e))
+    }
+
+    fn remove_xattr(&self, path: &Path, name: &[u8]) -> Result<()> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let name = OsStr::from_bytes(name);
+        xattr::remove(path, name).map_err(|e| Self::map_io_err(path, e))
+    }
+
     fn write_file_inplace(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()

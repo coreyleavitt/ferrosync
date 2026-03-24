@@ -26,6 +26,19 @@ pub struct FileMetadata {
 }
 
 impl FileMetadata {
+    /// Get hard-link identity info (only meaningful when nlink > 1).
+    pub fn hard_link_info(&self) -> Option<crate::filelist::codec::HardLinkInfo> {
+        if self.nlink > 1 {
+            Some(crate::filelist::codec::HardLinkInfo {
+                dev: self.dev,
+                ino: self.ino,
+                nlink: self.nlink,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Convert to a [`crate::filelist::entry::FileEntry`] for file list building.
     pub fn to_file_entry(&self, name: Vec<u8>) -> crate::filelist::entry::FileEntry {
         use crate::filelist::entry;

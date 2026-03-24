@@ -334,6 +334,22 @@ struct TransferFlags {
     #[arg(short = 'y', long)]
     fuzzy: bool,
 
+    /// Preserve hard-link relationships
+    #[arg(short = 'H', long)]
+    hard_links: bool,
+
+    /// Preserve POSIX ACLs
+    #[arg(short = 'A', long)]
+    acls: bool,
+
+    /// Preserve extended attributes
+    #[arg(short = 'X', long)]
+    xattrs: bool,
+
+    /// Store privileged metadata in xattrs
+    #[arg(long)]
+    fake_super: bool,
+
     /// Append data to shorter files
     #[arg(long)]
     append: bool,
@@ -684,7 +700,11 @@ impl TransferFlags {
             .relative(self.relative)
             .filter_merge_files(self.filter_merge)
             .list_only(self.list_only)
-            .fuzzy(self.fuzzy);
+            .fuzzy(self.fuzzy)
+            .preserve_hard_links(self.hard_links)
+            .preserve_acls(self.acls)
+            .preserve_xattrs(self.xattrs)
+            .fake_super(self.fake_super);
         if let Some(ff) = self.files_from {
             builder = builder.files_from(ff);
         }

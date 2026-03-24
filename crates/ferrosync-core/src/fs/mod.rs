@@ -5,6 +5,9 @@
 //! handle metadata mapping (Unix modes, ownership, timestamps).
 
 #[cfg(unix)]
+pub mod fake_super;
+
+#[cfg(unix)]
 pub mod unix;
 
 #[cfg(windows)]
@@ -87,6 +90,22 @@ pub trait FileSystem: Send + Sync {
     /// a portable device ID concept.
     #[cfg(unix)]
     fn device_id(&self, path: &Path) -> Result<u64>;
+
+    /// List extended attribute names for a path.
+    #[cfg(unix)]
+    fn list_xattrs(&self, path: &Path) -> Result<Vec<Vec<u8>>>;
+
+    /// Get an extended attribute value.
+    #[cfg(unix)]
+    fn get_xattr(&self, path: &Path, name: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Set an extended attribute value.
+    #[cfg(unix)]
+    fn set_xattr(&self, path: &Path, name: &[u8], value: &[u8]) -> Result<()>;
+
+    /// Remove an extended attribute.
+    #[cfg(unix)]
+    fn remove_xattr(&self, path: &Path, name: &[u8]) -> Result<()>;
 
     /// Write data to a file in-place (overwrites directly, no atomic rename).
     /// Used with `--inplace`. Preserves the file's inode.

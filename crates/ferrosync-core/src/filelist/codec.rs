@@ -7,6 +7,8 @@
 //!
 //! Supports protocol versions 27-31.
 
+use std::collections::HashMap;
+
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::ProtocolError;
@@ -20,6 +22,87 @@ use super::entry::{FileEntry, S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT, S_IFREG, S_IFSO
 use super::xmit::*;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
+
+// ---------------------------------------------------------------------------
+// Hard-link encoding/decoding
+// ---------------------------------------------------------------------------
+
+/// Hard-link identity from the source filesystem.
+#[derive(Debug, Clone)]
+pub struct HardLinkInfo {
+    pub dev: u64,
+    pub ino: u64,
+    pub nlink: u64,
+}
+
+/// What to do with a file during hard-link encoding.
+#[derive(Debug)]
+pub enum HardLinkAction {
+    /// File is not a hard-link candidate (nlink <= 1).
+    NotHardLinked,
+    /// First occurrence of this dev+ino pair in the flist.
+    FirstOccurrence,
+    /// Duplicate of an earlier entry at the given flist index.
+    DuplicateOf(i32),
+}
+
+/// Encoder-side state for hard-link deduplication.
+///
+/// Tracks which (dev, ino) pairs have been seen and their flist indices.
+#[derive(Debug, Default)]
+pub struct HardLinkEncoder {
+    seen: HashMap<(u64, u64), i32>,
+}
+
+impl HardLinkEncoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if this file is a hard-link duplicate.
+    pub fn check(&mut self, info: &HardLinkInfo, index: i32) -> HardLinkAction {
+        if info.nlink <= 1 {
+            return HardLinkAction::NotHardLinked;
+        }
+        let key = (info.dev, info.ino);
+        if let Some(&first_index) = self.seen.get(&key) {
+            HardLinkAction::DuplicateOf(first_index)
+        } else {
+            self.seen.insert(key, index);
+            HardLinkAction::FirstOccurrence
+        }
+    }
+}
+
+/// Decoder-side state for hard-link resolution.
+///
+/// Maps flist indices of duplicate entries to their first occurrence.
+#[derive(Debug, Default)]
+pub struct HardLinkDecoder {
+    /// entry_index -> first_occurrence_index
+    groups: HashMap<i32, i32>,
+}
+
+impl HardLinkDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a duplicate hard-link entry.
+    pub fn record_duplicate(&mut self, entry_index: i32, first_index: i32) {
+        self.groups.insert(entry_index, first_index);
+    }
+
+    /// Get the first occurrence index for a duplicate entry.
+    pub fn first_index(&self, entry_index: i32) -> Option<i32> {
+        self.groups.get(&entry_index).copied()
+    }
+
+    /// Iterate over all (duplicate_index, first_index) pairs.
+    pub fn duplicates(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.groups.iter().map(|(&dup, &first)| (dup, first))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Transfer options that affect wire format
@@ -88,7 +171,7 @@ impl FileListOptions {
             preserve_devices: opts.preserve_devices(),
             preserve_specials: opts.preserve_specials(),
             preserve_links: opts.preserve_links(),
-            preserve_hard_links: false,
+            preserve_hard_links: opts.preserve_hard_links(),
             always_checksum: opts.checksum_mode(),
             checksum_len: proto.checksum.digest_len(),
             xmit_id0_names: proto.compat_flags
@@ -146,6 +229,8 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
     r: &mut R,
     state: &mut DeltaState,
     opts: &FileListOptions,
+    hlink_decoder: &mut HardLinkDecoder,
+    prev_entries: &[FileEntry],
 ) -> Result<ReadEntryResult> {
     // Read XMIT flags.
     let flags = match opts.wire.flags_codec {
@@ -224,6 +309,28 @@ pub async fn recv_file_entry<R: AsyncRead + Unpin>(
         let start = name.len();
         name.resize(start + suffix_len, 0);
         r.read_exact(&mut name[start..]).await?;
+    }
+
+    // --- Hard-link back-reference (proto >= 28) ---
+    if opts.preserve_hard_links && (flags & XMIT_HLINKED) != 0 {
+        let first_ndx = read_varint(r).await? as i32;
+        if (flags & XMIT_HLINK_FIRST) == 0 {
+            // Duplicate: clone from first occurrence, skip remaining fields.
+            let entry_index = prev_entries.len() as i32;
+            hlink_decoder.record_duplicate(entry_index, first_ndx);
+            let first =
+                prev_entries
+                    .get(first_ndx as usize)
+                    .ok_or_else(|| ProtocolError::Handshake {
+                        message: format!("hard-link references unknown index {first_ndx}"),
+                    })?;
+            let mut entry = first.clone();
+            entry.name = name;
+            entry.flags = flags;
+            update_delta_state(state, &entry);
+            return Ok(ReadEntryResult::Entry(entry));
+        }
+        // XMIT_HLINK_FIRST: first occurrence, continue reading all fields normally.
     }
 
     // --- File length ---
@@ -419,12 +526,37 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
     entry: &FileEntry,
     state: &mut DeltaState,
     opts: &FileListOptions,
+    hlink_encoder: &mut HardLinkEncoder,
+    hlink_info: Option<&HardLinkInfo>,
+    entry_index: i32,
 ) -> Result<()> {
     // Raw version for varint functions that still require it.
     let codec = opts.wire.int_codec;
 
+    // --- Hard-link action ---
+    let hlink_action = if opts.preserve_hard_links {
+        if let Some(info) = hlink_info {
+            hlink_encoder.check(info, entry_index)
+        } else {
+            HardLinkAction::NotHardLinked
+        }
+    } else {
+        HardLinkAction::NotHardLinked
+    };
+
     // --- Compute XMIT flags ---
     let mut flags = entry.flags & XMIT_TOP_DIR; // Preserve TOP_DIR if set.
+
+    // Hard-link flags must be set before writing.
+    match &hlink_action {
+        HardLinkAction::FirstOccurrence => {
+            flags |= XMIT_HLINKED | XMIT_HLINK_FIRST;
+        }
+        HardLinkAction::DuplicateOf(_) => {
+            flags |= XMIT_HLINKED;
+        }
+        HardLinkAction::NotHardLinked => {}
+    }
 
     // Filename prefix compression.
     let common_prefix = common_prefix_len(&state.prev_name, &entry.name);
@@ -501,6 +633,17 @@ pub async fn send_file_entry<W: AsyncWrite + Unpin>(
         write_byte(w, suffix_len as u8).await?;
     }
     w.write_all(&entry.name[common_prefix..]).await?;
+
+    // --- Hard-link index ---
+    if let HardLinkAction::DuplicateOf(first_ndx) = hlink_action {
+        write_varint(w, first_ndx as u32).await?;
+        // Duplicate: skip remaining fields, update delta state and return.
+        update_delta_state(state, entry);
+        return Ok(());
+    }
+    if let HardLinkAction::FirstOccurrence = hlink_action {
+        write_varint(w, entry_index as u32).await?;
+    }
 
     // --- File length ---
     write_varlong30(w, entry.len, 3, codec).await?;
@@ -728,16 +871,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        let result = recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap();
+        let result = recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap();
 
         match result {
             ReadEntryResult::Entry(decoded) => {
@@ -750,9 +907,15 @@ mod tests {
         }
 
         // Read end of list.
-        let result = recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap();
+        let result = recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap();
         match result {
             ReadEntryResult::EndOfList { io_error } => assert_eq!(io_error, 0),
             ReadEntryResult::Entry(_) => panic!("expected end of list"),
@@ -789,18 +952,32 @@ mod tests {
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
         for entry in &entries {
-            send_file_entry(&mut buf, entry, &mut enc_state, &opts)
-                .await
-                .unwrap();
+            send_file_entry(
+                &mut buf,
+                entry,
+                &mut enc_state,
+                &opts,
+                &mut HardLinkEncoder::new(),
+                None,
+                0,
+            )
+            .await
+            .unwrap();
         }
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
         for expected in &entries {
-            match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-                .await
-                .unwrap()
+            match recv_file_entry(
+                &mut cursor,
+                &mut dec_state,
+                &opts,
+                &mut HardLinkDecoder::new(),
+                &[],
+            )
+            .await
+            .unwrap()
             {
                 ReadEntryResult::Entry(decoded) => {
                     assert_eq!(decoded.name, expected.name);
@@ -827,16 +1004,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.name, b"mydir");
@@ -870,16 +1061,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.uid, 1000);
@@ -909,16 +1114,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(decoded) => {
                 assert!(decoded.is_symlink());
@@ -948,16 +1167,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.checksum, checksum);
@@ -987,13 +1220,29 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry1, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry1,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         let size_first = buf.len();
-        send_file_entry(&mut buf, &entry2, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry2,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            1,
+        )
+        .await
+        .unwrap();
         let size_second = buf.len() - size_first;
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
@@ -1005,16 +1254,28 @@ mod tests {
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(d) => assert_eq!(d.name, b"a.txt"),
             _ => panic!("expected entry"),
         }
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(d) => {
                 assert_eq!(d.name, b"b.txt");
@@ -1039,16 +1300,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.mtime_nsec, 123456789);
@@ -1066,9 +1341,15 @@ mod tests {
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::EndOfList { io_error } => assert_eq!(io_error, 5),
             ReadEntryResult::Entry(_) => panic!("expected end of list"),
@@ -1088,9 +1369,15 @@ mod tests {
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::EndOfList { io_error } => assert_eq!(io_error, 0),
             ReadEntryResult::Entry(_) => panic!("expected end of list"),
@@ -1122,16 +1409,30 @@ mod tests {
 
         let mut buf = Vec::new();
         let mut enc_state = DeltaState::default();
-        send_file_entry(&mut buf, &entry, &mut enc_state, &opts)
-            .await
-            .unwrap();
+        send_file_entry(
+            &mut buf,
+            &entry,
+            &mut enc_state,
+            &opts,
+            &mut HardLinkEncoder::new(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         write_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
         let mut cursor = Cursor::new(&buf);
         let mut dec_state = DeltaState::default();
-        match recv_file_entry(&mut cursor, &mut dec_state, &opts)
-            .await
-            .unwrap()
+        match recv_file_entry(
+            &mut cursor,
+            &mut dec_state,
+            &opts,
+            &mut HardLinkDecoder::new(),
+            &[],
+        )
+        .await
+        .unwrap()
         {
             ReadEntryResult::Entry(decoded) => {
                 assert_eq!(decoded.name, b"old.txt");
