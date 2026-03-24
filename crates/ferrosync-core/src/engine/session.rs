@@ -727,7 +727,22 @@ async fn run_push(
         for entry in &entries {
             println!("{}", entry.format_list_entry());
         }
-        // Skip sender loop but complete protocol.
+        wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+        let _ = demux_handle.await;
+        stats.finish();
+        return Ok(TransferResult { stats });
+    }
+
+    // --dry-run: count files without entering sender loop.
+    if options.dry_run() {
+        for entry in &entries {
+            if entry.is_dir() {
+                stats.directories_created += 1;
+            } else if entry.is_file() {
+                stats.files_transferred += 1;
+                stats.total_size += entry.len as u64;
+            }
+        }
         wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
         let _ = demux_handle.await;
         stats.finish();
@@ -1012,8 +1027,11 @@ fn sanitize_path(dest: &std::path::Path, name: &str) -> Result<PathBuf> {
 fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
 
-    for pattern in options.exclude() {
-        let rule = format!("- {pattern}");
+    // Order matters: rsync uses first-match-wins. Send filter rules first
+    // (highest priority), then includes, then excludes. This matches
+    // FilterRuleList::from_options ordering and ensures include+exclude
+    // whitelist patterns (e.g., --include="*.txt" --exclude="*") work.
+    for rule in options.filter() {
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }
@@ -1022,7 +1040,8 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }
-    for rule in options.filter() {
+    for pattern in options.exclude() {
+        let rule = format!("- {pattern}");
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }

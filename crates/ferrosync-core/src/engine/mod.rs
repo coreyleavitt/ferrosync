@@ -15,6 +15,7 @@ pub mod generator;
 pub mod pipeline;
 pub mod progress;
 pub mod receiver;
+pub mod receiver_engine;
 pub mod sender;
 pub mod session;
 pub mod transfer;

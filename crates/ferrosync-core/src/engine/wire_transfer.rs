@@ -251,12 +251,11 @@ pub trait FileOps: Send + Sync {
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
+///
+/// Delegates all destination-side logic to [`ReceiverEngine`](super::receiver_engine::ReceiverEngine),
+/// which is shared with the local transfer engine.
 pub struct LocalFileOps {
-    fs: Arc<dyn FileSystem>,
-    dest: PathBuf,
-    options: crate::options::TransferOptions,
-    resolved_link_dests: Vec<PathBuf>,
-    chmod_spec: Option<crate::chmod::ChmodSpec>,
+    engine: Arc<super::receiver_engine::ReceiverEngine>,
 }
 
 impl LocalFileOps {
@@ -265,27 +264,17 @@ impl LocalFileOps {
         dest: PathBuf,
         options: crate::options::TransferOptions,
     ) -> Self {
-        let resolved_link_dests =
-            super::file_decision::resolve_link_dest_dirs(options.link_dest(), &dest);
-        let chmod_spec = if !options.chmod().is_empty() {
-            crate::chmod::ChmodSpec::parse(&options.chmod().join(",")).ok()
-        } else {
-            None
-        };
-        Self {
-            fs,
-            dest,
-            options,
-            resolved_link_dests,
-            chmod_spec,
-        }
+        let engine = Arc::new(super::receiver_engine::ReceiverEngine::new(
+            fs, dest, options,
+        ));
+        Self { engine }
     }
 }
 
 impl FileOps for LocalFileOps {
     fn read_basis(&self, entry: &FileEntry) -> FileData {
-        let dest_path = self.dest_path(entry);
-        self.fs.map_file(&dest_path).unwrap_or_default()
+        let dest_path = self.engine.dest_path(entry);
+        self.engine.fs().map_file(&dest_path).unwrap_or_default()
     }
 
     fn write_file(
@@ -293,150 +282,65 @@ impl FileOps for LocalFileOps {
         entry: &FileEntry,
         data: &[u8],
     ) -> std::result::Result<(), crate::FerrosyncError> {
-        let dest_path = self.dest_path(entry);
-        super::file_decision::write_file_with_options(
-            &*self.fs,
-            &dest_path,
-            data,
-            entry,
-            &self.options,
-            self.chmod_spec.as_ref(),
-        )
+        self.engine.receive_file(entry, data, None)
     }
 
     fn create_writer(
         &self,
         entry: &FileEntry,
     ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
-        let write_path = if let Some(partial_dir) = self.options.partial_dir() {
-            // --partial-dir: write to partial_dir/basename, rename in finish_file.
-            self.fs.mkdir(partial_dir, 0o755)?;
-            partial_dir.join(
-                entry
-                    .path()
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("partial")),
-            )
-        } else {
-            // --partial or default: write directly to final destination.
-            self.dest_path(entry)
-        };
-        let mode = if self.options.preserve_perms() {
-            Some(entry.mode & 0o7777)
-        } else {
-            None
-        };
-        Ok(self.fs.write_file_stream(&write_path, mode)?)
+        self.engine.create_writer(entry)
     }
 
     fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError> {
-        // --partial-dir: move from partial dir to final destination.
-        if let Some(partial_dir) = self.options.partial_dir() {
-            let partial_path = partial_dir.join(
-                entry
-                    .path()
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("partial")),
-            );
-            let dest_path = self.dest_path(entry);
-            if partial_path != dest_path {
-                self.fs.rename(&partial_path, &dest_path)?;
-            }
-        }
-        self.set_metadata(entry);
-        Ok(())
+        self.engine.finish_file(entry, None)
     }
 
     fn set_metadata(&self, entry: &FileEntry) {
-        let dest_path = self.dest_path(entry);
-        super::file_decision::set_file_metadata(&*self.fs, &dest_path, entry, &self.options);
+        let dest_path = self.engine.dest_path(entry);
+        super::file_decision::set_file_metadata(
+            self.engine.fs(),
+            &dest_path,
+            entry,
+            self.engine.options(),
+        );
     }
 
     fn mkdir(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
-        let dest_path = self.dest_path(entry);
-        let mut mode = if self.options.preserve_perms() {
-            entry.mode & 0o7777
-        } else {
-            0o755
-        };
-        if let Some(ref spec) = self.chmod_spec {
-            mode = spec.apply(mode, true);
-        }
-        self.fs.mkdir(&dest_path, mode)
+        self.engine.create_directory(entry)
     }
 
     fn should_skip(&self, entry: &FileEntry) -> bool {
-        if self.options.dry_run() {
-            return false;
-        }
-        let dest_path = self.dest_path(entry);
-
-        if super::file_decision::check_existence_skip(&*self.fs, &dest_path, &self.options) {
-            return true;
-        }
-        if super::file_decision::check_size_limits(entry, &self.options) {
-            return true;
-        }
-        if !self.options.checksum_mode() {
-            return super::file_decision::quick_check_skip(
-                &*self.fs,
-                entry,
-                &dest_path,
-                &self.options,
-            );
-        }
-        false
+        self.engine.should_skip_file(entry)
     }
 
     fn ensure_parent(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
-        let dest_path = self.dest_path(entry);
-        if let Some(parent) = dest_path.parent() {
-            if !self.fs.lexists(parent) {
-                self.fs.mkdir(parent, 0o755)?;
-            }
-        }
-        Ok(())
+        self.engine.ensure_parent(entry)
     }
 
     fn dest_path(&self, entry: &FileEntry) -> PathBuf {
-        self.dest.join(entry.path())
+        self.engine.dest_path(entry)
     }
 
     fn try_link_dest(&self, entry: &FileEntry) -> bool {
-        if self.resolved_link_dests.is_empty() || self.options.dry_run() {
-            return false;
-        }
-        if let Some(alt_path) = super::file_decision::check_alt_dest(
-            &*self.fs,
-            entry,
-            &self.resolved_link_dests,
-            &self.options,
-        ) {
-            let dest_path = self.dest_path(entry);
-            // Remove existing dest if present (rsync does this before hard-linking)
-            let _ = self.fs.remove_file(&dest_path);
-            if self.fs.hard_link(&alt_path, &dest_path).is_ok() {
-                return true;
-            }
-        }
-        false
+        self.engine.try_link_dest(entry)
     }
 
     fn find_fuzzy_basis(&self, entry: &FileEntry) -> Option<FileData> {
-        if !self.options.fuzzy() {
+        if !self.engine.options().fuzzy() {
             return None;
         }
-        let dest_path = self.dest_path(entry);
+        let dest_path = self.engine.dest_path(entry);
         let parent = dest_path.parent()?;
         let target_name = dest_path.file_name()?;
 
-        let dir_entries = self.fs.read_dir(parent).ok()?;
+        let dir_entries = self.engine.fs().read_dir(parent).ok()?;
 
         // Pass 1: find file with same size and mtime.
         for e in &dir_entries {
             if e.metadata.len == entry.len && e.metadata.mtime == entry.mtime {
                 let path = parent.join(FileEntry::name_to_pathbuf(&e.name));
-                if let Ok(data) = self.fs.map_file(&path) {
+                if let Ok(data) = self.engine.fs().map_file(&path) {
                     return Some(data);
                 }
             }
@@ -455,7 +359,7 @@ impl FileOps for LocalFileOps {
             }
         }
 
-        best_path.and_then(|p| self.fs.map_file(&p).ok())
+        best_path.and_then(|p| self.engine.fs().map_file(&p).ok())
     }
 }
 
