@@ -339,6 +339,23 @@ impl FileSystem for UnixFileSystem {
             set_unix_permissions,
         )))
     }
+
+    fn write_file_inplace_stream(
+        &self,
+        path: &Path,
+        mode: Option<u32>,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(path)
+            .map_err(|e| Self::map_io_err(path, e))?;
+        if let Some(m) = mode {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(m));
+        }
+        Ok(Box::new(std::io::BufWriter::new(file)))
+    }
 }
 
 #[cfg(test)]

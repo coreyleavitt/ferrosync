@@ -132,6 +132,9 @@ pub struct FileListOptions {
     /// Whether to send/expect uid 0/gid 0 name entries after the id list
     /// terminator (compat_flags & ID0_NAMES).
     pub xmit_id0_names: bool,
+    /// True if `--numeric-ids` is active. When set, uid/gid name lists
+    /// are not exchanged on the wire.
+    pub numeric_ids: bool,
 }
 
 impl Default for FileListOptions {
@@ -151,6 +154,7 @@ impl Default for FileListOptions {
             always_checksum: false,
             checksum_len: 16,
             xmit_id0_names: true,
+            numeric_ids: false,
         }
     }
 }
@@ -177,6 +181,7 @@ impl FileListOptions {
             xmit_id0_names: proto.compat_flags
                 & crate::protocol::handshake::compat_flags::ID0_NAMES
                 != 0,
+            numeric_ids: opts.numeric_ids(),
         }
     }
 }

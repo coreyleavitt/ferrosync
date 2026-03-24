@@ -52,7 +52,11 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
         // C ref: send_id_lists (uidlist.c:407-414), called from flist.c:2514
         // In batch mode (!inc_recurse), uid/gid name lists are sent after the
         // file entries and end-of-list marker, inside send_file_list.
-        send_id_list(w, entries, &flist_opts).await?;
+        // When --numeric-ids is active, rsync skips the name list exchange
+        // entirely (uidlist.c:407: if (numeric_ids > 0) return).
+        if !flist_opts.numeric_ids {
+            send_id_list(w, entries, &flist_opts).await?;
+        }
         Ok(())
     }
 }
@@ -171,7 +175,10 @@ pub async fn recv_file_list<R: AsyncRead + Unpin>(
 
             // Read uid/gid name lists (sent after file entries in batch mode).
             // rsync's recv_id_list reads these when preserve_uid/gid and !numeric_ids.
-            recv_id_list(r, &flist_opts).await?;
+            // When --numeric-ids is active, the sender skips sending them.
+            if !flist_opts.numeric_ids {
+                recv_id_list(r, &flist_opts).await?;
+            }
 
             let ndx: Vec<i32> = (0..entries.len() as i32).collect();
             (entries, 0, ndx, 1)

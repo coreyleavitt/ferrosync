@@ -233,6 +233,14 @@ impl FileSystem for FakeSuperFs {
     fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
         self.inner.write_file_stream(path, mode)
     }
+
+    fn write_file_inplace_stream(
+        &self,
+        path: &Path,
+        mode: Option<u32>,
+    ) -> Result<Box<dyn Write + Send>> {
+        self.inner.write_file_inplace_stream(path, mode)
+    }
 }
 
 #[cfg(test)]

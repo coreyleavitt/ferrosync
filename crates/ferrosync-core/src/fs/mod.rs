@@ -162,6 +162,16 @@ pub trait FileSystem: Send + Sync {
     ///
     /// The writer creates the file (or truncates if it exists).
     fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn Write + Send>>;
+
+    /// Open a file for in-place streaming write (truncates existing file).
+    ///
+    /// Unlike `write_file_stream` which uses a temp file and atomic rename,
+    /// this writes directly to the given path, preserving the inode.
+    fn write_file_inplace_stream(
+        &self,
+        path: &Path,
+        mode: Option<u32>,
+    ) -> Result<Box<dyn Write + Send>>;
 }
 
 /// Threshold in bytes above which streaming I/O is preferred over buffered

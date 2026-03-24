@@ -182,7 +182,10 @@ impl ReceiverEngine {
         entry: &FileEntry,
     ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
-        let write_path = if let Some(partial_dir) = self.options.partial_dir() {
+
+        let write_path = if self.options.inplace() {
+            dest_path.clone()
+        } else if let Some(partial_dir) = self.options.partial_dir() {
             // --partial-dir: write to partial_dir/basename, rename in finish_file.
             self.fs.mkdir(partial_dir, 0o755)?;
             partial_dir.join(
@@ -206,13 +209,17 @@ impl ReceiverEngine {
             None
         };
 
-        Ok(self.fs.write_file_stream(&write_path, mode)?)
+        if self.options.inplace() {
+            Ok(self.fs.write_file_inplace_stream(&write_path, mode)?)
+        } else {
+            Ok(self.fs.write_file_stream(&write_path, mode)?)
+        }
     }
 
     /// Finalize a file after streaming write.
     ///
-    /// Handles `--backup` (when using partial-dir), `--partial-dir` rename,
-    /// metadata setting, and `--remove-source-files`.
+    /// Handles `--backup`, `--partial-dir` rename, metadata setting, and
+    /// `--remove-source-files`.
     pub fn finish_file(
         &self,
         entry: &FileEntry,
@@ -220,24 +227,24 @@ impl ReceiverEngine {
     ) -> std::result::Result<(), crate::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
-        // --partial-dir: move from partial dir to final destination.
+        // FIRST: create backup of existing dest file before any overwrite/rename.
+        if self.options.backup() && self.fs.lexists(&dest_path) {
+            file_decision::create_backup(
+                &*self.fs,
+                &dest_path,
+                self.options.suffix(),
+                self.options.backup_dir().map(|p| p.as_path()),
+            )?;
+        }
+
+        // THEN: --partial-dir rename (this overwrites dest with the new content).
         if let Some(partial_dir) = self.options.partial_dir() {
             let partial_path = partial_dir.join(
-                entry
-                    .path()
+                dest_path
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("partial")),
             );
             if partial_path != dest_path {
-                // --backup: create backup before overwriting (if renaming from partial).
-                if self.options.backup() && self.fs.lexists(&dest_path) {
-                    file_decision::create_backup(
-                        &*self.fs,
-                        &dest_path,
-                        self.options.suffix(),
-                        self.options.backup_dir().map(|p| p.as_path()),
-                    )?;
-                }
                 self.fs.rename(&partial_path, &dest_path)?;
             }
         }
@@ -336,6 +343,14 @@ impl ReceiverEngine {
     /// Access the destination path.
     pub fn dest(&self) -> &Path {
         &self.dest
+    }
+
+    /// Returns true if the buffered receive path should be used instead of streaming.
+    ///
+    /// Some features (like `--sparse`) require the full file data in memory
+    /// to write correctly, so the streaming path cannot be used.
+    pub fn needs_buffered_receive(&self) -> bool {
+        self.options.sparse()
     }
 }
 

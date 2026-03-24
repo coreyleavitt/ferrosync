@@ -83,6 +83,22 @@ pub async fn recv_file_delta_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
     recv_file_delta_to_writer_with(r, &mut reader, basis_data, blength, ctx, writer).await
 }
 
+/// Receive tokens with decompression, writing output to a writer.
+///
+/// Same as [`recv_file_delta_to_writer`] but decompresses data tokens using
+/// the provided decompressor.
+pub async fn recv_file_delta_compressed_to_writer<R: AsyncRead + Unpin, W: std::io::Write>(
+    r: &mut R,
+    basis_data: &[u8],
+    blength: usize,
+    ctx: &ProtocolContext,
+    writer: &mut W,
+    decompressor: Decompressor,
+) -> Result<u64> {
+    let mut reader = token::CompressedTokenReader::new(decompressor);
+    recv_file_delta_to_writer_with(r, &mut reader, basis_data, blength, ctx, writer).await
+}
+
 /// Receive tokens using a pluggable reader and reconstruct a file.
 pub async fn recv_file_delta_with<R: AsyncRead + Unpin>(
     r: &mut R,

@@ -19,7 +19,8 @@ use crate::engine::receiver;
 use crate::error::ProtocolError;
 use crate::filelist::entry::{FileEntry, S_IFMT, S_IFREG};
 use crate::fs::{FileData, FileSystem};
-use crate::protocol::handshake::NegotiatedProtocol;
+use crate::protocol::compress::{Compressor, Decompressor};
+use crate::protocol::handshake::{CompressType, NegotiatedProtocol};
 use crate::protocol::multiplex::MplexWriter;
 use crate::protocol::varint;
 use crate::protocol::wire_format::IntCodec;
@@ -248,6 +249,14 @@ pub trait FileOps: Send + Sync {
         let _ = entry;
         None
     }
+
+    /// Returns true if the buffered receive path should be used instead of streaming.
+    ///
+    /// Some features (like `--sparse`) require the full file data in memory
+    /// to write correctly, so the streaming path cannot be used.
+    fn needs_buffered_receive(&self) -> bool {
+        false
+    }
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
@@ -361,6 +370,10 @@ impl FileOps for LocalFileOps {
 
         best_path.and_then(|p| self.engine.fs().map_file(&p).ok())
     }
+
+    fn needs_buffered_receive(&self) -> bool {
+        self.engine.needs_buffered_receive()
+    }
 }
 
 /// Receiver-side operations using module directory (server side).
@@ -428,6 +441,53 @@ impl FileOps for ModuleFileOps {
 
     fn dest_path(&self, entry: &FileEntry) -> PathBuf {
         self.module_path.join(entry.path())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Polymorphic token writer (enum dispatch for sender loop)
+// ---------------------------------------------------------------------------
+
+/// Enum dispatch over plain and compressed token writers.
+///
+/// `TokenWriter` is not object-safe (generic async methods), so we use
+/// enum dispatch to select the writer at runtime.
+enum AnyTokenWriter {
+    Plain(token::PlainTokenWriter),
+    Compressed(token::CompressedTokenWriter),
+}
+
+impl AnyTokenWriter {
+    async fn write_data<W: tokio::io::AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        data: &[u8],
+    ) -> std::result::Result<(), ProtocolError> {
+        match self {
+            Self::Plain(tw) => tw.write_data(w, data).await,
+            Self::Compressed(tw) => tw.write_data(w, data).await,
+        }
+    }
+
+    async fn write_block_match<W: tokio::io::AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        index: i32,
+    ) -> std::result::Result<(), ProtocolError> {
+        match self {
+            Self::Plain(tw) => tw.write_block_match(w, index).await,
+            Self::Compressed(tw) => tw.write_block_match(w, index).await,
+        }
+    }
+
+    async fn write_eof<W: tokio::io::AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+    ) -> std::result::Result<(), ProtocolError> {
+        match self {
+            Self::Plain(tw) => tw.write_eof(w).await,
+            Self::Compressed(tw) => tw.write_eof(w).await,
+        }
     }
 }
 
@@ -576,7 +636,13 @@ where
         let mut literal_bytes = 0u64;
         let mut matched_bytes = 0u64;
 
-        let mut tok_writer = token::PlainTokenWriter::new();
+        let use_compress = protocol.compress != CompressType::None;
+        let mut tok_writer = if use_compress {
+            let compressor = Compressor::from_type(protocol.compress, 6)?;
+            AnyTokenWriter::Compressed(token::CompressedTokenWriter::new(compressor))
+        } else {
+            AnyTokenWriter::Plain(token::PlainTokenWriter::new())
+        };
 
         if entry.len >= crate::fs::STREAMING_THRESHOLD {
             // Streaming path: process in chunks to avoid O(file_size) memory.
@@ -804,22 +870,40 @@ where
             700
         };
 
-        // Read tokens, reconstruct file via streaming writer, verify checksum.
-        let mut writer = file_ops.create_writer(entry)?;
-        let bytes_written = receiver::recv_file_delta_to_writer(
-            demux_read,
-            &basis_data,
-            blength,
-            &ctx,
-            &mut writer,
-        )
-        .await?;
-
-        let literal_bytes = bytes_written;
-
-        // Finalize: atomic rename happens on drop, then set metadata.
-        drop(writer);
-        file_ops.finish_file(entry)?;
+        // Reconstruct file: use buffered path for sparse, streaming otherwise.
+        let use_compress = protocol.compress != CompressType::None;
+        let literal_bytes = if file_ops.needs_buffered_receive() {
+            let data = receiver::recv_file_delta(demux_read, &basis_data, blength, &ctx).await?;
+            let len = data.len() as u64;
+            file_ops.write_file(entry, &data)?;
+            len
+        } else {
+            let mut writer = file_ops.create_writer(entry)?;
+            let bytes_written = if use_compress {
+                let decompressor = Decompressor::from_type(protocol.compress)?;
+                receiver::recv_file_delta_compressed_to_writer(
+                    demux_read,
+                    &basis_data,
+                    blength,
+                    &ctx,
+                    &mut writer,
+                    decompressor,
+                )
+                .await?
+            } else {
+                receiver::recv_file_delta_to_writer(
+                    demux_read,
+                    &basis_data,
+                    blength,
+                    &ctx,
+                    &mut writer,
+                )
+                .await?
+            };
+            drop(writer);
+            file_ops.finish_file(entry)?;
+            bytes_written
+        };
 
         stats.files_transferred += 1;
         stats.total_size += entry.len as u64;
@@ -1036,22 +1120,46 @@ where
                     blength
                 };
 
-                // Reconstruct file via streaming writer.
-                let mut writer = file_ops.create_writer(entry)?;
-                let bytes_written = receiver::recv_file_delta_to_writer(
-                    &mut demux_read,
-                    &basis_data,
-                    blength_actual,
-                    &ctx,
-                    &mut writer,
-                )
-                .await?;
-
-                let literal_bytes = bytes_written;
-
-                // Finalize: atomic rename happens on drop, then set metadata.
-                drop(writer);
-                file_ops.finish_file(entry)?;
+                // Reconstruct file: buffered for sparse, streaming otherwise.
+                let use_compress = protocol.compress != CompressType::None;
+                let literal_bytes = if file_ops.needs_buffered_receive() {
+                    let data = receiver::recv_file_delta(
+                        &mut demux_read,
+                        &basis_data,
+                        blength_actual,
+                        &ctx,
+                    )
+                    .await?;
+                    let len = data.len() as u64;
+                    file_ops.write_file(entry, &data)?;
+                    len
+                } else {
+                    let mut writer = file_ops.create_writer(entry)?;
+                    let bytes_written = if use_compress {
+                        let decompressor = Decompressor::from_type(protocol.compress)?;
+                        receiver::recv_file_delta_compressed_to_writer(
+                            &mut demux_read,
+                            &basis_data,
+                            blength_actual,
+                            &ctx,
+                            &mut writer,
+                            decompressor,
+                        )
+                        .await?
+                    } else {
+                        receiver::recv_file_delta_to_writer(
+                            &mut demux_read,
+                            &basis_data,
+                            blength_actual,
+                            &ctx,
+                            &mut writer,
+                        )
+                        .await?
+                    };
+                    drop(writer);
+                    file_ops.finish_file(entry)?;
+                    bytes_written
+                };
 
                 stats.files_transferred += 1;
                 stats.total_size += entry.len as u64;

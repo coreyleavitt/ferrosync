@@ -403,6 +403,20 @@ impl FileSystem for WindowsFileSystem {
             set_windows_permissions,
         )))
     }
+
+    fn write_file_inplace_stream(
+        &self,
+        path: &Path,
+        _mode: Option<u32>,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        let file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(path)
+            .map_err(|e| Self::map_io_err(path, e))?;
+        Ok(Box::new(std::io::BufWriter::new(file)))
+    }
 }
 
 #[cfg(test)]
