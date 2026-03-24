@@ -262,6 +262,7 @@ impl ServerSession {
             &mut stats,
             progress,
             None,
+            false,
         )
         .await?;
 

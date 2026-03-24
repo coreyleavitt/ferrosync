@@ -1763,7 +1763,6 @@ async fn test_interop_pull_backup() {
 }
 
 #[tokio::test]
-#[ignore] // TODO: push dry-run protocol phase exchange (#125)
 async fn test_interop_push_dry_run() {
     skip_if_no_ssh!();
 

@@ -733,27 +733,12 @@ async fn run_push(
         return Ok(TransferResult { stats });
     }
 
-    // --dry-run: count files for reporting. The remote receiver knows about
-    // dry-run (via the 'n' flag) and won't request any file data, but we
-    // still run sender_loop so the phase exchange completes correctly.
-    if options.dry_run() {
-        for entry in &entries {
-            if entry.is_dir() {
-                stats.directories_created += 1;
-            } else if entry.is_file() {
-                stats.files_transferred += 1;
-                stats.total_size += entry.len as u64;
-            }
-        }
-    }
-
     // Sender loop via wire_transfer.
     // C ref: send_files (sender.c), called from main.c:1157
     //
-    // In dry-run mode, the remote generator sends no file requests -- only
-    // NDX_DONE markers for the phase exchange. sender_loop handles this
-    // correctly; it responds to the phase transitions and writes the final
-    // NDX_DONE without transferring any file data.
+    // In dry-run mode, the remote generator sends NDX + iflags per file
+    // but skips sum_head and block signatures. sender_loop detects this
+    // and counts files without reading signatures or sending delta tokens.
     let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, options.recursive());
     let file_reader = LocalFileReader::new(fs, options.source());
 
@@ -767,6 +752,7 @@ async fn run_push(
         &mut stats,
         progress,
         options.block_size(),
+        options.dry_run(),
     )
     .await?;
 

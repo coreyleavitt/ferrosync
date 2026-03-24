@@ -510,6 +510,7 @@ pub async fn sender_loop<R, W>(
     stats: &mut TransferStats,
     progress: &mut ProgressTracker,
     block_size_override: Option<i32>,
+    dry_run: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
@@ -591,6 +592,21 @@ where
 
         // Non-regular files don't have file data.
         if entry.mode & S_IFMT != S_IFREG {
+            continue;
+        }
+
+        // Dry-run: remote generator sends NDX + iflags but skips sum_head
+        // and block signatures (rsync generator.c: if (!do_xfers) goto cleanup).
+        // Don't try to read sums -- just count the file and continue.
+        if dry_run {
+            stats.files_transferred += 1;
+            stats.total_size += entry.len as u64;
+            progress.emit(ProgressEvent::FileComplete {
+                index: ndx,
+                name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                literal_bytes: entry.len as u64,
+                matched_bytes: 0,
+            });
             continue;
         }
 
