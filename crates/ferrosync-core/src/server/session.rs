@@ -122,15 +122,31 @@ impl ServerSession {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
+        let (reader, writer) = tokio::io::split(stream);
+        self.run_split(reader, writer).await
+    }
+
+    /// Run the server session over stdin/stdout.
+    ///
+    /// Used when invoked as `ferrosync --server` over SSH.
+    pub async fn run_over_stdio(self) -> Result<(), SessionError> {
+        let stdin = tokio::io::stdin();
+        let stdout = tokio::io::stdout();
+        self.run_split(stdin, stdout).await
+    }
+
+    /// Run the server session with separate reader and writer streams.
+    pub async fn run_split<R, W>(self, mut reader: R, mut writer: W) -> Result<(), SessionError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         tracing::info!(
-            peer = %self.peer_addr,
             module = %self.module.name,
             direction = ?self.direction,
             args = ?self.args,
             "starting server session"
         );
-
-        let (mut reader, mut writer) = tokio::io::split(stream);
 
         // Parse client args into TransferOptions.
         let am_sender = self.direction == TransferDirection::Send;

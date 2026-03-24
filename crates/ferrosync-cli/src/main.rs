@@ -52,15 +52,6 @@ enum Commands {
         #[arg(long, default_value_t = DEFAULT_DAEMON_PORT)]
         port: u16,
     },
-    /// Start as an rsync-compatible daemon
-    Serve {
-        /// Configuration file (rsyncd.conf format)
-        #[arg(long, value_name = "FILE")]
-        config: Option<PathBuf>,
-        /// Port to listen on
-        #[arg(long, default_value_t = 873)]
-        port: u16,
-    },
 }
 
 /// Transfer flags matching rsync's command-line interface.
@@ -1005,23 +996,39 @@ fn create_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+    // Detect --server and --daemon modes before clap parsing.
+    // These modes use rsync's arg format, not clap's, so they must
+    // be handled separately. This matches rsync's own main() flow.
+    let raw_args: Vec<String> = std::env::args().collect();
+
+    if raw_args.iter().any(|a| a == "--server") {
+        init_tracing();
+        return match run_server_mode(raw_args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ferrosync: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    if raw_args.iter().any(|a| a == "--daemon") {
+        init_tracing();
+        return match run_daemon_mode(raw_args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("ferrosync: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    init_tracing();
 
     let cli = Cli::parse();
 
     let result = match cli.command {
         Some(Commands::Ls { host, port }) => run_ls(&host, port).await,
-        Some(Commands::Serve { config: _, port: _ }) => {
-            eprintln!("ferrosync: serve command not yet fully implemented");
-            return ExitCode::from(1);
-        }
         None => {
             if cli.paths.len() < 2 {
                 eprintln!("ferrosync: need at least a source and destination path");
@@ -1041,6 +1048,98 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
+// ---------------------------------------------------------------------------
+// Server mode (--server): SSH protocol over stdin/stdout
+// ---------------------------------------------------------------------------
+
+/// Run as the server side of an SSH rsync connection.
+///
+/// Invoked as: `ferrosync --server [--sender] -OPTIONS . /path`
+/// Protocol runs over stdin/stdout, matching rsync's `--server` mode.
+async fn run_server_mode(args: Vec<String>) -> Result<(), ferrosync_core::FerrosyncError> {
+    use ferrosync_core::server::module::Module;
+    use ferrosync_core::server::session::ServerSession;
+
+    let server_args: Vec<String> = args
+        .into_iter()
+        .skip(1) // skip binary name
+        .filter(|a| a != "--server")
+        .collect();
+
+    // Extract path (last arg, after the "." separator).
+    let path = server_args
+        .last()
+        .ok_or_else(|| {
+            ferrosync_core::FerrosyncError::Transport(
+                ferrosync_core::error::TransportError::ConnectionFailed {
+                    message: "no path in --server args".to_string(),
+                },
+            )
+        })?
+        .clone();
+
+    let module = Module {
+        name: String::new(),
+        path: PathBuf::from(&path),
+        read_only: false,
+        list: false,
+        comment: String::new(),
+        auth: ferrosync_core::server::module::ModuleAuth {
+            auth_users: String::new(),
+            secrets_file: None,
+        },
+        access: Default::default(),
+        max_connections: 0,
+        timeout: 0,
+        exclude: Vec::new(),
+        include: Vec::new(),
+        filter: Vec::new(),
+    };
+
+    let session = ServerSession::new(
+        module,
+        server_args,
+        std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+    );
+    session.run_over_stdio().await.map_err(|e| {
+        ferrosync_core::FerrosyncError::Transport(
+            ferrosync_core::error::TransportError::ConnectionFailed {
+                message: format!("server session error: {e}"),
+            },
+        )
+    })?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Daemon mode (--daemon): TCP listener
+// ---------------------------------------------------------------------------
+
+/// Run as a standalone rsync-compatible daemon.
+///
+/// Invoked as: `ferrosync --daemon [--config=FILE] [--port=N]`
+async fn run_daemon_mode(_args: Vec<String>) -> Result<(), ferrosync_core::FerrosyncError> {
+    // TODO: Parse --config=FILE and --port=N, load config, start listener.
+    eprintln!("ferrosync: --daemon mode not yet implemented");
+    Err(ferrosync_core::FerrosyncError::Transport(
+        ferrosync_core::error::TransportError::ConnectionFailed {
+            message: "--daemon mode not yet implemented".to_string(),
+        },
+    ))
 }
 
 // ---------------------------------------------------------------------------
