@@ -2469,7 +2469,6 @@ async fn test_native_pull() {
 /// still appear in "new". If --link-dest were silently ignored, file_b would
 /// be a separate copy rather than hard-linked.
 #[tokio::test]
-#[ignore] // link-dest + delete interaction (#131)
 async fn test_combo_time_machine_snapshot() {
     skip_if_no_ssh!();
 
@@ -2502,8 +2501,13 @@ async fn test_combo_time_machine_snapshot() {
     set_mtime(&src.join("file_a"), 1_800_000_000);
     std::fs::remove_file(src.join("file_c")).unwrap();
 
-    // Push modified source to remote.
-    push_archive(&src, &remote_dir, 30).await;
+    // Push modified source to remote with --delete so file_c is removed.
+    let push_opts = ferrosync_core::options::TransferOptions::builder()
+        .archive()
+        .delete(ferrosync_core::options::DeleteMode::During)
+        .source(src.clone())
+        .build();
+    push_with_opts(push_opts, &remote_dir, 30).await;
 
     // Pull into "new" with --delete + --link-dest=../current (relative).
     let opts = ferrosync_core::options::TransferOptions::builder()
@@ -2593,7 +2597,6 @@ async fn test_combo_exact_mirror() {
 /// If --delete-excluded were downgraded to plain --delete, .env and keepme.txt
 /// would be preserved (since they match exclude patterns).
 #[tokio::test]
-#[ignore] // --delete-excluded semantics (#130)
 async fn test_combo_deploy_delete_excluded() {
     skip_if_no_ssh!();
 
@@ -2961,7 +2964,6 @@ async fn test_combo_checksum_archive() {
 /// If -u were silently ignored, file_b's remote content would be overwritten
 /// by the older source version.
 #[tokio::test]
-#[ignore] // push -u receiver semantics (#132)
 async fn test_combo_update_merge() {
     skip_if_no_ssh!();
 
@@ -2973,15 +2975,20 @@ async fn test_combo_update_merge() {
     let remote_dir = remote_tmpdir().await;
     push_archive(&env.src(), &remote_dir, 30).await;
 
+    // Verify first push set mtimes correctly.
+    let mtime_b = ssh_cmd(&["stat", "-c", "%Y", &format!("{remote_dir}/file_b.txt")]).await;
+    assert_eq!(mtime_b.trim(), "1700000000", "first push should set file_b mtime");
+
     // On remote, overwrite file_b with newer content and a NEWER mtime.
-    ssh_cmd(&[
-        "bash",
-        "-c",
-        &format!(
-            "echo 'remote_newer' > {remote_dir}/file_b.txt && touch -d @1800000000 {remote_dir}/file_b.txt"
-        ),
-    ])
+    // Single arg: SSH invokes a shell that parses the full string correctly.
+    ssh_cmd(&[&format!(
+        "printf '%s\\n' remote_newer > {remote_dir}/file_b.txt && touch -d @1800000000 {remote_dir}/file_b.txt"
+    )])
     .await;
+
+    // Verify remote modification took effect.
+    let mtime_b2 = ssh_cmd(&["stat", "-c", "%Y", &format!("{remote_dir}/file_b.txt")]).await;
+    assert_eq!(mtime_b2.trim(), "1800000000", "remote modify should set newer mtime");
 
     // Push with -u (update): should skip file_b because remote is newer.
     let opts = ferrosync_core::options::TransferOptions::builder()
@@ -2989,7 +2996,11 @@ async fn test_combo_update_merge() {
         .update(true)
         .source(env.src())
         .build();
-    push_with_opts(opts, &remote_dir, 30).await;
+    let result = push_with_opts(opts, &remote_dir, 30).await;
+
+    // Both files should be skipped: file_a has same size+mtime (quick check),
+    // file_b is newer on receiver (-u skip).
+    assert_eq!(result.stats.files_transferred, 0, "no files should transfer");
 
     // file_a should have source content (remote was older or same).
     assert_eq!(
@@ -3001,6 +3012,60 @@ async fn test_combo_update_merge() {
         remote_cat(&format!("{remote_dir}/file_b.txt")).await,
         "remote_newer\n",
         "--update should not overwrite newer remote file"
+    );
+
+    remote_cleanup(&remote_dir).await;
+}
+
+/// Control test: rsync-to-rsync validates that --update semantics work as
+/// expected using real rsync on both sides (no ferrosync in the loop).
+#[tokio::test]
+async fn test_combo_update_merge_rsync_control() {
+    skip_if_no_ssh!();
+
+    let env = TestEnv::builder()
+        .with_src_file("file_a.txt", b"src_a\n", Some(1_700_000_000))
+        .with_src_file("file_b.txt", b"src_b\n", Some(1_700_000_000))
+        .build();
+
+    let remote_dir = remote_tmpdir().await;
+    let host = ssh_host();
+    let ssh_args = "ssh -i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR";
+
+    // Push via real rsync (rsync on both sides, no ferrosync).
+    let output = tokio::process::Command::new("rsync")
+        .args(["-a", "-e", ssh_args])
+        .arg(format!("{}/", env.src().display()))
+        .arg(format!("root@{host}:{remote_dir}/"))
+        .output()
+        .await
+        .expect("rsync push");
+    assert!(output.status.success(), "rsync initial push failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Modify file_b on remote with newer mtime.
+    ssh_cmd(&[&format!(
+        "printf '%s\\n' remote_newer > {remote_dir}/file_b.txt && touch -d @1800000000 {remote_dir}/file_b.txt"
+    )])
+    .await;
+
+    // Push again with -u: should skip file_b.
+    let output = tokio::process::Command::new("rsync")
+        .args(["-a", "-u", "-e", ssh_args])
+        .arg(format!("{}/", env.src().display()))
+        .arg(format!("root@{host}:{remote_dir}/"))
+        .output()
+        .await
+        .expect("rsync -u push");
+    assert!(output.status.success(), "rsync -u push failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/file_a.txt")).await,
+        "src_a\n",
+    );
+    assert_eq!(
+        remote_cat(&format!("{remote_dir}/file_b.txt")).await,
+        "remote_newer\n",
+        "rsync --update should not overwrite newer remote file"
     );
 
     remote_cleanup(&remote_dir).await;

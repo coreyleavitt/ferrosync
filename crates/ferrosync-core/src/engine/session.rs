@@ -60,7 +60,7 @@ pub enum SyncDirection {
 /// string (including the `e`-prefixed capability string) as the first
 /// element, followed by any long-form options as individual elements.
 /// Each element maps to one `argv` entry on the remote side.
-pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<String> {
+pub fn build_server_options(opts: &TransferOptions, am_sender: bool) -> Vec<String> {
     let mut condensed = String::from("-");
 
     // Single-char flags MUST come before the capability string, because
@@ -165,7 +165,7 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     // For push (am_sender=true), don't advertise incremental recursion ('i')
     // because our sender doesn't implement per-directory sub-list generation.
     // For pull, 'i' is fine since rsync's sender handles incremental sub-lists.
-    let use_inc_recurse = opts.recursive() && !_am_sender;
+    let use_inc_recurse = opts.recursive() && !am_sender;
     let caps = build_capability_string(use_inc_recurse, true, false);
     condensed.push('e');
     condensed.push_str(&caps);
@@ -184,18 +184,6 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     if opts.append() {
         args.push("--append".into());
     }
-    if opts.size_only() {
-        args.push("--size-only".into());
-    }
-    if opts.existing() {
-        args.push("--existing".into());
-    }
-    if opts.ignore_existing() {
-        args.push("--ignore-existing".into());
-    }
-    if let Some(n) = opts.max_delete() {
-        args.push(format!("--max-delete={n}"));
-    }
     if opts.safe_links() {
         args.push("--safe-links".into());
     }
@@ -204,9 +192,6 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     }
     if opts.append_verify() {
         args.push("--append-verify".into());
-    }
-    if opts.modify_window() > 0 {
-        args.push(format!("--modify-window={}", opts.modify_window()));
     }
     if let Some(n) = opts.block_size() {
         args.push(format!("--block-size={n}"));
@@ -225,13 +210,6 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
     for path in opts.include_from() {
         args.push(format!("--include-from={}", path.display()));
     }
-
-    if opts.partial() {
-        args.push("--partial".into());
-    }
-    if let Some(pd) = opts.partial_dir() {
-        args.push(format!("--partial-dir={}", pd.display()));
-    }
     if opts.list_only() {
         args.push("--list-only".into());
     }
@@ -248,15 +226,39 @@ pub fn build_server_options(opts: &TransferOptions, _am_sender: bool) -> Vec<Str
         args.push(format!("--iconv={charset}"));
     }
 
-    match opts.delete() {
-        DeleteMode::Before => args.push("--delete-before".into()),
-        DeleteMode::During => args.push("--delete-during".into()),
-        DeleteMode::After => args.push("--delete-after".into()),
-        DeleteMode::Excluded => args.push("--delete-excluded".into()),
-        DeleteMode::None => {}
-    }
-
-    if _am_sender {
+    // Sender-only options: rsync's server_options() only sends these
+    // when am_sender=true (client is sender = push). For pull, these
+    // are handled entirely on the client (receiver) side.
+    // C ref: options.c:2807-2924
+    if am_sender {
+        if opts.size_only() {
+            args.push("--size-only".into());
+        }
+        if opts.existing() {
+            args.push("--existing".into());
+        }
+        if opts.ignore_existing() {
+            args.push("--ignore-existing".into());
+        }
+        if let Some(n) = opts.max_delete() {
+            args.push(format!("--max-delete={n}"));
+        }
+        if opts.modify_window() > 0 {
+            args.push(format!("--modify-window={}", opts.modify_window()));
+        }
+        if opts.partial() {
+            args.push("--partial".into());
+        }
+        if let Some(pd) = opts.partial_dir() {
+            args.push(format!("--partial-dir={}", pd.display()));
+        }
+        match opts.delete() {
+            DeleteMode::Before => args.push("--delete-before".into()),
+            DeleteMode::During => args.push("--delete-during".into()),
+            DeleteMode::After => args.push("--delete-after".into()),
+            DeleteMode::Excluded => args.push("--delete-excluded".into()),
+            DeleteMode::None => {}
+        }
         for dir in opts.link_dest() {
             args.push(format!("--link-dest={}", dir.display()));
         }
@@ -1016,6 +1018,17 @@ fn sanitize_path(dest: &std::path::Path, name: &str) -> Result<PathBuf> {
 fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
 
+    // C ref: exclude.c send_filter_list / recv_filter_list
+    //
+    // With --delete-excluded, rsync marks plain include/exclude rules as
+    // FILTRULE_SENDER_SIDE and elides them from the wire. The remote
+    // generator then has no exclude rules, so it deletes every file not
+    // in the sender's file list -- including files the sender excluded.
+    // We replicate this by skipping include/exclude rules when
+    // delete_excluded is active. Filter rules (--filter) may carry
+    // explicit side annotations and are always sent.
+    let delete_excluded = options.delete() == DeleteMode::Excluded;
+
     // Order matters: rsync uses first-match-wins. Send filter rules first
     // (highest priority), then includes, then excludes. This matches
     // FilterRuleList::from_options ordering and ensures include+exclude
@@ -1024,15 +1037,17 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
         buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
         buf.extend_from_slice(rule.as_bytes());
     }
-    for pattern in options.include() {
-        let rule = format!("+ {pattern}");
-        buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
-        buf.extend_from_slice(rule.as_bytes());
-    }
-    for pattern in options.exclude() {
-        let rule = format!("- {pattern}");
-        buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
-        buf.extend_from_slice(rule.as_bytes());
+    if !delete_excluded {
+        for pattern in options.include() {
+            let rule = format!("+ {pattern}");
+            buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
+            buf.extend_from_slice(rule.as_bytes());
+        }
+        for pattern in options.exclude() {
+            let rule = format!("- {pattern}");
+            buf.extend_from_slice(&(rule.len() as i32).to_le_bytes());
+            buf.extend_from_slice(rule.as_bytes());
+        }
     }
 
     // End of filter list.
