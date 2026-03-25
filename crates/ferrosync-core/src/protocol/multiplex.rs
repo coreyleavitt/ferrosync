@@ -124,12 +124,12 @@ pub(crate) enum MplexMessage {
     Log(String),
     /// Reprocess a file list index.
     Redo(i32),
-    /// Successfully updated file at index.
-    Success(i32),
-    /// Deleted file at index.
-    Deleted(i32),
-    /// Failed to send file at index.
-    NoSend(i32),
+    /// Successfully updated file (payload is filename).
+    Success(String),
+    /// Deleted file (payload is filename).
+    Deleted(String),
+    /// Failed to send file (payload is filename).
+    NoSend(String),
     /// I/O error flags from sender.
     IoError(i32),
     /// Daemon timeout value.
@@ -226,9 +226,9 @@ impl<R: AsyncRead + Unpin> MplexReader<R> {
             }
 
             MsgCode::Redo => Ok(MplexMessage::Redo(self.read_i32().await?)),
-            MsgCode::Success => Ok(MplexMessage::Success(self.read_i32().await?)),
-            MsgCode::Deleted => Ok(MplexMessage::Deleted(self.read_i32().await?)),
-            MsgCode::NoSend => Ok(MplexMessage::NoSend(self.read_i32().await?)),
+            MsgCode::Success => Ok(MplexMessage::Success(self.read_text(payload_len).await?)),
+            MsgCode::Deleted => Ok(MplexMessage::Deleted(self.read_text(payload_len).await?)),
+            MsgCode::NoSend => Ok(MplexMessage::NoSend(self.read_text(payload_len).await?)),
             MsgCode::IoError => Ok(MplexMessage::IoError(self.read_i32().await?)),
             MsgCode::IoTimeout => Ok(MplexMessage::IoTimeout(self.read_i32().await?)),
 
@@ -624,30 +624,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_read_index_messages() {
-        let cases = [
-            (MsgCode::Redo, 42_i32),
-            (MsgCode::Success, 100),
-            (MsgCode::Deleted, 7),
-            (MsgCode::NoSend, 0),
-        ];
+        // Redo carries an i32 file list index.
+        let mut buf = Vec::new();
+        let mut writer = MplexWriter::new(&mut buf);
+        writer.write_index(MsgCode::Redo, 42).await.unwrap();
+        writer.flush().await.unwrap();
+        drop(writer);
+        let mut reader = MplexReader::new(Cursor::new(&buf));
+        let msg = reader.read_message().await.unwrap();
+        match msg {
+            MplexMessage::Redo(i) => assert_eq!(i, 42),
+            other => panic!("expected Redo, got {other:?}"),
+        }
+    }
 
-        for (code, idx) in cases {
+    #[tokio::test]
+    async fn test_write_read_text_messages() {
+        // Success, Deleted, NoSend carry filenames (text payloads).
+        let cases = [
+            (MsgCode::Success, "updated.txt"),
+            (MsgCode::Deleted, "removed.txt"),
+            (MsgCode::NoSend, "skipped.txt"),
+        ];
+        for (code, name) in cases {
             let mut buf = Vec::new();
             let mut writer = MplexWriter::new(&mut buf);
-            writer.write_index(code, idx).await.unwrap();
+            writer.write_message(code, name.as_bytes()).await.unwrap();
             writer.flush().await.unwrap();
             drop(writer);
-
             let mut reader = MplexReader::new(Cursor::new(&buf));
             let msg = reader.read_message().await.unwrap();
-            let got_idx = match msg {
-                MplexMessage::Redo(i) => i,
-                MplexMessage::Success(i) => i,
-                MplexMessage::Deleted(i) => i,
-                MplexMessage::NoSend(i) => i,
-                other => panic!("expected index message, got {other:?}"),
+            let got_name = match msg {
+                MplexMessage::Success(s) => s,
+                MplexMessage::Deleted(s) => s,
+                MplexMessage::NoSend(s) => s,
+                other => panic!("expected text message for {code:?}, got {other:?}"),
             };
-            assert_eq!(got_idx, idx, "index mismatch for {code:?}");
+            assert_eq!(got_name, name, "text mismatch for {code:?}");
         }
     }
 
