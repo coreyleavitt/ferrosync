@@ -2469,7 +2469,7 @@ async fn test_native_pull() {
 /// still appear in "new". If --link-dest were silently ignored, file_b would
 /// be a separate copy rather than hard-linked.
 #[tokio::test]
-#[ignore] // TODO: push+delete/update combo requires filter list wiring
+#[ignore] // push+delete/update wire issue (#128)
 async fn test_combo_time_machine_snapshot() {
     skip_if_no_ssh!();
 
@@ -2536,7 +2536,7 @@ async fn test_combo_time_machine_snapshot() {
 /// Exact mirror push: --delete removes extraneous remote files.
 /// If --delete were silently ignored, extra_remote.txt would survive.
 #[tokio::test]
-#[ignore] // TODO: push+delete/update combo requires filter list wiring
+#[ignore] // push+delete/update wire issue (#128)
 async fn test_combo_exact_mirror() {
     skip_if_no_ssh!();
 
@@ -2594,7 +2594,7 @@ async fn test_combo_exact_mirror() {
 /// If --delete-excluded were downgraded to plain --delete, .env and keepme.txt
 /// would be preserved (since they match exclude patterns).
 #[tokio::test]
-#[ignore] // TODO: push+delete/update combo requires filter list wiring
+#[ignore] // push+delete/update wire issue (#128)
 async fn test_combo_deploy_delete_excluded() {
     skip_if_no_ssh!();
 
@@ -2643,7 +2643,7 @@ async fn test_combo_deploy_delete_excluded() {
 /// Dry-run + --delete: nothing actually changes on the remote.
 /// If --dry-run were silently ignored, extra.txt would be deleted.
 #[tokio::test]
-#[ignore] // TODO: push+delete/update combo requires filter list wiring
+#[ignore] // push+delete/update wire issue (#128)
 async fn test_combo_dry_run_audit() {
     skip_if_no_ssh!();
 
@@ -2865,7 +2865,7 @@ async fn test_combo_include_whitelist() {
 /// If --exclude were silently ignored during delete, protected.log would be removed.
 /// If --delete were silently ignored, extra.txt would survive.
 #[tokio::test]
-#[ignore] // TODO: push+delete/update combo requires filter list wiring
+#[ignore] // push+delete/update wire issue (#128)
 async fn test_combo_delete_exclude_safety() {
     skip_if_no_ssh!();
 
@@ -2964,7 +2964,7 @@ async fn test_combo_checksum_archive() {
 /// If -u were silently ignored, file_b's remote content would be overwritten
 /// by the older source version.
 #[tokio::test]
-#[ignore] // TODO: push+delete/update combo requires filter list wiring
+#[ignore] // push+delete/update wire issue (#128)
 async fn test_combo_update_merge() {
     skip_if_no_ssh!();
 
