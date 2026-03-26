@@ -37,9 +37,6 @@ pub enum SessionError {
     #[error(transparent)]
     Fs(#[from] FsError),
 
-    #[error(transparent)]
-    Wire(#[from] wire_transfer::WireError),
-
     #[error("module path does not exist: {path}")]
     ModulePathNotFound { path: String },
 }
@@ -49,8 +46,13 @@ impl From<crate::FerrosyncError> for SessionError {
         match e {
             crate::FerrosyncError::Protocol(p) => SessionError::Protocol(p),
             crate::FerrosyncError::Fs(f) => SessionError::Fs(f),
-            other => SessionError::Protocol(ProtocolError::Handshake {
-                message: other.to_string(),
+            crate::FerrosyncError::Transport(t) => {
+                SessionError::Protocol(ProtocolError::Handshake {
+                    message: t.to_string(),
+                })
+            }
+            crate::FerrosyncError::Filter(f) => SessionError::Protocol(ProtocolError::Handshake {
+                message: f.to_string(),
             }),
         }
     }

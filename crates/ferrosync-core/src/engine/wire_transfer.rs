@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::delta::ops::DiffOp;
 use crate::delta::token::TokenWriter;
@@ -23,52 +23,9 @@ use crate::protocol::compress::{Compressor, Decompressor};
 use crate::protocol::handshake::{CompressType, NegotiatedProtocol};
 use crate::protocol::multiplex::MplexWriter;
 use crate::protocol::varint;
-use crate::protocol::wire_format::IntCodec;
 use crate::stats::TransferStats;
 
-type Result<T> = std::result::Result<T, WireError>;
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Errors from wire-level transfer loops.
-#[derive(Debug, thiserror::Error)]
-pub enum WireError {
-    #[error(transparent)]
-    Protocol(#[from] ProtocolError),
-    #[error(transparent)]
-    Fs(#[from] crate::error::FsError),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-impl From<crate::FerrosyncError> for WireError {
-    fn from(e: crate::FerrosyncError) -> Self {
-        match e {
-            crate::FerrosyncError::Protocol(p) => WireError::Protocol(p),
-            crate::FerrosyncError::Fs(f) => WireError::Fs(f),
-            // Transport and Filter errors should not occur in wire transfer
-            // context; convert losslessly via the Display representation.
-            crate::FerrosyncError::Transport(t) => WireError::Protocol(ProtocolError::Handshake {
-                message: t.to_string(),
-            }),
-            crate::FerrosyncError::Filter(f) => WireError::Protocol(ProtocolError::Handshake {
-                message: f.to_string(),
-            }),
-        }
-    }
-}
-
-impl From<WireError> for crate::FerrosyncError {
-    fn from(e: WireError) -> Self {
-        match e {
-            WireError::Protocol(p) => crate::FerrosyncError::Protocol(p),
-            WireError::Fs(f) => crate::FerrosyncError::Fs(f),
-            WireError::Io(io) => crate::FerrosyncError::Protocol(ProtocolError::from(io)),
-        }
-    }
-}
+type Result<T> = std::result::Result<T, crate::FerrosyncError>;
 
 // ---------------------------------------------------------------------------
 // FileReader trait (sender side)
@@ -402,7 +359,7 @@ where
             loop {
                 let (ops, done) = smatcher
                     .process_chunk(&mut *stream_reader, &mut file_hash)
-                    .map_err(WireError::Io)?;
+                    .map_err(crate::FerrosyncError::from)?;
                 for op in &ops {
                     match op {
                         DiffOp::Literal(ref data) => {
@@ -682,7 +639,7 @@ where
         // Signal completion.
         let _ = gen_tx.send(GeneratorItem::Done).await;
 
-        Ok::<MplexWriter<W>, WireError>(mplex_out)
+        Ok::<MplexWriter<W>, crate::FerrosyncError>(mplex_out)
     });
 
     // --- Receiver task (runs on current task) ---
@@ -825,7 +782,7 @@ where
     // Wait for generator task to complete and recover mplex_out.
     // We need mplex_out back for the phase exchange that follows.
     let mplex_out = generator_handle.await.map_err(|e| {
-        WireError::Protocol(ProtocolError::Handshake {
+        crate::FerrosyncError::Protocol(ProtocolError::Handshake {
             message: format!("generator task panicked: {e}"),
         })
     })??;

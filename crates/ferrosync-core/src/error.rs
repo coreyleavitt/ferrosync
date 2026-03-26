@@ -23,8 +23,8 @@ pub enum ProtocolError {
     #[error("unexpected message type: {msg_type}")]
     UnexpectedMessageType { msg_type: u8 },
 
-    #[error("invalid varint encoding")]
-    InvalidVarint,
+    #[error("invalid varint encoding: {detail}")]
+    InvalidVarint { detail: &'static str },
 
     #[error("wire value out of range: {field} = {value} (max {max})")]
     WireValueOutOfRange {
@@ -169,4 +169,10 @@ pub enum FerrosyncError {
 
     #[error(transparent)]
     Filter(#[from] FilterError),
+}
+
+impl From<std::io::Error> for FerrosyncError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Protocol(ProtocolError::from(e))
+    }
 }

@@ -708,7 +708,13 @@ fn build_file_list(
             if !copy_links
                 && (meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == s_iflnk())
             {
-                entry.link_target = fs.read_link(source).unwrap_or_default();
+                entry.link_target = match fs.read_link(source) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(path = %source.display(), error = %e, "failed to read symlink target");
+                        Vec::new()
+                    }
+                };
             }
 
             items.push(FileListItem {
@@ -833,7 +839,13 @@ fn collect_directory(
                 && (child_meta.mode & S_IFMT == entry::WIRE_S_IFLNK
                     || child_meta.mode & S_IFMT == s_iflnk())
             {
-                entry.link_target = fs.read_link(&child_path).unwrap_or_default();
+                entry.link_target = match fs.read_link(&child_path) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(path = %child_path.display(), error = %e, "failed to read symlink target");
+                        Vec::new()
+                    }
+                };
             }
 
             items.push(FileListItem {

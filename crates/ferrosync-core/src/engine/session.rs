@@ -1118,7 +1118,13 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
         } else {
             let mut entry = meta.to_file_entry(name);
             if !options.copy_links() && entry.is_symlink() {
-                entry.link_target = fs.read_link(source).unwrap_or_default();
+                entry.link_target = match fs.read_link(source) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(path = %source.display(), error = %e, "failed to read symlink target");
+                        Vec::new()
+                    }
+                };
             }
             entries.push(entry);
         }

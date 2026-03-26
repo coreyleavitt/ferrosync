@@ -119,7 +119,9 @@ pub(crate) async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> 
     // so the 4 extra bytes contain the complete 32-bit value. Only reject
     // extra > 4 (values 0xF8+ which would need > 32 data bits).
     if extra > 4 {
-        return Err(ProtocolError::InvalidVarint);
+        return Err(ProtocolError::InvalidVarint {
+            detail: "extra bytes exceed 4",
+        });
     }
 
     let mut b = [0u8; 4];
@@ -205,7 +207,9 @@ pub(crate) async fn read_varlong<R: AsyncRead + Unpin>(r: &mut R, min_bytes: usi
     if extra > 0 {
         let extra_start = min_bytes - 1;
         if extra_start + extra >= 8 {
-            return Err(ProtocolError::InvalidVarint);
+            return Err(ProtocolError::InvalidVarint {
+                detail: "extra bytes would overflow u64",
+            });
         }
         r.read_exact(&mut result[extra_start..extra_start + extra])
             .await?;

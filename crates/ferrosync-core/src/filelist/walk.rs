@@ -105,7 +105,13 @@ pub fn collect_directory_entries(
         } else {
             let mut entry = child_meta.to_file_entry(child_name);
             if !walk_opts.copy_links && entry.is_symlink() {
-                entry.link_target = fs.read_link(&child_path).unwrap_or_default();
+                entry.link_target = match fs.read_link(&child_path) {
+                    Ok(target) => target,
+                    Err(e) => {
+                        tracing::warn!(path = %child_path.display(), error = %e, "failed to read symlink target");
+                        Vec::new()
+                    }
+                };
             }
             entries.push(entry);
         }
