@@ -17,7 +17,7 @@ use tokio::io::AsyncRead;
 
 use crate::engine::delete;
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
-use crate::engine::wire_transfer::{self, LocalFileOps, LocalFileReader};
+use crate::engine::wire_transfer::{self, LocalFileReader};
 use crate::error::FsError;
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
@@ -911,7 +911,9 @@ async fn run_pull(
         }
     } else {
         // Pipelined receiver loop: generator and receiver run concurrently.
-        let file_ops: Arc<dyn wire_transfer::FileOps> = Arc::new(LocalFileOps::new(
+        // dispatch_entry handles directories, symlinks, skip checks, and
+        // link-dest inside the generator -- no separate passes needed.
+        let engine = Arc::new(super::receiver_engine::ReceiverEngine::new(
             Arc::clone(&fs),
             dest.clone(),
             options.clone(),
@@ -922,7 +924,7 @@ async fn run_pull(
             mplex_out,
             &entries,
             &entry_ndx,
-            file_ops,
+            engine,
             protocol,
             &mut stats,
             progress,
@@ -931,18 +933,6 @@ async fn run_pull(
         .await?;
         demux_read = dr;
         mplex_out = mo;
-
-        // Handle symlinks (after file transfers).
-        for entry in &entries {
-            if entry.is_symlink() && options.preserve_links() {
-                let name_str = String::from_utf8_lossy(&entry.name);
-                let dest_path = dest.join(name_str.as_ref());
-                if !entry.link_target.is_empty() {
-                    let _ = fs.create_symlink(&entry.link_target, &dest_path);
-                }
-                stats.symlinks += 1;
-            }
-        }
     }
 
     // Delete extraneous files after the transfer.

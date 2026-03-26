@@ -13,7 +13,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::module::Module;
 use crate::engine::progress::ProgressTracker;
-use crate::engine::wire_transfer::{self, ModuleFileOps, ModuleFileReader};
+use crate::engine::receiver_engine::ReceiverEngine;
+use crate::engine::wire_transfer::{self, ModuleFileReader};
 use crate::error::{FsError, ProtocolError};
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
@@ -346,13 +347,15 @@ impl ServerSession {
         let entry_ndx = received_flist.entry_ndx;
 
         // Pipelined receiver loop via wire_transfer.
-        let file_ops: std::sync::Arc<dyn wire_transfer::FileOps> =
-            std::sync::Arc::new(ModuleFileOps::new(fs, module.path.clone()));
+        // Server receiver uses default TransferOptions -- no skip checks,
+        // no link-dest, no metadata preservation.
+        let engine =
+            std::sync::Arc::new(ReceiverEngine::new(fs, module.path.clone(), opts.clone()));
         let mut stats = TransferStats::new();
         stats.start();
 
         let (dr, mo) = wire_transfer::receiver_loop_pipelined(
-            demux_read, mplex_out, &entries, &entry_ndx, file_ops, protocol, &mut stats, progress,
+            demux_read, mplex_out, &entries, &entry_ndx, engine, protocol, &mut stats, progress,
             None,
         )
         .await?;

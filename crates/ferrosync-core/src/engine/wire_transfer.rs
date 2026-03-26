@@ -188,300 +188,6 @@ impl FileReader for ModuleFileReader<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// FileOps trait (receiver side)
-// ---------------------------------------------------------------------------
-
-/// Receiver-side file operations abstraction.
-///
-/// Client pull uses local filesystem + TransferOptions for writing, metadata,
-/// and skip decisions. Server receive uses module path.
-pub trait FileOps: Send + Sync {
-    /// Read the existing basis file at the destination (for delta).
-    fn read_basis(&self, entry: &FileEntry) -> FileData;
-
-    /// Write the reconstructed file data to the destination.
-    fn write_file(
-        &self,
-        entry: &FileEntry,
-        data: &[u8],
-    ) -> std::result::Result<(), crate::FerrosyncError>;
-
-    /// Create a buffered writer for streaming file reconstruction.
-    ///
-    /// The file is written to a temporary path and moved into place by
-    /// `finish_file`. This avoids partial files on failure.
-    fn create_writer(
-        &self,
-        entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError>;
-
-    /// Finalize a file written via `create_writer` (move temp to dest, set metadata).
-    fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError>;
-
-    /// Set file metadata (times, ownership, permissions) after writing.
-    fn set_metadata(&self, entry: &FileEntry);
-
-    /// Create the destination directory for a directory entry.
-    fn mkdir(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError>;
-
-    /// Check if a file should be skipped (quick check).
-    fn should_skip(&self, entry: &FileEntry) -> bool;
-
-    /// Create parent directories for a file entry if needed.
-    fn ensure_parent(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError>;
-
-    /// Resolve the destination path for a file entry.
-    fn dest_path(&self, entry: &FileEntry) -> PathBuf;
-
-    /// Attempt to satisfy a file via hard link from a --link-dest dir.
-    /// Returns true if the file was successfully linked (no delta needed).
-    fn try_link_dest(&self, entry: &FileEntry) -> bool {
-        let _ = entry;
-        false
-    }
-
-    /// Search for a similar file to use as delta basis (`--fuzzy`).
-    ///
-    /// When the destination file doesn't exist, searches the same directory
-    /// for files with matching size+mtime (exact match) or similar names
-    /// (fuzzy match) to use as a delta basis.
-    fn find_fuzzy_basis(&self, entry: &FileEntry) -> Option<FileData> {
-        let _ = entry;
-        None
-    }
-
-    /// Returns true if the buffered receive path should be used instead of streaming.
-    ///
-    /// Some features (like `--sparse`) require the full file data in memory
-    /// to write correctly, so the streaming path cannot be used.
-    fn needs_buffered_receive(&self) -> bool {
-        false
-    }
-
-    /// Whether append mode is active (`--append` or `--append-verify`).
-    fn is_append_mode(&self) -> bool {
-        false
-    }
-
-    /// Create a hard link at `link_entry`'s destination pointing to
-    /// `source_entry`'s destination. Used for `-H` hardlink preservation.
-    fn hardlink(
-        &self,
-        source_entry: &FileEntry,
-        link_entry: &FileEntry,
-    ) -> std::result::Result<(), crate::error::FsError>;
-}
-
-/// Receiver-side operations using local filesystem with TransferOptions.
-///
-/// Delegates all destination-side logic to [`ReceiverEngine`](super::receiver_engine::ReceiverEngine),
-/// which is shared with the local transfer engine.
-pub struct LocalFileOps {
-    engine: Arc<super::receiver_engine::ReceiverEngine>,
-}
-
-impl LocalFileOps {
-    pub fn new(
-        fs: Arc<dyn FileSystem>,
-        dest: PathBuf,
-        options: crate::options::TransferOptions,
-    ) -> Self {
-        let engine = Arc::new(super::receiver_engine::ReceiverEngine::new(
-            fs, dest, options,
-        ));
-        Self { engine }
-    }
-}
-
-impl FileOps for LocalFileOps {
-    fn read_basis(&self, entry: &FileEntry) -> FileData {
-        let dest_path = self.engine.dest_path(entry);
-        self.engine.fs().map_file(&dest_path).unwrap_or_default()
-    }
-
-    fn write_file(
-        &self,
-        entry: &FileEntry,
-        data: &[u8],
-    ) -> std::result::Result<(), crate::FerrosyncError> {
-        self.engine.receive_file(entry, data, None)
-    }
-
-    fn create_writer(
-        &self,
-        entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
-        self.engine.create_writer(entry)
-    }
-
-    fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError> {
-        self.engine.finish_file(entry, None)
-    }
-
-    fn set_metadata(&self, entry: &FileEntry) {
-        let dest_path = self.engine.dest_path(entry);
-        super::file_decision::set_file_metadata(
-            self.engine.fs(),
-            &dest_path,
-            entry,
-            self.engine.options(),
-        );
-    }
-
-    fn mkdir(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
-        self.engine.create_directory(entry)
-    }
-
-    fn should_skip(&self, entry: &FileEntry) -> bool {
-        self.engine.should_skip_file(entry)
-    }
-
-    fn ensure_parent(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
-        self.engine.ensure_parent(entry)
-    }
-
-    fn dest_path(&self, entry: &FileEntry) -> PathBuf {
-        self.engine.dest_path(entry)
-    }
-
-    fn try_link_dest(&self, entry: &FileEntry) -> bool {
-        self.engine.try_link_dest(entry)
-    }
-
-    fn find_fuzzy_basis(&self, entry: &FileEntry) -> Option<FileData> {
-        if !self.engine.options().fuzzy() {
-            return None;
-        }
-        let dest_path = self.engine.dest_path(entry);
-        let parent = dest_path.parent()?;
-        let target_name = dest_path.file_name()?;
-
-        let dir_entries = self.engine.fs().read_dir(parent).ok()?;
-
-        // Pass 1: find file with same size and mtime.
-        for e in &dir_entries {
-            if e.metadata.len == entry.len && e.metadata.mtime == entry.mtime {
-                let path = parent.join(FileEntry::name_to_pathbuf(&e.name));
-                if let Ok(data) = self.engine.fs().map_file(&path) {
-                    return Some(data);
-                }
-            }
-        }
-
-        // Pass 2: find file with most similar name.
-        let target_bytes = target_name.as_encoded_bytes();
-        let mut best_score = 0.5f64; // Minimum threshold
-        let mut best_path: Option<std::path::PathBuf> = None;
-
-        for e in &dir_entries {
-            let score = super::file_decision::fuzzy_score(target_bytes, &e.name);
-            if score > best_score {
-                best_score = score;
-                best_path = Some(parent.join(FileEntry::name_to_pathbuf(&e.name)));
-            }
-        }
-
-        best_path.and_then(|p| self.engine.fs().map_file(&p).ok())
-    }
-
-    fn needs_buffered_receive(&self) -> bool {
-        self.engine.needs_buffered_receive()
-    }
-
-    fn is_append_mode(&self) -> bool {
-        self.engine.options().append() || self.engine.options().append_verify()
-    }
-
-    fn hardlink(
-        &self,
-        source_entry: &FileEntry,
-        link_entry: &FileEntry,
-    ) -> std::result::Result<(), crate::error::FsError> {
-        let source_path = self.engine.dest_path(source_entry);
-        let link_path = self.engine.dest_path(link_entry);
-        self.engine.fs().hard_link(&source_path, &link_path)
-    }
-}
-
-/// Receiver-side operations using module directory (server side).
-pub struct ModuleFileOps {
-    fs: Arc<dyn FileSystem>,
-    module_path: PathBuf,
-}
-
-impl ModuleFileOps {
-    pub fn new(fs: Arc<dyn FileSystem>, module_path: PathBuf) -> Self {
-        Self { fs, module_path }
-    }
-}
-
-impl FileOps for ModuleFileOps {
-    fn read_basis(&self, entry: &FileEntry) -> FileData {
-        let dest_path = self.dest_path(entry);
-        self.fs.map_file(&dest_path).unwrap_or_default()
-    }
-
-    fn write_file(
-        &self,
-        entry: &FileEntry,
-        data: &[u8],
-    ) -> std::result::Result<(), crate::FerrosyncError> {
-        let dest_path = self.dest_path(entry);
-        Ok(self.fs.write_file(&dest_path, data, None)?)
-    }
-
-    fn create_writer(
-        &self,
-        entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
-        let dest_path = self.dest_path(entry);
-        Ok(self.fs.write_file_stream(&dest_path, None)?)
-    }
-
-    fn finish_file(&self, entry: &FileEntry) -> std::result::Result<(), crate::FerrosyncError> {
-        self.set_metadata(entry);
-        Ok(())
-    }
-
-    fn set_metadata(&self, _entry: &FileEntry) {
-        // Server doesn't set metadata by default (no TransferOptions).
-    }
-
-    fn mkdir(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
-        let dest_path = self.dest_path(entry);
-        self.fs.mkdir(&dest_path, 0o755)
-    }
-
-    fn should_skip(&self, _entry: &FileEntry) -> bool {
-        false
-    }
-
-    fn ensure_parent(&self, entry: &FileEntry) -> std::result::Result<(), crate::error::FsError> {
-        let dest_path = self.dest_path(entry);
-        if let Some(parent) = dest_path.parent() {
-            if !self.fs.lexists(parent) {
-                self.fs.mkdir(parent, 0o755)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn dest_path(&self, entry: &FileEntry) -> PathBuf {
-        self.module_path.join(entry.path())
-    }
-
-    fn hardlink(
-        &self,
-        source_entry: &FileEntry,
-        link_entry: &FileEntry,
-    ) -> std::result::Result<(), crate::error::FsError> {
-        let source_path = self.dest_path(source_entry);
-        let link_path = self.dest_path(link_entry);
-        self.fs.hard_link(&source_path, &link_path)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Polymorphic token writer (enum dispatch for sender loop)
 // ---------------------------------------------------------------------------
 
@@ -829,230 +535,37 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Receiver loop
-// ---------------------------------------------------------------------------
-
-/// Run the receiver loop: send block signatures to the sender, read delta
-/// data, and reconstruct files.
-///
-/// Used by both client pull (run_pull) and server receive (handle_receive_impl).
-#[allow(clippy::too_many_arguments)]
-pub async fn receiver_loop<R, W>(
-    demux_read: &mut R,
-    mplex_out: &mut MplexWriter<W>,
-    entries: &[FileEntry],
-    entry_ndx: &[i32],
-    file_ops: &dyn FileOps,
-    protocol: &NegotiatedProtocol,
-    stats: &mut TransferStats,
-    progress: &mut ProgressTracker,
-    block_size_override: Option<i32>,
-) -> Result<()>
-where
-    R: AsyncRead + Unpin + Send,
-    W: AsyncWrite + Unpin + Send,
-{
-    let mut ctx = ProtocolContext::from_protocol(protocol);
-    ctx.block_size_override = block_size_override;
-    let int_codec = protocol.wire.int_codec;
-    let wire = &protocol.wire;
-
-    let mut gen_ndx_state = varint::NdxState::default();
-    let mut recv_ndx_state = varint::NdxState::default();
-
-    // Create directories first.
-    for entry in entries {
-        if !entry.is_dir() {
-            continue;
-        }
-        file_ops.mkdir(entry)?;
-        stats.directories_created += 1;
-    }
-
-    // Collect hardlink duplicates for deferred creation after transfers.
-    let mut deferred_hardlinks: Vec<(&FileEntry, &[u8])> = Vec::new();
-
-    // Per-file receiver loop.
-    for (idx, entry) in entries.iter().enumerate() {
-        if !entry.is_file() {
-            continue;
-        }
-
-        progress.emit(ProgressEvent::FileStart {
-            index: idx as i32,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            size: entry.len,
-        });
-
-        // Ensure parent directories exist.
-        file_ops.ensure_parent(entry)?;
-
-        // Hardlink duplicate: defer creation until all first occurrences are on disk.
-        if let Some(ref source_name) = entry.hlink_source {
-            deferred_hardlinks.push((entry, source_name));
-            continue;
-        }
-
-        // Quick check: skip files that are already up-to-date.
-        if file_ops.should_skip(entry) {
-            continue;
-        }
-
-        // Read existing basis file (if any), with fuzzy fallback.
-        let basis_data = file_ops.read_basis(entry);
-        let basis_data = if basis_data.is_empty() {
-            file_ops.find_fuzzy_basis(entry).unwrap_or(basis_data)
-        } else {
-            basis_data
-        };
-
-        // Send generator output: NDX + iflags + sum_head + block sigs.
-        let file_ndx = entry_ndx[idx];
-        let mut sig_buf = Vec::new();
-        varint::write_ndx(&mut sig_buf, file_ndx, &mut gen_ndx_state, int_codec).await?;
-        // iflags: ITEM_TRANSFER (1<<15) signals data transfer needed.
-        if wire.has_iflags {
-            const ITEM_TRANSFER: u16 = 1 << 15;
-            varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
-        }
-        let sigs = sum::compute_signatures(&basis_data, &ctx);
-        if file_ops.is_append_mode() {
-            // Append mode: sender reads sum_head but skips block sigs
-            // (rsync sender.c receive_sums: if (append_mode > 0) return).
-            // Only send the header, not block checksums.
-            sum::write_sum_head(&mut sig_buf, &sigs.head).await?;
-        } else {
-            sum::write_sums(&mut sig_buf, &sigs).await?;
-        }
-        mplex_out.write_data(&sig_buf).await?;
-        mplex_out.flush().await?;
-
-        // Read sender's response.
-        let _file_ndx = varint::read_ndx(demux_read, &mut recv_ndx_state, int_codec).await?;
-
-        // Read iflags (when wire format includes them).
-        if wire.has_iflags {
-            let mut iflags_buf = [0u8; 2];
-            demux_read.read_exact(&mut iflags_buf).await?;
-            let iflags = u16::from_le_bytes(iflags_buf);
-
-            if iflags & 0x0800 != 0 {
-                let mut bt = [0u8; 1];
-                demux_read.read_exact(&mut bt).await?;
-            }
-            if iflags & 0x1000 != 0 {
-                let name_len = varint::read_varint(demux_read).await?;
-                if name_len > 0x10000 {
-                    return Err(WireError::Protocol(ProtocolError::WireValueOutOfRange {
-                        field: "xname_len",
-                        value: name_len as i64,
-                        max: 0x10000,
-                    }));
-                }
-                let mut name_buf = vec![0u8; name_len as usize];
-                demux_read.read_exact(&mut name_buf).await?;
-            }
-        }
-
-        // Read sum_head from sender.
-        let sum_head = sum::read_sum_head(demux_read).await?;
-        let blength = if sum_head.blength > 0 {
-            sum_head.blength as usize
-        } else {
-            700
-        };
-
-        // Reconstruct file: use buffered path for sparse, streaming otherwise.
-        let use_compress = protocol.compress != CompressType::None;
-        let literal_bytes = if file_ops.needs_buffered_receive() {
-            let data = receiver::recv_file_delta(demux_read, &basis_data, blength, &ctx).await?;
-            let len = data.len() as u64;
-            file_ops.write_file(entry, &data)?;
-            len
-        } else {
-            let mut writer = file_ops.create_writer(entry)?;
-            let bytes_written = if use_compress {
-                let decompressor = Decompressor::from_type(protocol.compress)?;
-                receiver::recv_file_delta_compressed_to_writer(
-                    demux_read,
-                    &basis_data,
-                    blength,
-                    &ctx,
-                    &mut writer,
-                    decompressor,
-                )
-                .await?
-            } else {
-                receiver::recv_file_delta_to_writer(
-                    demux_read,
-                    &basis_data,
-                    blength,
-                    &ctx,
-                    &mut writer,
-                )
-                .await?
-            };
-            drop(writer);
-            file_ops.finish_file(entry)?;
-            bytes_written
-        };
-
-        stats.files_transferred += 1;
-        stats.total_size += entry.len as u64;
-        stats.literal_data += literal_bytes;
-        stats.bytes_received += literal_bytes;
-
-        progress.emit(ProgressEvent::FileComplete {
-            index: idx as i32,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            literal_bytes,
-            matched_bytes: 0,
-        });
-    }
-
-    // Create deferred hardlinks now that first occurrences are on disk.
-    for (dup_entry, source_name) in &deferred_hardlinks {
-        if let Some(source) = entries.iter().find(|e| e.name == *source_name) {
-            if let Err(e) = file_ops.hardlink(source, dup_entry) {
-                tracing::warn!(
-                    source = %String::from_utf8_lossy(source_name),
-                    link = %String::from_utf8_lossy(&dup_entry.name),
-                    error = %e,
-                    "deferred hardlink creation failed"
-                );
-            } else {
-                stats.files_transferred += 1;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Pipelined receiver loop
 // ---------------------------------------------------------------------------
 
+use super::receiver_engine::{EntryAction, HandledKind, ReceiverEngine};
+
 /// Message from the generator task to the receiver task.
 enum GeneratorItem {
-    /// A file is being requested from the sender.
-    File {
+    /// Entry was fully handled by dispatch_entry (dir, symlink, link-dest, etc.)
+    Handled { entry_idx: usize, kind: HandledKind },
+    /// Hardlink duplicate -- deferred until first occurrences are on disk.
+    DeferredHardlink {
+        entry_idx: usize,
+        source_name: Vec<u8>,
+    },
+    /// A file needs data transfer from the sender.
+    Transfer {
         entry_idx: usize,
         basis_data: FileData,
         blength: usize,
     },
-    /// A file was satisfied via --link-dest hard link (no delta needed).
-    Linked { entry_idx: usize },
     /// All phases are complete.
     Done,
 }
 
 /// Run the receiver loop with pipelined generator/receiver tasks.
 ///
-/// The generator task sends block signatures to the remote sender while
-/// the receiver task concurrently processes delta responses. This allows
-/// the generator to request file N+1 while the receiver is still
-/// reconstructing file N, matching rsync's 3-process architecture.
+/// The generator task iterates all entries, calling `dispatch_entry()` for
+/// each to determine what action to take. For entries that need data
+/// transfer, it sends block signatures to the remote sender and a
+/// [`GeneratorItem::Transfer`] on the channel. The receiver task reads
+/// delta responses from the wire and writes them via the engine.
 ///
 /// The `mplex_out` writer is owned exclusively by the generator task.
 /// The `demux_read` reader is owned exclusively by the receiver task.
@@ -1064,7 +577,7 @@ pub async fn receiver_loop_pipelined<R, W>(
     mplex_out: MplexWriter<W>,
     entries: &[FileEntry],
     entry_ndx: &[i32],
-    file_ops: Arc<dyn FileOps>,
+    engine: Arc<ReceiverEngine>,
     protocol: &NegotiatedProtocol,
     stats: &mut TransferStats,
     progress: &mut ProgressTracker,
@@ -1079,103 +592,124 @@ where
     let int_codec = protocol.wire.int_codec;
     let has_iflags = protocol.wire.has_iflags;
 
-    // Create directories first (same as sequential loop).
-    for entry in entries {
-        if !entry.is_dir() {
-            continue;
-        }
-        file_ops.mkdir(entry)?;
-        stats.directories_created += 1;
-    }
-
-    // Pre-compute file items: (entry_idx, file_ndx, entry_clone).
-    // We clone entries that need transferring so they can be moved
-    // into the spawned tasks. Hardlink duplicates are excluded from
-    // file_items (no generator request or data transfer) and deferred
-    // until after all first-occurrence files are transferred.
-    let mut file_items: Vec<(usize, i32, FileEntry)> = Vec::new();
-    let mut deferred_hardlinks: Vec<(FileEntry, Vec<u8>)> = Vec::new();
-    for (idx, entry) in entries.iter().enumerate() {
-        if !entry.is_file() {
-            continue;
-        }
-        if file_ops.should_skip(entry) {
-            continue;
-        }
-        file_ops.ensure_parent(entry)?;
-
-        // Hardlink duplicate: defer until first occurrences are transferred.
-        if let Some(ref source_name) = entry.hlink_source {
-            deferred_hardlinks.push((entry.clone(), source_name.clone()));
-            continue;
-        }
-
-        file_items.push((idx, entry_ndx[idx], entry.clone()));
-    }
+    // Clone entries so they can be sent into the spawned generator task.
+    let gen_entries: Vec<(usize, i32, FileEntry)> = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, e)| (idx, entry_ndx[idx], e.clone()))
+        .collect();
 
     // Bounded channel: generator -> receiver. Capacity of 4 provides
     // enough pipelining without unbounded memory growth.
     let (gen_tx, mut gen_rx) = tokio::sync::mpsc::channel::<GeneratorItem>(4);
 
-    // Clone data needed by the generator task.
-    let gen_file_items = file_items.clone();
-    let gen_file_ops = Arc::clone(&file_ops);
+    let gen_engine = Arc::clone(&engine);
 
     // --- Generator task ---
-    // Owns mplex_out exclusively. Reads basis files, computes signatures,
-    // sends them to the wire, and tells the receiver what's coming.
+    // Owns mplex_out exclusively. Dispatches each entry through
+    // dispatch_entry(), sends wire protocol for NeedsTransfer entries,
+    // and tells the receiver task what's coming.
     let generator_handle = tokio::spawn(async move {
         let mut mplex_out = mplex_out;
         let mut gen_ndx_state = varint::NdxState::default();
 
-        for (idx, file_ndx, entry) in &gen_file_items {
-            // Try link-dest before computing signatures.
-            if gen_file_ops.try_link_dest(entry) {
-                let _ = gen_tx.send(GeneratorItem::Linked { entry_idx: *idx }).await;
-                continue; // Don't send NDX to sender -- no delta needed
+        for (idx, file_ndx, entry) in &gen_entries {
+            // Ensure parent directories exist for regular files.
+            if entry.is_file() {
+                if let Err(e) = gen_engine.ensure_parent(entry) {
+                    tracing::warn!(
+                        path = %String::from_utf8_lossy(&entry.name),
+                        error = %e,
+                        "failed to create parent directory"
+                    );
+                }
             }
 
-            // Read existing basis file for delta computation, with fuzzy fallback.
-            let basis_data = gen_file_ops.read_basis(entry);
-            let basis_data = if basis_data.is_empty() {
-                gen_file_ops.find_fuzzy_basis(entry).unwrap_or(basis_data)
-            } else {
-                basis_data
+            let action = match gen_engine.dispatch_entry(entry) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %String::from_utf8_lossy(&entry.name),
+                        error = %e,
+                        "dispatch_entry failed"
+                    );
+                    continue;
+                }
             };
 
-            // Compute block signatures.
-            let sigs = sum::compute_signatures(&basis_data, &ctx);
+            match action {
+                EntryAction::Handled { kind } => {
+                    if gen_tx
+                        .send(GeneratorItem::Handled {
+                            entry_idx: *idx,
+                            kind,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                EntryAction::Skipped => {
+                    // Nothing to send to receiver for skipped entries.
+                }
+                EntryAction::DeferredHardlink { source_name } => {
+                    if gen_tx
+                        .send(GeneratorItem::DeferredHardlink {
+                            entry_idx: *idx,
+                            source_name,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                EntryAction::NeedsTransfer { basis } => {
+                    // Fuzzy fallback if basis is empty.
+                    let basis_data = if basis.is_empty() {
+                        gen_engine.find_fuzzy_basis(entry).unwrap_or(basis)
+                    } else {
+                        basis
+                    };
 
-            let blength = if sigs.head.blength > 0 {
-                sigs.head.blength as usize
-            } else {
-                700
-            };
+                    // Compute block signatures.
+                    let sigs = sum::compute_signatures(&basis_data, &ctx);
 
-            // Send generator output to wire: NDX + iflags + sum_head + block sigs.
-            let mut sig_buf = Vec::new();
-            varint::write_ndx(&mut sig_buf, *file_ndx, &mut gen_ndx_state, int_codec).await?;
-            if has_iflags {
-                const ITEM_TRANSFER: u16 = 1 << 15;
-                varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
-            }
-            if gen_file_ops.is_append_mode() {
-                sum::write_sum_head(&mut sig_buf, &sigs.head).await?;
-            } else {
-                sum::write_sums(&mut sig_buf, &sigs).await?;
-            }
-            mplex_out.write_data(&sig_buf).await?;
-            mplex_out.flush().await?;
+                    let blength = if sigs.head.blength > 0 {
+                        sigs.head.blength as usize
+                    } else {
+                        700
+                    };
 
-            // Tell receiver task what file to expect.
-            let item = GeneratorItem::File {
-                entry_idx: *idx,
-                basis_data,
-                blength,
-            };
-            if gen_tx.send(item).await.is_err() {
-                // Receiver dropped -- it hit an error.
-                break;
+                    // Send generator output to wire: NDX + iflags + sum_head + block sigs.
+                    let mut sig_buf = Vec::new();
+                    varint::write_ndx(&mut sig_buf, *file_ndx, &mut gen_ndx_state, int_codec)
+                        .await?;
+                    if has_iflags {
+                        const ITEM_TRANSFER: u16 = 1 << 15;
+                        varint::write_shortint(&mut sig_buf, ITEM_TRANSFER).await?;
+                    }
+                    let is_append =
+                        gen_engine.options().append() || gen_engine.options().append_verify();
+                    if is_append {
+                        sum::write_sum_head(&mut sig_buf, &sigs.head).await?;
+                    } else {
+                        sum::write_sums(&mut sig_buf, &sigs).await?;
+                    }
+                    mplex_out.write_data(&sig_buf).await?;
+                    mplex_out.flush().await?;
+
+                    // Tell receiver task what file to expect.
+                    let item = GeneratorItem::Transfer {
+                        entry_idx: *idx,
+                        basis_data,
+                        blength,
+                    };
+                    if gen_tx.send(item).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
 
@@ -1187,13 +721,57 @@ where
 
     // --- Receiver task (runs on current task) ---
     // Owns demux_read exclusively. Reads GeneratorItems from the channel,
-    // then reads the sender's delta response from the wire.
+    // then reads the sender's delta response from the wire for Transfer items.
     let mut demux_read = demux_read;
     let mut recv_ndx_state = varint::NdxState::default();
+    let mut deferred_hardlinks: Vec<(usize, Vec<u8>)> = Vec::new();
 
     while let Some(item) = gen_rx.recv().await {
         match item {
-            GeneratorItem::File {
+            GeneratorItem::Handled { entry_idx, kind } => {
+                let entry = &entries[entry_idx];
+                match kind {
+                    HandledKind::Directory => {
+                        stats.directories_created += 1;
+                    }
+                    HandledKind::Symlink => {
+                        stats.symlinks += 1;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index: entry_idx as i32,
+                            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                            literal_bytes: 0,
+                            matched_bytes: 0,
+                        });
+                    }
+                    HandledKind::LinkDest | HandledKind::CopyDest => {
+                        stats.files_transferred += 1;
+                        stats.matched_data += entry.len as u64;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index: entry_idx as i32,
+                            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                            literal_bytes: 0,
+                            matched_bytes: entry.len as u64,
+                        });
+                    }
+                    HandledKind::DryRun => {
+                        stats.files_transferred += 1;
+                        stats.total_size += entry.len as u64;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index: entry_idx as i32,
+                            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                            literal_bytes: entry.len as u64,
+                            matched_bytes: 0,
+                        });
+                    }
+                }
+            }
+            GeneratorItem::DeferredHardlink {
+                entry_idx,
+                source_name,
+            } => {
+                deferred_hardlinks.push((entry_idx, source_name));
+            }
+            GeneratorItem::Transfer {
                 entry_idx,
                 basis_data,
                 blength,
@@ -1244,7 +822,7 @@ where
 
                 // Reconstruct file: buffered for sparse, streaming otherwise.
                 let use_compress = protocol.compress != CompressType::None;
-                let literal_bytes = if file_ops.needs_buffered_receive() {
+                let literal_bytes = if engine.needs_buffered_receive() {
                     let data = receiver::recv_file_delta(
                         &mut demux_read,
                         &basis_data,
@@ -1253,10 +831,10 @@ where
                     )
                     .await?;
                     let len = data.len() as u64;
-                    file_ops.write_file(entry, &data)?;
+                    engine.apply_transfer(entry, &data, None)?;
                     len
                 } else {
-                    let mut writer = file_ops.create_writer(entry)?;
+                    let mut writer = engine.create_writer(entry)?;
                     let bytes_written = if use_compress {
                         let decompressor = Decompressor::from_type(protocol.compress)?;
                         receiver::recv_file_delta_compressed_to_writer(
@@ -1279,7 +857,7 @@ where
                         .await?
                     };
                     drop(writer);
-                    file_ops.finish_file(entry)?;
+                    engine.finish_file(entry, None)?;
                     bytes_written
                 };
 
@@ -1295,17 +873,6 @@ where
                     matched_bytes: 0,
                 });
             }
-            GeneratorItem::Linked { entry_idx } => {
-                let entry = &entries[entry_idx];
-                stats.files_transferred += 1;
-                stats.matched_data += entry.len as u64;
-                progress.emit(ProgressEvent::FileComplete {
-                    index: entry_idx as i32,
-                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                    literal_bytes: 0,
-                    matched_bytes: entry.len as u64,
-                });
-            }
             GeneratorItem::Done => break,
         }
     }
@@ -1319,15 +886,23 @@ where
     })??;
 
     // Create deferred hardlinks now that first occurrences are on disk.
-    for (dup_entry, source_name) in &deferred_hardlinks {
+    for (entry_idx, source_name) in &deferred_hardlinks {
+        let dup_entry = &entries[*entry_idx];
         if let Some(source) = entries.iter().find(|e| e.name == *source_name) {
-            if let Err(e) = file_ops.hardlink(source, dup_entry) {
-                tracing::warn!(
-                    source = %String::from_utf8_lossy(source_name),
-                    link = %String::from_utf8_lossy(&dup_entry.name),
-                    error = %e,
-                    "deferred hardlink creation failed"
-                );
+            let source_path = engine.dest_path(source);
+            let link_path = engine.dest_path(dup_entry);
+            if !engine.options().dry_run() {
+                let _ = engine.fs().remove_file(&link_path);
+                if let Err(e) = engine.fs().hard_link(&source_path, &link_path) {
+                    tracing::warn!(
+                        source = %String::from_utf8_lossy(source_name),
+                        link = %String::from_utf8_lossy(&dup_entry.name),
+                        error = %e,
+                        "deferred hardlink creation failed"
+                    );
+                } else {
+                    stats.files_transferred += 1;
+                }
             } else {
                 stats.files_transferred += 1;
             }

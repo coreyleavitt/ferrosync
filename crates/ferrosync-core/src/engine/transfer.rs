@@ -204,38 +204,262 @@ async fn execute_transfer_impl(
         stats.files_deleted = deleted;
     }
 
-    // Build a source path lookup so LocalDataProvider can find source files.
+    // Build a source path lookup for finding source files by entry name.
     let source_path_map: std::collections::HashMap<&[u8], &Path> = source_entries
         .iter()
         .map(|item| (item.entry.name.as_slice(), item.source_path.as_path()))
         .collect();
 
-    // Build the (index, FileEntry) pairs that process_entries() expects.
-    let indexed_entries: Vec<(i32, FileEntry)> = source_entries
-        .iter()
-        .map(|item| (item.index, item.entry.clone()))
-        .collect();
-
     let receiver = super::receiver_engine::ReceiverRef::new(fs, dest, options);
 
-    let mut provider = LocalDataProvider {
-        fs,
-        source_path_map: &source_path_map,
-        options,
-        ctx,
-    };
+    // Collect all entries for hardlink resolution and delete-during.
+    let all_entries: Vec<FileEntry> = source_entries.iter().map(|i| i.entry.clone()).collect();
+    let mut deferred: Vec<(&FileEntry, Vec<u8>)> = Vec::new();
 
-    let mut process_ctx = super::receiver_engine::ProcessContext {
-        stats: &mut stats,
-        progress,
-        filters: &filters,
-        deleter: Some(&deleter),
-        protocol_ctx: ctx,
-    };
+    for item in &source_entries {
+        let index = item.index;
 
-    receiver
-        .process_entries(&indexed_entries, &mut provider, &mut process_ctx)
-        .await?;
+        match receiver.dispatch_entry(&item.entry)? {
+            super::receiver_engine::EntryAction::Handled { kind } => {
+                match kind {
+                    super::receiver_engine::HandledKind::Directory => {
+                        stats.directories_created += 1;
+                        // --delete-during: remove extraneous files in this directory.
+                        if options.delete() == DeleteMode::During {
+                            let dest_path = receiver.dest_path(&item.entry);
+                            let deleted = deleter.delete_extraneous_in_dir(
+                                &dest_path,
+                                all_entries.iter(),
+                                &item.entry.name,
+                            )?;
+                            stats.files_deleted += deleted;
+                        }
+                    }
+                    super::receiver_engine::HandledKind::Symlink => {
+                        stats.symlinks += 1;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index,
+                            name: super::progress::name_to_pathbuf(&item.entry.name),
+                            literal_bytes: 0,
+                            matched_bytes: 0,
+                        });
+                    }
+                    super::receiver_engine::HandledKind::LinkDest
+                    | super::receiver_engine::HandledKind::CopyDest => {
+                        stats.files_transferred += 1;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index,
+                            name: super::progress::name_to_pathbuf(&item.entry.name),
+                            literal_bytes: 0,
+                            matched_bytes: item.entry.len as u64,
+                        });
+                    }
+                    super::receiver_engine::HandledKind::DryRun => {
+                        // Itemized changes before dry-run accounting.
+                        if options.itemize_changes() {
+                            let dest_path = receiver.dest_path(&item.entry);
+                            let changes = file_decision::compute_itemized(
+                                fs,
+                                &item.entry,
+                                &dest_path,
+                                options,
+                            );
+                            progress.emit(ProgressEvent::FileItemized {
+                                index,
+                                name: super::progress::name_to_pathbuf(&item.entry.name),
+                                changes,
+                            });
+                        }
+                        progress.emit(ProgressEvent::FileStart {
+                            index,
+                            name: super::progress::name_to_pathbuf(&item.entry.name),
+                            size: item.entry.len,
+                        });
+                        stats.files_transferred += 1;
+                        stats.total_size += item.entry.len as u64;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index,
+                            name: super::progress::name_to_pathbuf(&item.entry.name),
+                            literal_bytes: item.entry.len as u64,
+                            matched_bytes: 0,
+                        });
+                    }
+                }
+            }
+            super::receiver_engine::EntryAction::Skipped => {
+                stats.files_skipped += 1;
+                progress.emit(ProgressEvent::FileSkipped {
+                    index,
+                    name: super::progress::name_to_pathbuf(&item.entry.name),
+                });
+            }
+            super::receiver_engine::EntryAction::DeferredHardlink { source_name } => {
+                deferred.push((&item.entry, source_name));
+            }
+            super::receiver_engine::EntryAction::NeedsTransfer { basis } => {
+                let basis_data = basis;
+
+                // Checksum mode (local only): file-level comparison.
+                if options.checksum_mode() {
+                    if let Some(source_path) = source_path_map.get(item.entry.name.as_slice()) {
+                        if let Ok(src_data) = fs.map_file(source_path) {
+                            let src_sum = checksum::file_checksum(&src_data, ctx);
+                            let dst_sum = checksum::file_checksum(&basis_data, ctx);
+                            if src_sum == dst_sum {
+                                stats.files_skipped += 1;
+                                progress.emit(ProgressEvent::FileSkipped {
+                                    index,
+                                    name: super::progress::name_to_pathbuf(&item.entry.name),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+                }
+
+                // Itemized changes.
+                if options.itemize_changes() {
+                    let dest_path = receiver.dest_path(&item.entry);
+                    let changes =
+                        file_decision::compute_itemized(fs, &item.entry, &dest_path, options);
+                    progress.emit(ProgressEvent::FileItemized {
+                        index,
+                        name: super::progress::name_to_pathbuf(&item.entry.name),
+                        changes,
+                    });
+                }
+
+                progress.emit(ProgressEvent::FileStart {
+                    index,
+                    name: super::progress::name_to_pathbuf(&item.entry.name),
+                    size: item.entry.len,
+                });
+
+                let source_path = source_path_map
+                    .get(item.entry.name.as_slice())
+                    .copied()
+                    .ok_or_else(|| FsError::NotFound {
+                        path: PathBuf::from(String::from_utf8_lossy(&item.entry.name).into_owned()),
+                    })?;
+
+                // Append mode.
+                if (options.append() || options.append_verify()) && !basis_data.is_empty() {
+                    let source_data = fs.map_file(source_path)?;
+                    let dest_len = basis_data.len();
+                    if source_data.len() <= dest_len {
+                        stats.files_skipped += 1;
+                        progress.emit(ProgressEvent::FileSkipped {
+                            index,
+                            name: super::progress::name_to_pathbuf(&item.entry.name),
+                        });
+                        continue;
+                    }
+                    let append_data = &source_data[dest_len..];
+                    let mode = if options.preserve_perms() {
+                        Some(item.entry.mode & 0o7777)
+                    } else {
+                        None
+                    };
+                    let dest_path = receiver.dest_path(&item.entry);
+                    fs.append_file(&dest_path, append_data, mode)?;
+
+                    if options.append_verify() {
+                        let dest_data = fs.map_file(&dest_path)?;
+                        if dest_data.as_ref() != source_data.as_ref() {
+                            tracing::debug!(
+                                path = %dest_path.display(),
+                                "append-verify mismatch, retransferring"
+                            );
+                            // Fall through to full transfer below.
+                        } else {
+                            let literal_bytes = append_data.len() as u64;
+                            let matched_bytes = dest_len as u64;
+                            stats.files_transferred += 1;
+                            stats.total_size += item.entry.len as u64;
+                            stats.literal_data += literal_bytes;
+                            stats.bytes_sent += literal_bytes;
+                            progress.emit(ProgressEvent::FileComplete {
+                                index,
+                                name: super::progress::name_to_pathbuf(&item.entry.name),
+                                literal_bytes,
+                                matched_bytes,
+                            });
+                            continue;
+                        }
+                    } else {
+                        let literal_bytes = append_data.len() as u64;
+                        let matched_bytes = dest_len as u64;
+                        stats.files_transferred += 1;
+                        stats.total_size += item.entry.len as u64;
+                        stats.literal_data += literal_bytes;
+                        stats.bytes_sent += literal_bytes;
+                        progress.emit(ProgressEvent::FileComplete {
+                            index,
+                            name: super::progress::name_to_pathbuf(&item.entry.name),
+                            literal_bytes,
+                            matched_bytes,
+                        });
+                        continue;
+                    }
+                }
+
+                // Data transfer via delta pipeline.
+                let source_data = fs.map_file(source_path)?;
+                let data = if options.whole_file() || basis_data.is_empty() {
+                    source_data.to_vec()
+                } else if options.compress() {
+                    pipeline::transfer_file_compressed(
+                        &source_data,
+                        &basis_data,
+                        ctx,
+                        options.compress_level(),
+                        crate::protocol::handshake::CompressType::Zlib,
+                    )
+                    .await
+                    .map_err(crate::FerrosyncError::Protocol)?
+                } else {
+                    pipeline::transfer_file(&source_data, &basis_data, ctx)
+                        .await
+                        .map_err(crate::FerrosyncError::Protocol)?
+                };
+                let literal_bytes = data.len() as u64;
+
+                receiver.apply_transfer(&item.entry, &data, Some(source_path))?;
+
+                stats.files_transferred += 1;
+                stats.total_size += item.entry.len as u64;
+                stats.literal_data += literal_bytes;
+                stats.bytes_sent += literal_bytes;
+
+                progress.emit(ProgressEvent::FileComplete {
+                    index,
+                    name: super::progress::name_to_pathbuf(&item.entry.name),
+                    literal_bytes,
+                    matched_bytes: 0,
+                });
+
+                // Bandwidth limiting.
+                if let Some(limit) = options.bwlimit() {
+                    if limit > 0 {
+                        let sleep_secs = literal_bytes as f64 / limit as f64;
+                        if sleep_secs > 0.001 {
+                            tokio::time::sleep(Duration::from_secs_f64(sleep_secs)).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Create deferred hardlinks now that first occurrences are on disk.
+    let hardlinks_created = receiver.create_deferred_hardlinks(&deferred, &all_entries)?;
+    stats.files_transferred += hardlinks_created;
+
+    // --delete-after
+    if options.delete() == DeleteMode::After {
+        let deleted = deleter.delete_extraneous(dest, all_entries.iter())?;
+        stats.files_deleted = deleted;
+    }
 
     // Handle --prune-empty-dirs (-m).
     if options.prune_empty_dirs() {
@@ -245,119 +469,6 @@ async fn execute_transfer_impl(
 
     stats.finish();
     Ok(TransferResult { stats })
-}
-
-// ---------------------------------------------------------------------------
-// LocalDataProvider
-// ---------------------------------------------------------------------------
-
-/// Data provider for local (non-wire) transfers.
-///
-/// Reads source files from the local filesystem and applies the delta
-/// pipeline to produce reconstructed file data.
-struct LocalDataProvider<'a> {
-    fs: &'a dyn FileSystem,
-    source_path_map: &'a std::collections::HashMap<&'a [u8], &'a Path>,
-    options: &'a TransferOptions,
-    ctx: &'a ProtocolContext,
-}
-
-impl<'a> LocalDataProvider<'a> {
-    fn get_source_path(&self, entry: &FileEntry) -> Option<&'a Path> {
-        self.source_path_map.get(entry.name.as_slice()).copied()
-    }
-}
-
-impl<'a> super::receiver_engine::DataProvider for LocalDataProvider<'a> {
-    async fn provide_data(
-        &mut self,
-        _index: i32,
-        entry: &FileEntry,
-        basis: &[u8],
-    ) -> std::result::Result<Vec<u8>, crate::FerrosyncError> {
-        let source_path = self
-            .get_source_path(entry)
-            .ok_or_else(|| FsError::NotFound {
-                path: PathBuf::from(String::from_utf8_lossy(&entry.name).into_owned()),
-            })?;
-
-        let source_data = self.fs.map_file(source_path)?;
-
-        if self.options.whole_file() || basis.is_empty() {
-            Ok(source_data.to_vec())
-        } else if self.options.compress() {
-            pipeline::transfer_file_compressed(
-                &source_data,
-                basis,
-                self.ctx,
-                self.options.compress_level(),
-                crate::protocol::handshake::CompressType::Zlib,
-            )
-            .await
-            .map_err(crate::FerrosyncError::Protocol)
-        } else {
-            pipeline::transfer_file(&source_data, basis, self.ctx)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)
-        }
-    }
-
-    fn source_checksum(&self, entry: &FileEntry, ctx: &ProtocolContext) -> Option<Vec<u8>> {
-        let source_path = self.get_source_path(entry)?;
-        let src_data = self.fs.map_file(source_path).ok()?;
-        Some(checksum::file_checksum(&src_data, ctx))
-    }
-
-    fn source_path(&self, entry: &FileEntry) -> Option<PathBuf> {
-        self.get_source_path(entry).map(|p| p.to_path_buf())
-    }
-
-    async fn handle_append(
-        &mut self,
-        _index: i32,
-        entry: &FileEntry,
-        dest_path: &Path,
-        basis: &[u8],
-    ) -> std::result::Result<Option<super::receiver_engine::AppendResult>, crate::FerrosyncError>
-    {
-        let source_path = self
-            .get_source_path(entry)
-            .ok_or_else(|| FsError::NotFound {
-                path: PathBuf::from(String::from_utf8_lossy(&entry.name).into_owned()),
-            })?;
-
-        let dest_len = basis.len();
-        let source_data = self.fs.map_file(source_path)?;
-
-        if source_data.len() <= dest_len {
-            return Ok(Some(super::receiver_engine::AppendResult::Skip));
-        }
-
-        let append_data = &source_data[dest_len..];
-        let mode = if self.options.preserve_perms() {
-            Some(entry.mode & 0o7777)
-        } else {
-            None
-        };
-        self.fs.append_file(dest_path, append_data, mode)?;
-
-        if self.options.append_verify() {
-            let dest_data = self.fs.map_file(dest_path)?;
-            if dest_data.as_ref() != source_data.as_ref() {
-                tracing::debug!(
-                    path = %dest_path.display(),
-                    "append-verify mismatch, retransferring"
-                );
-                // Return None to fall through to full transfer.
-                return Ok(None);
-            }
-        }
-
-        Ok(Some(super::receiver_engine::AppendResult::Appended {
-            literal_bytes: append_data.len() as u64,
-            matched_bytes: dest_len as u64,
-        }))
-    }
 }
 
 /// Streaming transfer implementation.
