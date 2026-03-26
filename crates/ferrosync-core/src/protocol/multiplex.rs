@@ -9,10 +9,11 @@
 //! Multiplexing is disabled during the initial handshake and enabled once
 //! both sides have exchanged protocol versions.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
@@ -522,7 +523,7 @@ async fn demux_channel_task<R: AsyncRead + Unpin>(reader: R, tx: mpsc::Unbounded
 }
 
 /// Handle a control message from the multiplexed stream.
-pub(crate) fn handle_control_message(msg: &MplexMessage) {
+fn handle_control_message(msg: &MplexMessage) {
     match msg {
         MplexMessage::Info(text) => {
             tracing::info!(remote = %text.trim(), "remote info");
@@ -539,6 +540,408 @@ pub(crate) fn handle_control_message(msg: &MplexMessage) {
         MplexMessage::Noop => {}
         _ => {
             tracing::trace!(msg = ?msg, "control message");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connection-driven multiplexed I/O (replaces channel-based demux)
+// ---------------------------------------------------------------------------
+
+/// Connection-driven bidirectional multiplexed I/O.
+///
+/// Owns both halves of a multiplexed connection and drives them concurrently
+/// at the frame level. `flush()` drives reads while waiting for writes,
+/// preventing deadlock without background tasks or unbounded channels.
+///
+/// ```text
+/// Old (channel-based):
+///   start_demux spawns background task -> unbounded channel -> ChannelReader
+///   MplexWriter writes independently
+///   Problem: unbounded memory growth, lifetime complexity
+///
+/// New (connection-driven):
+///   MuxConnection owns reader + writer
+///   flush() uses select! to read while flushing
+///   No background task, no channel, bounded memory
+/// ```
+pub struct MuxConnection<R, W> {
+    reader: R,
+    writer: MplexWriter<W>,
+    /// Raw bytes read from transport, not yet parsed into frames.
+    read_staging: BytesMut,
+    /// Parsed MSG_DATA payloads ready to serve via AsyncRead.
+    read_buf: VecDeque<Bytes>,
+    /// Partially consumed chunk being served to the caller.
+    current: Option<Bytes>,
+    /// Read offset into `current`.
+    offset: usize,
+}
+
+impl<R, W> MuxConnection<R, W>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    /// Create a new multiplexed connection from raw reader and writer.
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer: MplexWriter::new(writer),
+            read_staging: BytesMut::with_capacity(MPLEX_BUF_SIZE),
+            read_buf: VecDeque::new(),
+            current: None,
+            offset: 0,
+        }
+    }
+
+    /// Reassemble a connection from a split `BufferedMplexReader` and `MplexWriter`.
+    pub fn from_split(reader: BufferedMplexReader<R>, writer: MplexWriter<W>) -> Self {
+        Self {
+            reader: reader.reader,
+            writer,
+            read_staging: reader.staging,
+            read_buf: reader.read_buf,
+            current: reader.current,
+            offset: reader.offset,
+        }
+    }
+
+    /// Write a MSG_DATA payload, splitting into chunks if necessary.
+    pub async fn write_data(&mut self, data: &[u8]) -> Result<()> {
+        self.parse_buffered_frames();
+        self.writer.write_data(data).await
+    }
+
+    /// Write a multiplexed message with the given code and payload.
+    #[allow(dead_code)]
+    pub(crate) async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
+        self.writer.write_message(code, payload).await
+    }
+
+    /// Flush the write side while opportunistically reading from the wire.
+    ///
+    /// Uses `tokio::select!` to drive both directions concurrently. The flush
+    /// future is the primary goal; reads are opportunistic and prevent the
+    /// remote side from blocking on a full send buffer. This is the key
+    /// mechanism that prevents bidirectional deadlock without background tasks.
+    pub async fn flush(&mut self) -> std::io::Result<()> {
+        // Parse any complete frames already sitting in the staging buffer.
+        self.parse_buffered_frames();
+
+        // Destructure self to satisfy the borrow checker: select! borrows
+        // both reader and writer fields, which requires splitting the borrow.
+        let reader = &mut self.reader;
+        let writer = &mut self.writer;
+        let staging = &mut self.read_staging;
+        let read_buf = &mut self.read_buf;
+
+        let flush_fut = writer.flush();
+        tokio::pin!(flush_fut);
+
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut flush_fut => {
+                    return result.map_err(std::io::Error::other);
+                }
+                // Cancel-safe: AsyncReadExt::read_buf on a staging BytesMut.
+                result = reader.read_buf(staging) => {
+                    match result {
+                        Ok(0) => {} // EOF on read side -- ignore, flush is primary
+                        Ok(_) => parse_frames_from_staging(staging, read_buf),
+                        Err(_) => {} // Read error during flush -- ignore, flush is primary
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consume the connection, returning a `BufferedMplexReader` and `MplexWriter`.
+    ///
+    /// Used when the receiver loop needs to split reading and writing into
+    /// separate tasks (pipelined generator/receiver). Any buffered data in
+    /// staging and read_buf is preserved in the `BufferedMplexReader`.
+    pub fn into_split(self) -> (BufferedMplexReader<R>, MplexWriter<W>) {
+        let reader = BufferedMplexReader {
+            reader: self.reader,
+            staging: self.read_staging,
+            read_buf: self.read_buf,
+            current: self.current,
+            offset: self.offset,
+        };
+        (reader, self.writer)
+    }
+
+    /// Get a mutable reference to the inner writer.
+    pub fn writer_mut(&mut self) -> &mut MplexWriter<W> {
+        &mut self.writer
+    }
+
+    /// Shut down the write half (send EOF).
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.writer.shutdown().await
+    }
+
+    /// Parse complete MUX frames from the staging buffer into read_buf.
+    fn parse_buffered_frames(&mut self) {
+        parse_frames_from_staging(&mut self.read_staging, &mut self.read_buf);
+    }
+}
+
+impl<R, W> AsyncRead for MuxConnection<R, W>
+where
+    R: AsyncRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let this = self.get_mut();
+
+        // 1. Serve from partially consumed chunk.
+        if let Some(ref data) = this.current {
+            let remaining = data.len() - this.offset;
+            let n = remaining.min(buf.remaining());
+            buf.put_slice(&data[this.offset..this.offset + n]);
+            this.offset += n;
+            if this.offset >= data.len() {
+                this.current = None;
+                this.offset = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+
+        // 2. Try to parse frames from staging, then serve from read_buf.
+        this.parse_buffered_frames();
+        if let Some(data) = this.read_buf.pop_front() {
+            return serve_chunk(data, buf, &mut this.current, &mut this.offset);
+        }
+
+        // 3. Read from wire, parse frames, serve.
+        this.read_staging.reserve(8192);
+        // Safety: we read into the spare capacity of BytesMut.
+        // ReadBuf::uninit covers the uninitialized spare bytes, and after
+        // poll_read fills some, we advance_mut by exactly the filled count.
+        let spare = this.read_staging.spare_capacity_mut();
+        let mut inner_buf = ReadBuf::uninit(spare);
+        let before = inner_buf.filled().len();
+        match Pin::new(&mut this.reader).poll_read(cx, &mut inner_buf) {
+            Poll::Ready(Ok(())) => {
+                let n = inner_buf.filled().len() - before;
+                if n == 0 {
+                    // EOF
+                    return Poll::Ready(Ok(()));
+                }
+                // SAFETY: poll_read filled exactly `n` bytes into spare capacity.
+                unsafe {
+                    this.read_staging.advance_mut(n);
+                }
+                this.parse_buffered_frames();
+                if let Some(data) = this.read_buf.pop_front() {
+                    return serve_chunk(data, buf, &mut this.current, &mut this.offset);
+                }
+                // Got data but no complete frame yet -- register waker and retry.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Serve bytes from a chunk into a ReadBuf, stashing the remainder if partial.
+fn serve_chunk(
+    data: Bytes,
+    buf: &mut ReadBuf<'_>,
+    current: &mut Option<Bytes>,
+    offset: &mut usize,
+) -> Poll<std::io::Result<()>> {
+    let n = data.len().min(buf.remaining());
+    buf.put_slice(&data[..n]);
+    if n < data.len() {
+        *current = Some(data);
+        *offset = n;
+    }
+    Poll::Ready(Ok(()))
+}
+
+// ---------------------------------------------------------------------------
+// Buffered reader for split receiver pipeline
+// ---------------------------------------------------------------------------
+
+/// A demultiplexing reader that carries buffered data from a `MuxConnection`.
+///
+/// Created by [`MuxConnection::into_split`] when the receiver loop needs a
+/// separate reader for the pipelined receiver task. Implements `AsyncRead`
+/// to serve MSG_DATA payloads, handling control messages inline.
+pub struct BufferedMplexReader<R> {
+    reader: R,
+    staging: BytesMut,
+    read_buf: VecDeque<Bytes>,
+    current: Option<Bytes>,
+    offset: usize,
+}
+
+impl<R: AsyncRead + Unpin + Send> AsyncRead for BufferedMplexReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let this = self.get_mut();
+
+        // 1. Serve from partially consumed chunk.
+        if let Some(ref data) = this.current {
+            let remaining = data.len() - this.offset;
+            let n = remaining.min(buf.remaining());
+            buf.put_slice(&data[this.offset..this.offset + n]);
+            this.offset += n;
+            if this.offset >= data.len() {
+                this.current = None;
+                this.offset = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+
+        // 2. Try to parse frames from staging.
+        parse_frames_from_staging(&mut this.staging, &mut this.read_buf);
+        if let Some(data) = this.read_buf.pop_front() {
+            return serve_chunk(data, buf, &mut this.current, &mut this.offset);
+        }
+
+        // 3. Read from wire.
+        this.staging.reserve(8192);
+        let spare = this.staging.spare_capacity_mut();
+        let mut inner_buf = ReadBuf::uninit(spare);
+        let before = inner_buf.filled().len();
+        match Pin::new(&mut this.reader).poll_read(cx, &mut inner_buf) {
+            Poll::Ready(Ok(())) => {
+                let n = inner_buf.filled().len() - before;
+                if n == 0 {
+                    return Poll::Ready(Ok(()));
+                }
+                unsafe {
+                    this.staging.advance_mut(n);
+                }
+                parse_frames_from_staging(&mut this.staging, &mut this.read_buf);
+                if let Some(data) = this.read_buf.pop_front() {
+                    return serve_chunk(data, buf, &mut this.current, &mut this.offset);
+                }
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared frame parsing
+// ---------------------------------------------------------------------------
+
+/// Parse complete MUX frames from staging into read_buf.
+///
+/// Extracts MSG_DATA payloads into the read_buf queue for serving via
+/// AsyncRead. Control messages are dispatched to `handle_control_message`.
+fn parse_frames_from_staging(staging: &mut BytesMut, read_buf: &mut VecDeque<Bytes>) {
+    loop {
+        if staging.len() < 4 {
+            break;
+        }
+        let header = u32::from_le_bytes(staging[..4].try_into().unwrap());
+        let tag_byte = (header >> 24) as u8;
+        let payload_len = (header & MAX_PAYLOAD) as usize;
+
+        if staging.len() < 4 + payload_len {
+            break;
+        }
+
+        if tag_byte < MPLEX_BASE {
+            // Invalid tag -- skip this frame to avoid infinite loop.
+            tracing::warn!(
+                tag = tag_byte,
+                "invalid MUX tag below MPLEX_BASE, skipping frame"
+            );
+            staging.advance(4 + payload_len);
+            continue;
+        }
+
+        staging.advance(4);
+        let payload = staging.split_to(payload_len).freeze();
+        let code = tag_byte - MPLEX_BASE;
+
+        match code {
+            0 => {
+                // MSG_DATA
+                read_buf.push_back(payload);
+            }
+            _ => {
+                // Control message: decode and handle inline.
+                let msg = decode_control_message(code, &payload);
+                handle_control_message(&msg);
+            }
+        }
+    }
+}
+
+/// Decode a control message from its code and payload bytes.
+///
+/// This parallels `MplexReader::read_message` but works from an already-read
+/// payload buffer rather than an async reader.
+fn decode_control_message(code: u8, payload: &[u8]) -> MplexMessage {
+    match MsgCode::from_tag(code) {
+        Ok(MsgCode::Info) => MplexMessage::Info(String::from_utf8_lossy(payload).into_owned()),
+        Ok(MsgCode::Warning) => {
+            MplexMessage::Warning(String::from_utf8_lossy(payload).into_owned())
+        }
+        Ok(MsgCode::Error)
+        | Ok(MsgCode::ErrorXfer)
+        | Ok(MsgCode::ErrorSocket)
+        | Ok(MsgCode::ErrorUtf8) => {
+            let msg_code = MsgCode::from_tag(code).unwrap();
+            MplexMessage::Error {
+                code: msg_code,
+                text: String::from_utf8_lossy(payload).into_owned(),
+            }
+        }
+        Ok(MsgCode::Log) | Ok(MsgCode::Client) => {
+            MplexMessage::Log(String::from_utf8_lossy(payload).into_owned())
+        }
+        Ok(MsgCode::Redo) if payload.len() >= 4 => {
+            MplexMessage::Redo(i32::from_le_bytes(payload[..4].try_into().unwrap()))
+        }
+        Ok(MsgCode::Success) => {
+            MplexMessage::Success(String::from_utf8_lossy(payload).into_owned())
+        }
+        Ok(MsgCode::Deleted) => {
+            MplexMessage::Deleted(String::from_utf8_lossy(payload).into_owned())
+        }
+        Ok(MsgCode::NoSend) => MplexMessage::NoSend(String::from_utf8_lossy(payload).into_owned()),
+        Ok(MsgCode::IoError) if payload.len() >= 4 => {
+            MplexMessage::IoError(i32::from_le_bytes(payload[..4].try_into().unwrap()))
+        }
+        Ok(MsgCode::IoTimeout) if payload.len() >= 4 => {
+            MplexMessage::IoTimeout(i32::from_le_bytes(payload[..4].try_into().unwrap()))
+        }
+        Ok(MsgCode::Stats) => MplexMessage::Stats(Bytes::copy_from_slice(payload)),
+        Ok(MsgCode::Noop) => MplexMessage::Noop,
+        Ok(MsgCode::ErrorExit) => MplexMessage::ErrorExit(Bytes::copy_from_slice(payload)),
+        _ => {
+            tracing::trace!(code, len = payload.len(), "unknown control message");
+            MplexMessage::Noop
         }
     }
 }

@@ -25,7 +25,7 @@ use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
 use crate::options::{DeleteMode, TransferOptions};
 use crate::protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
-use crate::protocol::multiplex::MplexWriter;
+use crate::protocol::multiplex::MuxConnection;
 use crate::stats::TransferStats;
 use crate::transport::Transport;
 
@@ -662,10 +662,10 @@ async fn run_push(
     // Both sides enable MUX after handshake (proto >= 30).
     // C ref: io_start_multiplex_out (main.c:1146)
     //
-    // Uses an unbounded channel instead of a bounded duplex pipe to prevent
-    // bidirectional deadlock on large transfers. See start_demux docs.
-    let (mut demux_read, demux_handle) = start_demux(reader);
-    let mut mplex_out = MplexWriter::new(writer);
+    // MuxConnection drives reads and writes concurrently at the frame level.
+    // flush() uses select! to drain incoming data while pushing outgoing,
+    // preventing bidirectional deadlock without background tasks or channels.
+    let mut mux = MuxConnection::new(reader, writer);
 
     // Send filter list (MUX-framed) -- CONDITIONAL.
     //
@@ -686,14 +686,12 @@ async fn run_push(
     if send_filter_list {
         let filter_data = collect_filter_list(options)?;
         tracing::debug!(len = filter_data.len(), "push: sending filter list");
-        mplex_out
-            .write_data(&filter_data)
+        mux.write_data(&filter_data)
             .await
             .map_err(crate::FerrosyncError::Protocol)?;
-        mplex_out
-            .flush()
+        mux.flush()
             .await
-            .map_err(crate::FerrosyncError::Protocol)?;
+            .map_err(|e| crate::FerrosyncError::Transport(e.into()))?;
     }
 
     // Build and send file list (MUX-framed).
@@ -715,25 +713,23 @@ async fn run_push(
         "push: sending file list"
     );
 
-    mplex_out
-        .write_data(&flist_buf)
+    mux.write_data(&flist_buf)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .flush()
+    mux.flush()
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(|e| crate::FerrosyncError::Transport(e.into()))?;
 
     // --list-only: print file list and return without transferring.
     if options.list_only() {
         for entry in &entries {
             println!("{}", entry.format_list_entry());
         }
+        let (mut demux_read, mut mplex_out) = mux.into_split();
         protocol
             .wire
             .sender_goodbye(&mut demux_read, &mut mplex_out)
             .await?;
-        let _ = demux_handle.await;
         stats.finish();
         return Ok(TransferResult { stats });
     }
@@ -748,8 +744,7 @@ async fn run_push(
     let file_reader = LocalFileReader::new(fs, options.source());
 
     wire_transfer::sender_loop(
-        &mut demux_read,
-        &mut mplex_out,
+        &mut mux,
         &entries,
         &ndx_map,
         &file_reader,
@@ -765,13 +760,13 @@ async fn run_push(
     // Stats are only written by the server sender (am_server && am_sender).
     // For push (client is sender, am_server=false), handle_stats(-1) is a no-op.
 
-    // Goodbye exchange.
+    // Goodbye exchange: split the connection since goodbye needs both halves
+    // via separate references.
+    let (mut demux_read, mut mplex_out) = mux.into_split();
     protocol
         .wire
         .sender_goodbye(&mut demux_read, &mut mplex_out)
         .await?;
-
-    let _ = demux_handle.await;
 
     stats.finish();
     Ok(TransferResult { stats })
@@ -808,26 +803,23 @@ async fn run_pull(
     let mut stats = TransferStats::new();
     stats.start();
 
-    // Uses unbounded channel demux to prevent bidirectional deadlock.
-    let (mut demux_read, demux_handle) = start_demux(reader);
-    let mut mplex_out = MplexWriter::new(writer);
+    // MuxConnection drives reads and writes concurrently at the frame level.
+    let mut mux = MuxConnection::new(reader, writer);
 
     // Send filter list -- always for pull.
     // C ref: exclude.c:1377 -- sender's recv_filter_list() always reads.
     let filter_data = collect_filter_list(options)?;
     tracing::debug!(len = filter_data.len(), "pull: sending filter list");
-    mplex_out
-        .write_data(&filter_data)
+    mux.write_data(&filter_data)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
-    mplex_out
-        .flush()
+    mux.flush()
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(|e| crate::FerrosyncError::Transport(e.into()))?;
 
     // Receive file list from remote.
     // C ref: recv_file_list (flist.c), called from main.c:992
-    let received_flist = exchange::recv_file_list(&mut demux_read, protocol, options)
+    let received_flist = exchange::recv_file_list(&mut mux, protocol, options)
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
     let entries = received_flist.entries;
@@ -854,6 +846,7 @@ async fn run_pull(
         for entry in &entries {
             println!("{}", entry.format_list_entry());
         }
+        let (mut demux_read, mut mplex_out) = mux.into_split();
         // Skip transfer but complete protocol handshake.
         wire_transfer::receiver_phase_exchange(
             &mut demux_read,
@@ -867,7 +860,6 @@ async fn run_pull(
             .wire
             .receiver_goodbye(&mut demux_read, &mut mplex_out)
             .await?;
-        let _ = demux_handle.await;
         stats.finish();
         return Ok(TransferResult { stats });
     }
@@ -901,6 +893,10 @@ async fn run_pull(
         let deleted = deleter.delete_extraneous(&dest, entries.iter())?;
         stats.files_deleted = deleted;
     }
+
+    // Split the connection for the pipelined receiver loop: generator
+    // task owns MplexWriter, receiver task owns BufferedMplexReader.
+    let (mut demux_read, mut mplex_out) = mux.into_split();
 
     // Handle dry-run: just count files, don't do wire protocol.
     if options.dry_run() {
@@ -973,8 +969,6 @@ async fn run_pull(
         .wire
         .receiver_goodbye(&mut demux_read, &mut mplex_out)
         .await?;
-
-    let _ = demux_handle.await;
 
     stats.finish();
     Ok(TransferResult { stats })
@@ -1132,9 +1126,6 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Resul
 
     Ok(entries)
 }
-
-// Use the unbounded-channel demux to prevent bidirectional I/O deadlock.
-use crate::protocol::multiplex::start_demux;
 
 // ---------------------------------------------------------------------------
 // Tests

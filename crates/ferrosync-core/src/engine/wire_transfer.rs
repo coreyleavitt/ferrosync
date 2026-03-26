@@ -21,7 +21,7 @@ use crate::filelist::entry::{FileEntry, S_IFMT, S_IFREG};
 use crate::fs::{FileData, FileSystem};
 use crate::protocol::compress::{Compressor, Decompressor};
 use crate::protocol::handshake::{CompressType, NegotiatedProtocol};
-use crate::protocol::multiplex::MplexWriter;
+use crate::protocol::multiplex::{BufferedMplexReader, MplexWriter, MuxConnection};
 use crate::protocol::varint;
 use crate::stats::TransferStats;
 
@@ -201,8 +201,7 @@ impl AnyTokenWriter {
 /// Used by both client push (run_push) and server send (handle_send_impl).
 #[allow(clippy::too_many_arguments)]
 pub async fn sender_loop<R, W>(
-    demux_read: &mut R,
-    mplex_out: &mut MplexWriter<W>,
+    mux: &mut MuxConnection<R, W>,
     entries: &[FileEntry],
     ndx_map: &HashMap<i32, usize>,
     file_reader: &dyn FileReader,
@@ -227,7 +226,7 @@ where
     let mut phase: u32 = 0;
 
     loop {
-        let ndx = varint::read_ndx(demux_read, &mut gen_ndx_state, int_codec).await?;
+        let ndx = varint::read_ndx(mux, &mut gen_ndx_state, int_codec).await?;
 
         if ndx == varint::NDX_DONE {
             phase += 1;
@@ -243,8 +242,8 @@ where
                 int_codec,
             )
             .await?;
-            mplex_out.write_data(&done_buf).await?;
-            mplex_out.flush().await?;
+            mux.write_data(&done_buf).await?;
+            mux.flush().await?;
             continue;
         }
 
@@ -254,7 +253,7 @@ where
         }
 
         // Read iflags from generator (proto >= 29).
-        let iflags = wire.read_iflags(demux_read).await?;
+        let iflags = wire.read_iflags(mux).await?;
 
         // Look up the entry for this NDX.
         let entry_idx = match ndx_map.get(&ndx) {
@@ -281,8 +280,8 @@ where
             let mut echo_buf = Vec::new();
             varint::write_ndx(&mut echo_buf, ndx, &mut send_ndx_state, int_codec).await?;
             wire.write_iflags_echo(&mut echo_buf, iflags).await?;
-            mplex_out.write_data(&echo_buf).await?;
-            mplex_out.flush().await?;
+            mux.write_data(&echo_buf).await?;
+            mux.flush().await?;
             continue;
         }
 
@@ -302,7 +301,7 @@ where
         }
 
         // Read block signatures from generator.
-        let sums = sum::read_sums(demux_read).await?;
+        let sums = sum::read_sums(mux).await?;
 
         progress.emit(ProgressEvent::FileStart {
             index: ndx,
@@ -335,7 +334,7 @@ where
             }
         };
         sum::write_sum_head(&mut hdr, &resp_sum_head).await?;
-        mplex_out.write_data(&hdr).await?;
+        mux.write_data(&hdr).await?;
 
         // 2. Read source data and stream delta tokens directly to the wire.
         let mut literal_bytes = 0u64;
@@ -365,7 +364,7 @@ where
                         DiffOp::Literal(ref data) => {
                             let mut tok_buf = Vec::with_capacity(data.len() + 4);
                             tok_writer.write_data(&mut tok_buf, data).await?;
-                            mplex_out.write_data(&tok_buf).await?;
+                            mux.write_data(&tok_buf).await?;
                             literal_bytes += data.len() as u64;
                         }
                         DiffOp::Copy(bref) => {
@@ -376,7 +375,7 @@ where
                                     bref.block_index(sums.head.blength as u32),
                                 )
                                 .await?;
-                            mplex_out.write_data(&tok_buf).await?;
+                            mux.write_data(&tok_buf).await?;
                             matched_bytes += bref.length as u64;
                         }
                     }
@@ -387,11 +386,11 @@ where
             }
             let mut eof_buf = Vec::with_capacity(8);
             tok_writer.write_eof(&mut eof_buf).await?;
-            mplex_out.write_data(&eof_buf).await?;
+            mux.write_data(&eof_buf).await?;
 
             let file_sum = file_hash.finalize();
-            mplex_out.write_data(&file_sum).await?;
-            mplex_out.flush().await?;
+            mux.write_data(&file_sum).await?;
+            mux.flush().await?;
         } else {
             // Existing mmap path for small/medium files.
             let source_data = file_reader.read_file(entry)?;
@@ -403,7 +402,7 @@ where
                     DiffOp::Literal(data) => {
                         let mut tok_buf = Vec::with_capacity(data.len() + 4);
                         tok_writer.write_data(&mut tok_buf, data).await?;
-                        mplex_out.write_data(&tok_buf).await?;
+                        mux.write_data(&tok_buf).await?;
                         literal_bytes += data.len() as u64;
                     }
                     DiffOp::Copy(bref) => {
@@ -414,18 +413,18 @@ where
                                 bref.block_index(sums.head.blength as u32),
                             )
                             .await?;
-                        mplex_out.write_data(&tok_buf).await?;
+                        mux.write_data(&tok_buf).await?;
                         matched_bytes += bref.length as u64;
                     }
                 }
             }
             let mut eof_buf = Vec::with_capacity(8);
             tok_writer.write_eof(&mut eof_buf).await?;
-            mplex_out.write_data(&eof_buf).await?;
+            mux.write_data(&eof_buf).await?;
 
             let file_sum = checksum::file_checksum(&source_data, &ctx);
-            mplex_out.write_data(&file_sum).await?;
-            mplex_out.flush().await?;
+            mux.write_data(&file_sum).await?;
+            mux.flush().await?;
         }
 
         stats.files_transferred += 1;
@@ -451,8 +450,8 @@ where
         int_codec,
     )
     .await?;
-    mplex_out.write_data(&done_buf).await?;
-    mplex_out.flush().await?;
+    mux.write_data(&done_buf).await?;
+    mux.flush().await?;
 
     Ok(())
 }
@@ -496,7 +495,7 @@ enum GeneratorItem {
 /// generator to the receiver so it knows which file to expect next.
 #[allow(clippy::too_many_arguments)]
 pub async fn receiver_loop_pipelined<R, W>(
-    demux_read: R,
+    demux_read: BufferedMplexReader<R>,
     mplex_out: MplexWriter<W>,
     entries: &[FileEntry],
     entry_ndx: &[i32],
@@ -505,7 +504,7 @@ pub async fn receiver_loop_pipelined<R, W>(
     stats: &mut TransferStats,
     progress: &mut ProgressTracker,
     block_size_override: Option<i32>,
-) -> Result<(R, MplexWriter<W>)>
+) -> Result<(BufferedMplexReader<R>, MplexWriter<W>)>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,

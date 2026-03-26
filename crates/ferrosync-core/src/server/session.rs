@@ -22,7 +22,7 @@ use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
 use crate::options::TransferOptions;
 use crate::protocol::handshake::{self, NegotiatedProtocol};
-use crate::protocol::multiplex::MplexWriter;
+use crate::protocol::multiplex::MuxConnection;
 use crate::stats::TransferStats;
 
 /// Server-side session error type.
@@ -236,17 +236,15 @@ impl ServerSession {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send,
     {
-        // Enable multiplexing: demux incoming, mux outgoing.
-        // Uses unbounded channel demux to prevent bidirectional deadlock.
-        let (mut demux_read, demux_handle) = start_demux(reader);
-        let mut mplex_out = MplexWriter::new(writer);
+        // Enable multiplexing: MuxConnection drives reads and writes concurrently.
+        let mut mux = MuxConnection::new(reader, writer);
 
         // Read and discard filter list from client.
         // C ref: recv_filter_list (exclude.c:1377) -- server receiver side.
         // For daemon protocol, always read filter list. For SSH --server,
         // the filter list is conditional on delete_mode, but our daemon
         // always sends it. This matches rsync daemon behavior.
-        read_and_discard_filter_list(&mut demux_read).await?;
+        read_and_discard_filter_list(&mut mux).await?;
 
         // Build file list from module path.
         let module_path = &module.path;
@@ -262,8 +260,8 @@ impl ServerSession {
         let mut flist_buf = Vec::new();
         exchange::send_file_list(&mut flist_buf, &entries, protocol, opts).await?;
 
-        mplex_out.write_data(&flist_buf).await?;
-        mplex_out.flush().await?;
+        mux.write_data(&flist_buf).await?;
+        mux.flush().await.map_err(SessionError::Io)?;
 
         // Sender loop via wire_transfer.
         let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, opts.recursive());
@@ -272,8 +270,7 @@ impl ServerSession {
         stats.start();
 
         wire_transfer::sender_loop(
-            &mut demux_read,
-            &mut mplex_out,
+            &mut mux,
             &entries,
             &ndx_map,
             &file_reader,
@@ -285,7 +282,9 @@ impl ServerSession {
         )
         .await?;
 
-        // Write transfer stats.
+        // Write transfer stats and goodbye: split since these need both halves
+        // via separate references.
+        let (mut demux_read, mut mplex_out) = mux.into_split();
         protocol.wire.write_stats(&mut mplex_out, &stats).await?;
 
         // Goodbye exchange.
@@ -294,10 +293,8 @@ impl ServerSession {
             .server_sender_goodbye(&mut demux_read, &mut mplex_out)
             .await?;
 
-        // Shut down the write half so the remote side's demux task sees EOF.
+        // Shut down the write half so the remote side sees EOF.
         let _ = mplex_out.shutdown().await;
-        drop(mplex_out);
-        let _ = demux_handle.await;
         Ok(())
     }
 
@@ -328,10 +325,8 @@ impl ServerSession {
             }));
         }
 
-        // Enable multiplexing.
-        // Uses unbounded channel demux to prevent bidirectional deadlock.
-        let (demux_read, demux_handle) = start_demux(reader);
-        let mplex_out = MplexWriter::new(writer);
+        // Enable multiplexing: MuxConnection drives reads and writes concurrently.
+        let mut mux = MuxConnection::new(reader, writer);
 
         // Read and discard the client's filter list -- CONDITIONAL.
         //
@@ -340,16 +335,18 @@ impl ServerSession {
         // For server receiver: am_sender=0, receiver_wants_list = delete || prune.
         // Client only sends filter list when delete_mode is active (see session.rs).
         let expect_filter_list = opts.delete() != crate::options::DeleteMode::None;
-        let mut demux_read = demux_read;
-        let mut mplex_out = mplex_out;
         if expect_filter_list {
-            read_and_discard_filter_list(&mut demux_read).await?;
+            read_and_discard_filter_list(&mut mux).await?;
         }
 
         // Receive file list from client sender.
-        let received_flist = exchange::recv_file_list(&mut demux_read, protocol, opts).await?;
+        let received_flist = exchange::recv_file_list(&mut mux, protocol, opts).await?;
         let entries = received_flist.entries;
         let entry_ndx = received_flist.entry_ndx;
+
+        // Split for pipelined receiver loop: generator owns writer,
+        // receiver owns reader.
+        let (mut demux_read, mut mplex_out) = mux.into_split();
 
         // Pipelined receiver loop via wire_transfer.
         // Server receiver uses default TransferOptions -- no skip checks,
@@ -381,11 +378,8 @@ impl ServerSession {
             .server_receiver_goodbye(&mut mplex_out)
             .await?;
 
-        // Shut down the write half and abort the demux task.
+        // Shut down the write half.
         let _ = mplex_out.shutdown().await;
-        drop(mplex_out);
-        demux_handle.abort();
-        let _ = demux_handle.await;
         Ok(())
     }
 
@@ -548,9 +542,6 @@ fn build_module_entries(
 
     Ok(entries)
 }
-
-// Use the unbounded-channel demux to prevent bidirectional I/O deadlock.
-use crate::protocol::multiplex::start_demux;
 
 #[cfg(test)]
 mod tests {
