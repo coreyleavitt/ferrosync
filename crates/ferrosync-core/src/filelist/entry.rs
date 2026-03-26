@@ -47,6 +47,16 @@ pub struct FileEntry {
 
     /// Group name (proto >= 30, when name follows gid).
     pub group_name: Vec<u8>,
+
+    /// For hardlink duplicates: name of the first occurrence to hardlink from.
+    /// Set during file list decoding when `-H` is active. `None` for first
+    /// occurrences and non-hardlinked files.
+    pub hlink_source: Option<Vec<u8>>,
+
+    /// Hard-link identity from the source filesystem (dev, ino, nlink).
+    /// Populated by the scanner when `-H` is active so the encoder can
+    /// detect duplicate inodes and emit XMIT_HLINKED flags.
+    pub hard_link_info: Option<super::codec::HardLinkInfo>,
 }
 
 impl FileEntry {
@@ -69,6 +79,17 @@ impl FileEntry {
     pub fn is_device(&self) -> bool {
         let ft = self.mode & S_IFMT;
         ft == S_IFBLK || ft == S_IFCHR
+    }
+
+    /// Returns hard-link identity info for regular files with nlink > 1.
+    /// Directories and other non-regular files are never hardlink candidates,
+    /// matching rsync's behavior (flist.c only sets tmp_dev for S_ISREG).
+    pub fn hard_link_info(&self) -> Option<&super::codec::HardLinkInfo> {
+        if self.is_file() {
+            self.hard_link_info.as_ref()
+        } else {
+            None
+        }
     }
 
     /// Returns true if this entry is a special file (FIFO, socket, or

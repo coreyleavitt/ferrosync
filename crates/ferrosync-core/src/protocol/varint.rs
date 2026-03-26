@@ -947,3 +947,98 @@ mod tests {
         );
     }
 }
+
+/// Property-based tests: verify encode/decode roundtrip for arbitrary values.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::io::Cursor;
+
+    // proptest uses sync closures, so we use tokio's block_on.
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    proptest! {
+        #[test]
+        fn varint_roundtrip(val: u32) {
+            rt().block_on(async {
+                let mut buf = Vec::new();
+                write_varint(&mut buf, val).await.unwrap();
+                let mut cursor = Cursor::new(&buf);
+                let decoded = read_varint(&mut cursor).await.unwrap();
+                prop_assert_eq!(decoded, val);
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn int_roundtrip(val: i32) {
+            rt().block_on(async {
+                let mut buf = Vec::new();
+                write_int(&mut buf, val).await.unwrap();
+                let mut cursor = Cursor::new(&buf);
+                let decoded = read_int(&mut cursor).await.unwrap();
+                prop_assert_eq!(decoded, val);
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn shortint_roundtrip(val: u16) {
+            rt().block_on(async {
+                let mut buf = Vec::new();
+                write_shortint(&mut buf, val).await.unwrap();
+                let mut cursor = Cursor::new(&buf);
+                let decoded = read_shortint(&mut cursor).await.unwrap();
+                prop_assert_eq!(decoded, val);
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn longint_roundtrip(val: i64) {
+            rt().block_on(async {
+                let mut buf = Vec::new();
+                write_longint(&mut buf, val).await.unwrap();
+                let mut cursor = Cursor::new(&buf);
+                let decoded = read_longint(&mut cursor).await.unwrap();
+                prop_assert_eq!(decoded, val);
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        // varlong uses min_bytes base bytes + up to 7 extra bytes.
+        // The value must fit in (min_bytes + extra) * 8 bits where
+        // extra <= 7. In practice, rsync uses min_bytes 3 or 4.
+        fn varlong_roundtrip(val in 0i64..=0x00FF_FFFF_FFFF_FFFFi64, min_bytes in 3usize..=4usize) {
+            rt().block_on(async {
+                let mut buf = Vec::new();
+                write_varlong(&mut buf, val, min_bytes).await.unwrap();
+                let mut cursor = Cursor::new(&buf);
+                let decoded = read_varlong(&mut cursor, min_bytes).await.unwrap();
+                prop_assert_eq!(decoded, val);
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn ndx_compact_roundtrip(val in -1000i32..=100_000i32) {
+            rt().block_on(async {
+                let mut state_w = NdxState::default();
+                let mut state_r = NdxState::default();
+                let mut buf = Vec::new();
+                write_ndx(&mut buf, val, &mut state_w, IntCodec::Compact).await.unwrap();
+                let mut cursor = Cursor::new(&buf);
+                let decoded = read_ndx(&mut cursor, &mut state_r, IntCodec::Compact).await.unwrap();
+                prop_assert_eq!(decoded, val);
+                Ok(())
+            })?;
+        }
+    }
+}

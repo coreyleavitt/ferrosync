@@ -74,6 +74,9 @@ pub enum TransportError {
     #[error("authentication failed: {message}")]
     AuthFailed { message: String },
 
+    #[error("authentication cancelled by user")]
+    AuthCancelled,
+
     #[error("daemon module not found: {module}")]
     ModuleNotFound { module: String },
 

@@ -1,5 +1,8 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -11,6 +14,7 @@ use ferrosync_core::transport::daemon::{
 };
 use ferrosync_core::transport::quic::{QuicConfig, QuicTransport};
 use ferrosync_core::transport::ssh::{SshTransport, SshTransportConfig};
+use ferrosync_core::transport::ssh_auth::AuthPrompter;
 use ferrosync_core::transport::tls::{TlsDaemonConfig, TlsDaemonTransport};
 
 // ---------------------------------------------------------------------------
@@ -381,6 +385,10 @@ struct TransferFlags {
     #[arg(long)]
     port: Option<u16>,
 
+    /// Non-interactive mode: only try agent and key auth, never prompt
+    #[arg(long)]
+    batch_mode: bool,
+
     /// Use TLS encryption for daemon connections
     #[arg(long)]
     tls: bool,
@@ -396,6 +404,83 @@ struct TransferFlags {
     /// Number of concurrent file transfers (1-64)
     #[arg(short = 'j', long, value_name = "N", default_value_t = 1)]
     concurrent: usize,
+}
+
+// ---------------------------------------------------------------------------
+// SSH auth prompting
+// ---------------------------------------------------------------------------
+
+/// Interactive auth prompter that reads from `/dev/tty` (Unix) or `CON` (Windows).
+///
+/// Matches OpenSSH behavior: never reads passwords from stdin because stdin
+/// carries the rsync wire protocol.
+struct TtyPrompter;
+
+impl AuthPrompter for TtyPrompter {
+    fn prompt_password(
+        &self,
+        user: &str,
+        host: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        let prompt = format!("{user}@{host}'s password: ");
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || rpassword::read_password_from_tty(Some(&prompt)).ok())
+                .await
+                .ok()?
+        })
+    }
+
+    fn prompt_keyboard_interactive(
+        &self,
+        _user: &str,
+        _host: &str,
+        name: &str,
+        instructions: &str,
+        prompts: &[(String, bool)],
+    ) -> Pin<Box<dyn Future<Output = Option<Vec<String>>> + Send + '_>> {
+        let name = name.to_string();
+        let instructions = instructions.to_string();
+        let prompts: Vec<(String, bool)> = prompts.to_vec();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                use std::io::{self, BufRead, Write};
+
+                // Print server-provided name and instructions if non-empty.
+                let stderr = io::stderr();
+                let mut err = stderr.lock();
+                if !name.is_empty() {
+                    let _ = writeln!(err, "{name}");
+                }
+                if !instructions.is_empty() {
+                    let _ = writeln!(err, "{instructions}");
+                }
+
+                let mut responses = Vec::with_capacity(prompts.len());
+                for (prompt_text, echo) in &prompts {
+                    if *echo {
+                        // Visible input: print prompt to stderr, read from stdin.
+                        let _ = write!(err, "{prompt_text}");
+                        let _ = err.flush();
+                        let stdin = io::stdin();
+                        let mut line = String::new();
+                        if stdin.lock().read_line(&mut line).is_err() {
+                            return None;
+                        }
+                        responses.push(line.trim_end_matches('\n').to_string());
+                    } else {
+                        // Hidden input (password): use rpassword.
+                        match rpassword::read_password_from_tty(Some(prompt_text)) {
+                            Ok(pw) => responses.push(pw),
+                            Err(_) => return None,
+                        }
+                    }
+                }
+                Some(responses)
+            })
+            .await
+            .ok()?
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -798,6 +883,7 @@ async fn run_sync(
     let rsync_path = flags.rsync_path.clone();
     let identity = flags.identity.clone();
     let ssh_port = flags.port;
+    let batch_mode = flags.batch_mode;
     let show_stats = flags.stats;
     let use_tls = flags.tls || flags.transport == "tls";
     let use_quic = flags.transport == "quic";
@@ -858,6 +944,9 @@ async fn run_sync(
             }
             if let Some(ref rp) = rsync_path {
                 ssh_config.rsync_path = rp.clone();
+            }
+            if !batch_mode {
+                ssh_config.auth_prompter = Some(Arc::new(TtyPrompter));
             }
 
             let remote_p = std::path::Path::new(&remote_path);

@@ -1,10 +1,14 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use ferrosync_core::engine::session::{build_server_options, SyncDirection, SyncSession};
 use ferrosync_core::engine::transfer::TransferResult;
 use ferrosync_core::options::TransferOptions;
 use ferrosync_core::transport::ssh::{KnownHostsPolicy, SshTransport, SshTransportConfig};
+use ferrosync_core::transport::ssh_auth::AuthPrompter;
 
 use super::env::test_filesystem;
 
@@ -47,6 +51,55 @@ pub fn test_ssh_config() -> SshTransportConfig {
         identity_files: vec!["/root/.ssh/id_ed25519".into()],
         known_hosts_policy: KnownHostsPolicy::AcceptAll,
         rsync_path: "rsync".to_string(),
+        use_agent: false,
+        ..Default::default()
+    }
+}
+
+/// Mock auth prompter for testing password and keyboard-interactive auth.
+///
+/// Returns canned responses instead of prompting a terminal.
+pub struct MockPrompter {
+    pub password: String,
+}
+
+impl AuthPrompter for MockPrompter {
+    fn prompt_password(
+        &self,
+        _user: &str,
+        _host: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+        let pw = self.password.clone();
+        Box::pin(async move { Some(pw) })
+    }
+
+    fn prompt_keyboard_interactive(
+        &self,
+        _user: &str,
+        _host: &str,
+        _name: &str,
+        _instructions: &str,
+        prompts: &[(String, bool)],
+    ) -> Pin<Box<dyn Future<Output = Option<Vec<String>>> + Send + '_>> {
+        // Answer every prompt with the stored password.
+        let responses: Vec<String> = prompts.iter().map(|_| self.password.clone()).collect();
+        Box::pin(async move { Some(responses) })
+    }
+}
+
+/// Build an SshTransportConfig for the password test user.
+pub fn test_password_ssh_config() -> SshTransportConfig {
+    SshTransportConfig {
+        host: ssh_host(),
+        port: 22,
+        user: "testpw".to_string(),
+        identity_files: vec![], // no keys
+        known_hosts_policy: KnownHostsPolicy::AcceptAll,
+        rsync_path: "rsync".to_string(),
+        use_agent: false,
+        auth_prompter: Some(Arc::new(MockPrompter {
+            password: "testpass123".to_string(),
+        })),
         ..Default::default()
     }
 }

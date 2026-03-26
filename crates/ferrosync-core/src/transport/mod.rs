@@ -11,6 +11,7 @@ pub mod daemon;
 pub mod noise;
 pub mod quic;
 pub mod ssh;
+pub mod ssh_auth;
 pub mod ssh_config;
 pub mod tls;
 

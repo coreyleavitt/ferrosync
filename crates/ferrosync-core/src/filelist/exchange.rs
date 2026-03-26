@@ -76,7 +76,7 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
             &mut delta_state,
             opts,
             &mut hlink_encoder,
-            None,
+            entry.hard_link_info(),
             i as i32,
             None,
         )
@@ -108,6 +108,12 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     let mut sender = IncrementalSender::default();
     let mut hlink_encoder = HardLinkEncoder::new();
 
+    // C ref: flist.c -- inc_recurse NDX starts at 1 (flist_new() sets
+    // ndx_start = flist_cnt, and flist_cnt starts at 1). Entry indices
+    // used for hardlink back-references must be absolute NDX values,
+    // not 0-based array positions.
+    let ndx_start: i32 = 1; // inc_recurse first sub-flist always starts at 1
+
     // First sub-flist (root directory): entries are sent directly without
     // an NDX marker prefix, matching rsync's wire behavior.
     let mut delta_state = DeltaState::default();
@@ -118,8 +124,8 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
             &mut delta_state,
             opts,
             &mut hlink_encoder,
-            None,
-            i as i32,
+            entry.hard_link_info(),
+            ndx_start + i as i32,
             None,
         )
         .await?;

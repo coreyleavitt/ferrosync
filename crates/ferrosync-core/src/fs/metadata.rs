@@ -51,6 +51,7 @@ impl FileMetadata {
             uid: self.uid,
             gid: self.gid,
             rdev: self.rdev,
+            hard_link_info: self.hard_link_info(),
             ..Default::default()
         }
     }

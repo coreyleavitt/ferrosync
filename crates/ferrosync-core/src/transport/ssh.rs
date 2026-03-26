@@ -13,6 +13,7 @@ use std::time::Duration;
 use russh::client;
 use russh::keys::{self, PrivateKeyWithHashAlg, PublicKey};
 
+use super::ssh_auth::AuthPrompter;
 use super::ssh_config::{default_identity_files, resolve_ssh_config};
 use super::{Transport, TransportStreams};
 use crate::error::TransportError;
@@ -31,7 +32,7 @@ pub enum KnownHostsPolicy {
 }
 
 /// Configuration for an SSH transport connection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SshTransportConfig {
     /// Remote hostname or IP.
     pub host: String,
@@ -47,6 +48,28 @@ pub struct SshTransportConfig {
     pub rsync_path: String,
     /// SSH connection timeout.
     pub connect_timeout: Duration,
+    /// Whether to try SSH agent authentication (default: true).
+    /// Requires `SSH_AUTH_SOCK` to be set in the environment.
+    pub use_agent: bool,
+    /// Auth prompter for interactive methods (password, keyboard-interactive).
+    /// If `None`, only agent and key-based auth are attempted.
+    pub auth_prompter: Option<Arc<dyn AuthPrompter>>,
+}
+
+impl std::fmt::Debug for SshTransportConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshTransportConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("identity_files", &self.identity_files)
+            .field("known_hosts_policy", &self.known_hosts_policy)
+            .field("rsync_path", &self.rsync_path)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("use_agent", &self.use_agent)
+            .field("auth_prompter", &self.auth_prompter.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 impl Default for SshTransportConfig {
@@ -59,6 +82,8 @@ impl Default for SshTransportConfig {
             known_hosts_policy: KnownHostsPolicy::Strict,
             rsync_path: "ferrosync".to_string(),
             connect_timeout: Duration::from_secs(30),
+            use_agent: true,
+            auth_prompter: None,
         }
     }
 }
@@ -210,6 +235,151 @@ impl SshTransport {
             }
         }
     }
+
+    /// Try to authenticate via SSH agent.
+    ///
+    /// Connects to the agent via `SSH_AUTH_SOCK`, lists available identities,
+    /// and tries each one. Returns `Ok(false)` if the agent is unavailable or
+    /// no key is accepted.
+    #[cfg(unix)]
+    async fn try_agent_auth(
+        session: &mut client::Handle<SshClientHandler>,
+        user: &str,
+    ) -> std::result::Result<bool, TransportError> {
+        use russh::keys::agent::client::AgentClient;
+
+        let mut agent = match AgentClient::connect_env().await {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::debug!(error = %e, "SSH agent not available");
+                return Ok(false);
+            }
+        };
+
+        let identities = match agent.request_identities().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::debug!(error = %e, "failed to list agent identities");
+                return Ok(false);
+            }
+        };
+
+        if identities.is_empty() {
+            tracing::debug!("SSH agent has no identities");
+            return Ok(false);
+        }
+
+        tracing::debug!(count = identities.len(), "trying SSH agent identities");
+
+        let hash_alg = session
+            .best_supported_rsa_hash()
+            .await
+            .unwrap_or(None)
+            .flatten();
+
+        for pubkey in &identities {
+            match session
+                .authenticate_publickey_with(user, pubkey.clone(), hash_alg, &mut agent)
+                .await
+            {
+                Ok(result) if result.success() => {
+                    tracing::debug!("SSH agent authentication succeeded");
+                    return Ok(true);
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, "agent key auth attempt failed");
+                    continue;
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Try keyboard-interactive authentication.
+    ///
+    /// Initiates the keyboard-interactive exchange and loops through prompt
+    /// rounds until the server accepts or rejects. The `prompter` handles
+    /// user-facing I/O.
+    async fn try_keyboard_interactive(
+        session: &mut client::Handle<SshClientHandler>,
+        user: &str,
+        host: &str,
+        prompter: &dyn AuthPrompter,
+    ) -> std::result::Result<bool, TransportError> {
+        use russh::client::KeyboardInteractiveAuthResponse;
+
+        let mut response = session
+            .authenticate_keyboard_interactive_start(user, None::<String>)
+            .await
+            .map_err(|e| TransportError::ConnectionFailed {
+                message: format!("keyboard-interactive auth failed: {e}"),
+            })?;
+
+        loop {
+            match response {
+                KeyboardInteractiveAuthResponse::Success => return Ok(true),
+                KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+                KeyboardInteractiveAuthResponse::InfoRequest {
+                    name,
+                    instructions,
+                    prompts,
+                } => {
+                    let prompt_pairs: Vec<(String, bool)> = prompts
+                        .into_iter()
+                        .map(|p| (p.prompt, p.echo))
+                        .collect();
+
+                    let answers = match prompter
+                        .prompt_keyboard_interactive(
+                            user,
+                            host,
+                            &name,
+                            &instructions,
+                            &prompt_pairs,
+                        )
+                        .await
+                    {
+                        Some(a) => a,
+                        None => return Err(TransportError::AuthCancelled),
+                    };
+
+                    response = session
+                        .authenticate_keyboard_interactive_respond(answers)
+                        .await
+                        .map_err(|e| TransportError::ConnectionFailed {
+                            message: format!("keyboard-interactive respond failed: {e}"),
+                        })?;
+                }
+            }
+        }
+    }
+
+    /// Try password authentication.
+    ///
+    /// Prompts the user for a password via the `prompter` and attempts
+    /// `authenticate_password`. Passwords are never stored in config --
+    /// always obtained interactively.
+    async fn try_password_auth(
+        session: &mut client::Handle<SshClientHandler>,
+        user: &str,
+        host: &str,
+        prompter: &dyn AuthPrompter,
+    ) -> std::result::Result<bool, TransportError> {
+        let password = match prompter.prompt_password(user, host).await {
+            Some(pw) => pw,
+            None => return Err(TransportError::AuthCancelled),
+        };
+
+        match session.authenticate_password(user, password).await {
+            Ok(result) => Ok(result.success()),
+            Err(e) => {
+                tracing::debug!(error = %e, "password auth attempt failed");
+                Ok(false)
+            }
+        }
+    }
 }
 
 impl Transport for SshTransport {
@@ -241,37 +411,116 @@ impl Transport for SshTransport {
                 message: format!("SSH connection to {addr} failed: {e}"),
             })?;
 
-            // Authenticate: try each identity file in order.
-            let mut authenticated = false;
-            let identity_files = if self.config.identity_files.is_empty() {
-                let ssh_dir = home_ssh_dir();
-                default_identity_files(&ssh_dir)
-            } else {
-                self.config.identity_files.clone()
+            // Discover which auth methods the server accepts.
+            let server_methods = match session.authenticate_none(&self.config.user).await {
+                Ok(result) => match result {
+                    russh::client::AuthResult::Success => {
+                        tracing::debug!("server accepted none auth");
+                        // Open channel below.
+                        russh::MethodSet::empty()
+                    }
+                    russh::client::AuthResult::Failure {
+                        remaining_methods, ..
+                    } => {
+                        tracing::debug!(methods = ?remaining_methods, "server auth methods");
+                        remaining_methods
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!(error = %e, "authenticate_none failed, trying all methods");
+                    russh::MethodSet::all()
+                }
             };
 
-            for key_path in &identity_files {
-                if !key_path.is_file() {
-                    continue;
+            let mut authenticated = server_methods.is_empty(); // none-auth succeeded
+            let mut methods_tried = Vec::new();
+
+            // 1. SSH agent (Unix only).
+            #[cfg(unix)]
+            if !authenticated
+                && self.config.use_agent
+                && server_methods.contains(&russh::MethodKind::PublicKey)
+            {
+                methods_tried.push("agent");
+                if Self::try_agent_auth(&mut session, &self.config.user).await? {
+                    authenticated = true;
                 }
-                tracing::debug!(path = %key_path.display(), "trying SSH key");
-                match Self::try_key_auth(&mut session, &self.config.user, key_path).await? {
-                    true => {
-                        tracing::debug!(path = %key_path.display(), "SSH authentication succeeded");
+            }
+
+            // 2. Public key files from disk.
+            if !authenticated
+                && server_methods.contains(&russh::MethodKind::PublicKey)
+            {
+                let identity_files = if self.config.identity_files.is_empty() {
+                    let ssh_dir = home_ssh_dir();
+                    default_identity_files(&ssh_dir)
+                } else {
+                    self.config.identity_files.clone()
+                };
+
+                methods_tried.push("publickey");
+                for key_path in &identity_files {
+                    if !key_path.is_file() {
+                        continue;
+                    }
+                    tracing::debug!(path = %key_path.display(), "trying SSH key");
+                    if Self::try_key_auth(&mut session, &self.config.user, key_path).await? {
+                        tracing::debug!(path = %key_path.display(), "SSH key authentication succeeded");
                         authenticated = true;
                         break;
                     }
-                    false => continue,
+                }
+            }
+
+            // 3. Keyboard-interactive (requires prompter).
+            if !authenticated
+                && server_methods.contains(&russh::MethodKind::KeyboardInteractive)
+            {
+                if let Some(ref prompter) = self.config.auth_prompter {
+                    methods_tried.push("keyboard-interactive");
+                    if Self::try_keyboard_interactive(
+                        &mut session,
+                        &self.config.user,
+                        &self.config.host,
+                        prompter.as_ref(),
+                    )
+                    .await?
+                    {
+                        authenticated = true;
+                    }
+                }
+            }
+
+            // 4. Password (requires prompter).
+            if !authenticated
+                && server_methods.contains(&russh::MethodKind::Password)
+            {
+                if let Some(ref prompter) = self.config.auth_prompter {
+                    methods_tried.push("password");
+                    if Self::try_password_auth(
+                        &mut session,
+                        &self.config.user,
+                        &self.config.host,
+                        prompter.as_ref(),
+                    )
+                    .await?
+                    {
+                        authenticated = true;
+                    }
                 }
             }
 
             if !authenticated {
                 return Err(TransportError::AuthFailed {
                     message: format!(
-                        "no accepted SSH key for {}@{} (tried {} keys)",
+                        "all authentication methods failed for {}@{} (tried: {})",
                         self.config.user,
                         self.config.host,
-                        identity_files.len()
+                        if methods_tried.is_empty() {
+                            "none".to_string()
+                        } else {
+                            methods_tried.join(", ")
+                        },
                     ),
                 });
             }
@@ -509,6 +758,8 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(30));
         assert_eq!(config.known_hosts_policy, KnownHostsPolicy::Strict);
         assert!(config.identity_files.is_empty());
+        assert!(config.use_agent);
+        assert!(config.auth_prompter.is_none());
     }
 
     #[test]

@@ -4,6 +4,14 @@ RUN mkdir -p /run/sshd /root/.ssh
 COPY tests/fixtures/ssh/test_key.pub /root/.ssh/authorized_keys
 RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
 RUN sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+
+# Password-auth test user (for SSH password and keyboard-interactive tests).
+RUN useradd -m -s /bin/bash testpw && echo "testpw:testpass123" | chpasswd
+# Enable password auth for non-root users (root stays key-only).
+RUN sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+ && sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+ && printf 'Match User root\n    PasswordAuthentication no\n' >> /etc/ssh/sshd_config
+
 # ferrosync binary is shared via volume mount from build cache.
 ENV PATH="/tmp/ferrosync-target/debug:${PATH}"
 EXPOSE 22

@@ -133,8 +133,6 @@ async fn execute_transfer_impl(
         path: PathBuf::from("<no destination>"),
     })?;
 
-    let receiver = super::receiver_engine::ReceiverRef::new(fs, dest, options);
-
     // Build filter rules from options.
     let mut filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
@@ -149,7 +147,7 @@ async fn execute_transfer_impl(
     }
 
     // Build the source file list.
-    let source_entries = if let Some(files_from) = options.files_from() {
+    let mut source_entries = if let Some(files_from) = options.files_from() {
         build_file_list_from_file(fs, source_paths, files_from, &filters)?
     } else {
         build_file_list(
@@ -163,6 +161,15 @@ async fn execute_transfer_impl(
             options.filter_merge_files(),
         )?
     };
+
+    // Compute hardlink groups when -H is active. The file list scanner
+    // populates hard_link_info (dev, ino, nlink) from filesystem metadata.
+    // We need to identify entries that share the same (dev, ino) and mark
+    // all but the first as hardlink duplicates via hlink_source.
+    if options.preserve_hard_links() {
+        compute_hardlink_groups(&mut source_entries);
+    }
+
     stats.total_files = source_entries.len() as u64;
 
     // Calculate total bytes for progress.
@@ -197,255 +204,38 @@ async fn execute_transfer_impl(
         stats.files_deleted = deleted;
     }
 
-    // Transfer each file.
-    for item in &source_entries {
-        let dest_path = receiver.dest_path(&item.entry);
+    // Build a source path lookup so LocalDataProvider can find source files.
+    let source_path_map: std::collections::HashMap<&[u8], &Path> = source_entries
+        .iter()
+        .map(|item| (item.entry.name.as_slice(), item.source_path.as_path()))
+        .collect();
 
-        if item.entry.is_dir() {
-            receiver.create_directory(&item.entry)?;
-            stats.directories_created += 1;
+    // Build the (index, FileEntry) pairs that process_entries() expects.
+    let indexed_entries: Vec<(i32, FileEntry)> = source_entries
+        .iter()
+        .map(|item| (item.index, item.entry.clone()))
+        .collect();
 
-            // --delete-during: remove extraneous files in this directory.
-            if options.delete() == DeleteMode::During {
-                let deleted = deleter.delete_extraneous_in_dir(
-                    &dest_path,
-                    source_entries.iter().map(|item| &item.entry),
-                    &item.entry.name,
-                )?;
-                stats.files_deleted += deleted;
-            }
+    let receiver = super::receiver_engine::ReceiverRef::new(fs, dest, options);
 
-            continue;
-        }
+    let mut provider = LocalDataProvider {
+        fs,
+        source_path_map: &source_path_map,
+        options,
+        ctx,
+    };
 
-        if item.entry.is_symlink() && options.preserve_links() {
-            if !receiver.create_symlink(&item.entry)? {
-                stats.files_skipped += 1;
-                continue;
-            }
-            stats.symlinks += 1;
-            progress.emit(ProgressEvent::FileComplete {
-                index: item.index,
-                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                literal_bytes: 0,
-                matched_bytes: 0,
-            });
-            continue;
-        }
+    let mut process_ctx = super::receiver_engine::ProcessContext {
+        stats: &mut stats,
+        progress,
+        filters: &filters,
+        deleter: Some(&deleter),
+        protocol_ctx: ctx,
+    };
 
-        if !item.entry.is_file() {
-            continue;
-        }
-
-        // Unified skip checks (--existing, --ignore-existing, --max-size,
-        // --min-size, --compare-dest, quick-check).
-        if receiver.should_skip_file(&item.entry) {
-            stats.files_skipped += 1;
-            progress.emit(ProgressEvent::FileSkipped {
-                index: item.index,
-                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-            });
-            continue;
-        }
-
-        // --link-dest: hard-link from alt dir if unchanged.
-        if receiver.try_link_dest(&item.entry) {
-            stats.files_transferred += 1;
-            progress.emit(ProgressEvent::FileComplete {
-                index: item.index,
-                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                literal_bytes: 0,
-                matched_bytes: item.entry.len as u64,
-            });
-            continue;
-        }
-
-        // --copy-dest: copy from alt dir if unchanged (also use as basis).
-        if receiver.try_copy_dest(&item.entry) {
-            stats.files_transferred += 1;
-            progress.emit(ProgressEvent::FileComplete {
-                index: item.index,
-                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                literal_bytes: 0,
-                matched_bytes: item.entry.len as u64,
-            });
-            continue;
-        }
-
-        // Checksum mode: compare file-level checksums.
-        if options.checksum_mode() {
-            if let Ok(dest_data) = fs.map_file(&dest_path) {
-                let src_data = fs.map_file(&item.source_path)?;
-                let src_sum = checksum::file_checksum(&src_data, ctx);
-                let dst_sum = checksum::file_checksum(&dest_data, ctx);
-                if src_sum == dst_sum {
-                    stats.files_skipped += 1;
-                    progress.emit(ProgressEvent::FileSkipped {
-                        index: item.index,
-                        name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                    });
-                    continue;
-                }
-            }
-        }
-
-        // Compute and emit itemized changes if requested.
-        if options.itemize_changes() {
-            let changes = file_decision::compute_itemized(fs, &item.entry, &dest_path, options);
-            progress.emit(ProgressEvent::FileItemized {
-                index: item.index,
-                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                changes,
-            });
-        }
-
-        progress.emit(ProgressEvent::FileStart {
-            index: item.index,
-            name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-            size: item.entry.len,
-        });
-
-        if options.dry_run() {
-            stats.files_transferred += 1;
-            stats.total_size += item.entry.len as u64;
-            progress.emit(ProgressEvent::FileComplete {
-                index: item.index,
-                name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                literal_bytes: item.entry.len as u64,
-                matched_bytes: 0,
-            });
-            continue;
-        }
-
-        // Read basis file (if it exists on the receiver side).
-        let basis_data = fs.map_file(&dest_path).unwrap_or_default();
-
-        // --append / --append-verify: if dest exists and source is longer, only transfer the tail.
-        if (options.append() || options.append_verify()) && !basis_data.is_empty() {
-            let dest_len = basis_data.len();
-            let source_data = fs.map_file(&item.source_path)?;
-            if source_data.len() > dest_len {
-                let append_data = &source_data[dest_len..];
-                let mode = if options.preserve_perms() {
-                    Some(item.entry.mode & 0o7777)
-                } else {
-                    None
-                };
-                fs.append_file(&dest_path, append_data, mode)?;
-
-                if options.append_verify() {
-                    // Verify the whole file matches after append.
-                    let dest_data = fs.map_file(&dest_path)?;
-                    if dest_data.as_ref() != source_data.as_ref() {
-                        tracing::debug!(
-                            path = %dest_path.display(),
-                            "append-verify mismatch, retransferring"
-                        );
-                        // Fall through to full transfer below
-                    } else {
-                        // Verification passed
-                        let literal_bytes = append_data.len() as u64;
-                        stats.files_transferred += 1;
-                        stats.total_size += item.entry.len as u64;
-                        stats.literal_data += literal_bytes;
-                        stats.bytes_sent += literal_bytes;
-                        progress.emit(ProgressEvent::FileComplete {
-                            index: item.index,
-                            name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                            literal_bytes,
-                            matched_bytes: dest_len as u64,
-                        });
-                        continue;
-                    }
-                } else {
-                    // Original append path (no verification)
-                    let literal_bytes = append_data.len() as u64;
-                    stats.files_transferred += 1;
-                    stats.total_size += item.entry.len as u64;
-                    stats.literal_data += literal_bytes;
-                    stats.bytes_sent += literal_bytes;
-                    progress.emit(ProgressEvent::FileComplete {
-                        index: item.index,
-                        name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                        literal_bytes,
-                        matched_bytes: dest_len as u64,
-                    });
-                    continue;
-                }
-            } else {
-                // Source is same length or shorter -- skip.
-                stats.files_skipped += 1;
-                progress.emit(ProgressEvent::FileSkipped {
-                    index: item.index,
-                    name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-                });
-                continue;
-            }
-        }
-
-        // Read the source file on-demand for the transfer.
-        let source_data = fs.map_file(&item.source_path)?;
-
-        // Transfer via delta pipeline.
-        //
-        // `delta_data` holds the result when we go through the delta path;
-        // in the whole-file path we reuse `source_data` directly.
-        let delta_data;
-        let result_data: &[u8] = if options.whole_file() || basis_data.is_empty() {
-            // Whole-file mode or no basis: use the data directly.
-            &source_data
-        } else if options.compress() {
-            delta_data = pipeline::transfer_file_compressed(
-                &source_data,
-                &basis_data,
-                ctx,
-                options.compress_level(),
-                crate::protocol::handshake::CompressType::Zlib,
-            )
-            .await
-            .map_err(crate::FerrosyncError::Protocol)?;
-            &delta_data
-        } else {
-            delta_data = pipeline::transfer_file(&source_data, &basis_data, ctx)
-                .await
-                .map_err(crate::FerrosyncError::Protocol)?;
-            &delta_data
-        };
-
-        let literal_bytes = result_data.len() as u64;
-
-        // Delegate backup + write + metadata + remove-source to receiver engine.
-        receiver.receive_file(&item.entry, result_data, Some(&item.source_path))?;
-
-        stats.files_transferred += 1;
-        stats.total_size += item.entry.len as u64;
-        stats.literal_data += literal_bytes;
-        stats.bytes_sent += literal_bytes;
-
-        progress.emit(ProgressEvent::FileComplete {
-            index: item.index,
-            name: crate::engine::progress::name_to_pathbuf(&item.entry.name),
-            literal_bytes,
-            matched_bytes: 0,
-        });
-
-        // Bandwidth limiting: sleep to maintain the target rate.
-        if let Some(limit) = options.bwlimit() {
-            if limit > 0 {
-                let sleep_secs = literal_bytes as f64 / limit as f64;
-                if sleep_secs > 0.001 {
-                    tokio::time::sleep(Duration::from_secs_f64(sleep_secs)).await;
-                }
-            }
-        }
-    }
-
-    // Handle --delete-after.
-    if options.delete() == DeleteMode::After {
-        let deleted =
-            deleter.delete_extraneous(dest, source_entries.iter().map(|item| &item.entry))?;
-        stats.files_deleted = deleted;
-    }
+    receiver
+        .process_entries(&indexed_entries, &mut provider, &mut process_ctx)
+        .await?;
 
     // Handle --prune-empty-dirs (-m).
     if options.prune_empty_dirs() {
@@ -455,6 +245,125 @@ async fn execute_transfer_impl(
 
     stats.finish();
     Ok(TransferResult { stats })
+}
+
+// ---------------------------------------------------------------------------
+// LocalDataProvider
+// ---------------------------------------------------------------------------
+
+/// Data provider for local (non-wire) transfers.
+///
+/// Reads source files from the local filesystem and applies the delta
+/// pipeline to produce reconstructed file data.
+struct LocalDataProvider<'a> {
+    fs: &'a dyn FileSystem,
+    source_path_map: &'a std::collections::HashMap<&'a [u8], &'a Path>,
+    options: &'a TransferOptions,
+    ctx: &'a ProtocolContext,
+}
+
+impl<'a> LocalDataProvider<'a> {
+    fn get_source_path(&self, entry: &FileEntry) -> Option<&'a Path> {
+        self.source_path_map.get(entry.name.as_slice()).copied()
+    }
+}
+
+impl<'a> super::receiver_engine::DataProvider for LocalDataProvider<'a> {
+    async fn provide_data(
+        &mut self,
+        _index: i32,
+        entry: &FileEntry,
+        basis: &[u8],
+    ) -> std::result::Result<Vec<u8>, crate::FerrosyncError> {
+        let source_path = self
+            .get_source_path(entry)
+            .ok_or_else(|| FsError::NotFound {
+                path: PathBuf::from(String::from_utf8_lossy(&entry.name).into_owned()),
+            })?;
+
+        let source_data = self.fs.map_file(source_path)?;
+
+        if self.options.whole_file() || basis.is_empty() {
+            Ok(source_data.to_vec())
+        } else if self.options.compress() {
+            pipeline::transfer_file_compressed(
+                &source_data,
+                basis,
+                self.ctx,
+                self.options.compress_level(),
+                crate::protocol::handshake::CompressType::Zlib,
+            )
+            .await
+            .map_err(crate::FerrosyncError::Protocol)
+        } else {
+            pipeline::transfer_file(&source_data, basis, self.ctx)
+                .await
+                .map_err(crate::FerrosyncError::Protocol)
+        }
+    }
+
+    fn source_checksum(
+        &self,
+        entry: &FileEntry,
+        ctx: &ProtocolContext,
+    ) -> Option<Vec<u8>> {
+        let source_path = self.get_source_path(entry)?;
+        let src_data = self.fs.map_file(source_path).ok()?;
+        Some(checksum::file_checksum(&src_data, ctx))
+    }
+
+    fn source_path(&self, entry: &FileEntry) -> Option<PathBuf> {
+        self.get_source_path(entry).map(|p| p.to_path_buf())
+    }
+
+    async fn handle_append(
+        &mut self,
+        _index: i32,
+        entry: &FileEntry,
+        dest_path: &Path,
+        basis: &[u8],
+    ) -> std::result::Result<
+        Option<super::receiver_engine::AppendResult>,
+        crate::FerrosyncError,
+    > {
+        let source_path = self
+            .get_source_path(entry)
+            .ok_or_else(|| FsError::NotFound {
+                path: PathBuf::from(String::from_utf8_lossy(&entry.name).into_owned()),
+            })?;
+
+        let dest_len = basis.len();
+        let source_data = self.fs.map_file(source_path)?;
+
+        if source_data.len() <= dest_len {
+            return Ok(Some(super::receiver_engine::AppendResult::Skip));
+        }
+
+        let append_data = &source_data[dest_len..];
+        let mode = if self.options.preserve_perms() {
+            Some(entry.mode & 0o7777)
+        } else {
+            None
+        };
+        self.fs.append_file(dest_path, append_data, mode)?;
+
+        if self.options.append_verify() {
+            let dest_data = self.fs.map_file(dest_path)?;
+            if dest_data.as_ref() != source_data.as_ref() {
+                tracing::debug!(
+                    path = %dest_path.display(),
+                    "append-verify mismatch, retransferring"
+                );
+                // Return None to fall through to full transfer.
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(super::receiver_engine::AppendResult::Appended {
+            literal_bytes: append_data.len() as u64,
+            matched_bytes: dest_len as u64,
+        }))
+    }
 }
 
 /// Streaming transfer implementation.
@@ -587,6 +496,30 @@ async fn execute_transfer_streaming_impl(
     Ok(TransferResult { stats })
 }
 
+/// Compute hardlink groups from filesystem metadata.
+///
+/// Groups entries by `(dev, ino)` and marks all but the first occurrence
+/// in each group with `hlink_source` pointing to the first entry's name.
+/// This enables `process_entries()` to defer duplicate hardlink creation.
+fn compute_hardlink_groups(entries: &mut [FileListItem]) {
+    use std::collections::HashMap;
+
+    let mut first_occurrence: HashMap<(u64, u64), usize> = HashMap::new();
+    for i in 0..entries.len() {
+        if let Some(ref info) = entries[i].entry.hard_link_info {
+            if info.nlink > 1 {
+                let key = (info.dev, info.ino);
+                if let Some(&first_idx) = first_occurrence.get(&key) {
+                    entries[i].entry.hlink_source =
+                        Some(entries[first_idx].entry.name.clone());
+                } else {
+                    first_occurrence.insert(key, i);
+                }
+            }
+        }
+    }
+}
+
 /// A file list entry with associated source data.
 #[derive(Debug)]
 struct FileListItem {
@@ -623,12 +556,18 @@ fn build_file_list(
             fs.lstat(source)?
         };
         let name = entry::compute_entry_name(source, relative);
+        let is_dir = meta.mode & S_IFMT == S_IFDIR;
 
-        if !filters.is_included(&name, meta.mode & S_IFMT == S_IFDIR) {
+        // Don't apply filter rules to top-level source arguments.
+        // rsync only filters discovered children within recursive scans,
+        // not the command-line source paths themselves. Without this,
+        // `--exclude '*'` would skip the source directory before any
+        // children are scanned.
+        if !is_dir && !filters.is_included(&name, false) {
             continue;
         }
 
-        if meta.mode & S_IFMT == S_IFDIR {
+        if is_dir {
             match dir_mode {
                 DirectoryMode::Recurse => {
                     let root_dev = if one_file_system {

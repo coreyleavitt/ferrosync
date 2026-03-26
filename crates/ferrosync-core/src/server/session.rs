@@ -253,7 +253,7 @@ impl ServerSession {
             });
         }
 
-        let entries = build_module_entries(fs, module_path, opts.recursive())?;
+        let entries = build_module_entries(fs, module, opts.recursive())?;
 
         // Send file list.
         let mut flist_buf = Vec::new();
@@ -467,10 +467,22 @@ fn extract_client_info(args: &[String]) -> String {
 /// Build file entries from a module's filesystem path.
 fn build_module_entries(
     fs: &dyn FileSystem,
-    module_path: &std::path::Path,
+    module: &Module,
     recursive: bool,
 ) -> Result<Vec<FileEntry>, SessionError> {
-    let mut filters = FilterRuleList::new();
+    // Build filter rules from module config, matching rsync's daemon_filter_list
+    // population in clientserver.c. Order: filters (highest priority), includes,
+    // then excludes -- same as FilterRuleList::from_options.
+    let mut filters = FilterRuleList::from_options(
+        &module.exclude,
+        &module.include,
+        &module.filter,
+    )
+    .map_err(|e| SessionError::Protocol(ProtocolError::Handshake {
+        message: format!("invalid module filter rule: {e}"),
+    }))?;
+
+    let module_path = &module.path;
     let mut entries = Vec::new();
 
     let meta = fs.lstat(module_path)?;
@@ -491,12 +503,15 @@ fn build_module_entries(
             )?;
         } else {
             // Non-recursive: add the directory itself and its immediate
-            // non-directory children only.
+            // non-directory children only, respecting module filters.
             entries.push(meta.to_file_entry(b".".to_vec()));
             let mut children: Vec<crate::fs::DirEntry> = fs.read_dir(module_path)?;
             children.sort_by(|a, b| a.name.cmp(&b.name));
             for child in children {
                 let is_dir = child.metadata.mode & S_IFMT == S_IFDIR;
+                if !filters.is_included(&child.name, is_dir) {
+                    continue;
+                }
                 if !is_dir {
                     entries.push(child.metadata.to_file_entry(child.name));
                 }

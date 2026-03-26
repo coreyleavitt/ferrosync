@@ -45,6 +45,8 @@ rcgen = { workspace = true }
 filetime = "0.2"
 tracing-subscriber = { workspace = true }
 criterion = { workspace = true }
+test-case = "3"
+proptest = "1"
 
 [[bench]]
 name = "checksums"

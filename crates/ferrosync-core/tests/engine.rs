@@ -1005,3 +1005,293 @@ async fn test_transfer_filter_merge_files() {
         "-F should apply .rsync-filter rules"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tier 1 tests: flags with no previous engine test coverage
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_transfer_update_skips_newer_dest() {
+    // --update: skip files that are newer on the receiver.
+    // If this flag were silently ignored, the dest file WOULD be overwritten.
+    // Include a second file that IS older on dest to prove the engine ran.
+    let env = TestEnv::builder()
+        .with_src_file("newer_dest.txt", b"old source\n", Some(1_700_000_000))
+        .with_dst_file("newer_dest.txt", b"newer dest\n", Some(1_800_000_000))
+        .with_src_file("older_dest.txt", b"new source\n", Some(1_800_000_000))
+        .with_dst_file("older_dest.txt", b"old dest\n", Some(1_700_000_000))
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .update(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // Newer dest should NOT be overwritten.
+    let content = std::fs::read_to_string(env.dst().join("newer_dest.txt")).unwrap();
+    assert_eq!(
+        content, "newer dest\n",
+        "--update should NOT overwrite newer dest file"
+    );
+
+    // Older dest SHOULD be overwritten (proves --update ran selectively).
+    let content2 = std::fs::read_to_string(env.dst().join("older_dest.txt")).unwrap();
+    assert_eq!(
+        content2, "new source\n",
+        "--update should overwrite older dest file"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_update_overwrites_older_dest() {
+    // --update should overwrite when dest is OLDER than source.
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"newer source\n", Some(1_800_000_000))
+        .with_dst_file("file.txt", b"old dest\n", Some(1_700_000_000))
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .update(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    let content = std::fs::read_to_string(env.dst().join("file.txt")).unwrap();
+    assert_eq!(
+        content, "newer source\n",
+        "--update should overwrite older dest file"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_hard_links_preserved() {
+    // -H: hard-link relationships in source should be preserved at destination.
+    // If this flag were silently ignored, the files would be independent copies.
+    let env = TestEnv::builder()
+        .with_src_file("original.txt", b"shared content\n", Some(1_700_000_000))
+        .build();
+
+    // Create a hard link in source.
+    std::fs::hard_link(
+        env.src().join("original.txt"),
+        env.src().join("link.txt"),
+    )
+    .unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .preserve_hard_links(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // Both files should exist with correct content.
+    assert_eq!(
+        std::fs::read_to_string(env.dst().join("original.txt")).unwrap(),
+        "shared content\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.dst().join("link.txt")).unwrap(),
+        "shared content\n"
+    );
+
+    // They should share the same inode (hard linked).
+    use crate::common::assertions::{assert_hard_linked, assert_not_hard_linked};
+    assert_hard_linked(
+        &env.dst().join("original.txt"),
+        &env.dst().join("link.txt"),
+    );
+
+    // Sanity: source files are still hard linked.
+    assert_hard_linked(
+        &env.src().join("original.txt"),
+        &env.src().join("link.txt"),
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_hard_links_independent_without_flag() {
+    // Without -H, files that are hard-linked in source should be independent in dest.
+    let env = TestEnv::builder()
+        .with_src_file("original.txt", b"shared content\n", Some(1_700_000_000))
+        .build();
+
+    std::fs::hard_link(
+        env.src().join("original.txt"),
+        env.src().join("link.txt"),
+    )
+    .unwrap();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // Both files should exist with correct content.
+    assert_eq!(
+        std::fs::read_to_string(env.dst().join("original.txt")).unwrap(),
+        "shared content\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.dst().join("link.txt")).unwrap(),
+        "shared content\n"
+    );
+
+    // Without -H, they should NOT be hard linked.
+    use crate::common::assertions::assert_not_hard_linked;
+    assert_not_hard_linked(
+        &env.dst().join("original.txt"),
+        &env.dst().join("link.txt"),
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_include_pattern() {
+    // --include with --exclude should whitelist specific files.
+    // If include were silently ignored, only_this.txt would be excluded.
+    let env = TestEnv::builder()
+        .with_src_file("only_this.txt", b"included\n", None)
+        .with_src_file("also_this.log", b"also included\n", None)
+        .with_src_file("skip.dat", b"excluded\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .include("*.txt")
+        .include("*.log")
+        .exclude("*")
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(
+        env.dst().join("only_this.txt").exists(),
+        "included *.txt should be transferred"
+    );
+    assert!(
+        env.dst().join("also_this.log").exists(),
+        "included *.log should be transferred"
+    );
+    assert!(
+        !env.dst().join("skip.dat").exists(),
+        "excluded *.dat should not be transferred"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_filter_rule() {
+    // --filter applies arbitrary filter rules.
+    // If filter were silently ignored, the excluded file would appear.
+    let env = TestEnv::builder()
+        .with_src_file("keep.txt", b"keep\n", None)
+        .with_src_file("temp.tmp", b"temporary\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .filter("- *.tmp")
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    assert!(env.dst().join("keep.txt").exists());
+    assert!(
+        !env.dst().join("temp.tmp").exists(),
+        "--filter '- *.tmp' should exclude .tmp files"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_one_file_system() {
+    // -x / --one-file-system: don't cross filesystem boundaries.
+    // We can't easily create a separate filesystem in tests, but we can
+    // verify the flag is accepted and the transfer completes correctly
+    // on a single filesystem (no files should be excluded).
+    let env = TestEnv::builder()
+        .with_src_file("file.txt", b"content\n", None)
+        .with_src_file("subdir/nested.txt", b"nested\n", None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .one_file_system(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    // On a single filesystem, all files should transfer normally.
+    assert!(env.dst().join("file.txt").exists());
+    assert!(env.dst().join("subdir/nested.txt").exists());
+}
+
+#[tokio::test]
+async fn test_transfer_append_verify() {
+    // --append-verify: append data to shorter files, verify checksum after.
+    // If silently ignored, the file would be fully overwritten (not appended).
+    let env = TestEnv::builder()
+        .with_src_file("log.txt", b"line1\nline2\nline3\n", Some(1_800_000_000))
+        .with_dst_file("log.txt", b"line1\n", Some(1_700_000_000))
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .append_verify(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    run_transfer(&options).await.unwrap();
+
+    let content = std::fs::read_to_string(env.dst().join("log.txt")).unwrap();
+    assert_eq!(
+        content, "line1\nline2\nline3\n",
+        "--append-verify should append lines 2-3"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_bwlimit_throttles() {
+    // --bwlimit: bandwidth limiting should slow the transfer.
+    // A 100KB file at 50KB/s should take >= 1 second.
+    let data = vec![b'X'; 100 * 1024];
+    let env = TestEnv::builder()
+        .with_src_file("large.dat", &data, None)
+        .build();
+
+    let options = TransferOptions::builder()
+        .recursive(true)
+        .bwlimit(51200) // 50 KB/s
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    let start = std::time::Instant::now();
+    run_transfer(&options).await.unwrap();
+    let elapsed = start.elapsed();
+
+    let content = std::fs::read(env.dst().join("large.dat")).unwrap();
+    assert_eq!(content, data, "file content should match after bwlimit transfer");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(500),
+        "bwlimit 50KB/s for 100KB should take >= 500ms, took {:?}",
+        elapsed
+    );
+}

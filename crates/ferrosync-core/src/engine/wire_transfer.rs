@@ -262,6 +262,14 @@ pub trait FileOps: Send + Sync {
     fn is_append_mode(&self) -> bool {
         false
     }
+
+    /// Create a hard link at `link_entry`'s destination pointing to
+    /// `source_entry`'s destination. Used for `-H` hardlink preservation.
+    fn hardlink(
+        &self,
+        source_entry: &FileEntry,
+        link_entry: &FileEntry,
+    ) -> std::result::Result<(), crate::error::FsError>;
 }
 
 /// Receiver-side operations using local filesystem with TransferOptions.
@@ -383,6 +391,16 @@ impl FileOps for LocalFileOps {
     fn is_append_mode(&self) -> bool {
         self.engine.options().append() || self.engine.options().append_verify()
     }
+
+    fn hardlink(
+        &self,
+        source_entry: &FileEntry,
+        link_entry: &FileEntry,
+    ) -> std::result::Result<(), crate::error::FsError> {
+        let source_path = self.engine.dest_path(source_entry);
+        let link_path = self.engine.dest_path(link_entry);
+        self.engine.fs().hard_link(&source_path, &link_path)
+    }
 }
 
 /// Receiver-side operations using module directory (server side).
@@ -450,6 +468,16 @@ impl FileOps for ModuleFileOps {
 
     fn dest_path(&self, entry: &FileEntry) -> PathBuf {
         self.module_path.join(entry.path())
+    }
+
+    fn hardlink(
+        &self,
+        source_entry: &FileEntry,
+        link_entry: &FileEntry,
+    ) -> std::result::Result<(), crate::error::FsError> {
+        let source_path = self.dest_path(source_entry);
+        let link_path = self.dest_path(link_entry);
+        self.fs.hard_link(&source_path, &link_path)
     }
 }
 
@@ -601,6 +629,29 @@ where
 
         // Non-regular files don't have file data.
         if entry.mode & S_IFMT != S_IFREG {
+            continue;
+        }
+
+        // If ITEM_TRANSFER is not set, the generator is just notifying us
+        // about a file (e.g., a hardlink duplicate that was created without
+        // data transfer, or a file that is already up-to-date). Echo the
+        // NDX + iflags back to the receiver and continue without reading
+        // signatures.
+        const ITEM_TRANSFER: u16 = 1 << 15;
+        if wire.has_iflags && (iflags & ITEM_TRANSFER) == 0 {
+            let mut echo_buf = Vec::new();
+            varint::write_ndx(&mut echo_buf, ndx, &mut send_ndx_state, int_codec).await?;
+            varint::write_shortint(&mut echo_buf, iflags).await?;
+            // ITEM_BASIS_TYPE_FOLLOWS
+            if iflags & 0x0800 != 0 {
+                echo_buf.push(0); // basis_type byte
+            }
+            // ITEM_XNAME_FOLLOWS
+            if iflags & 0x1000 != 0 {
+                varint::write_varint(&mut echo_buf, 0).await?; // empty xname
+            }
+            mplex_out.write_data(&echo_buf).await?;
+            mplex_out.flush().await?;
             continue;
         }
 
@@ -818,6 +869,9 @@ where
         stats.directories_created += 1;
     }
 
+    // Collect hardlink duplicates for deferred creation after transfers.
+    let mut deferred_hardlinks: Vec<(&FileEntry, &[u8])> = Vec::new();
+
     // Per-file receiver loop.
     for (idx, entry) in entries.iter().enumerate() {
         if !entry.is_file() {
@@ -832,6 +886,12 @@ where
 
         // Ensure parent directories exist.
         file_ops.ensure_parent(entry)?;
+
+        // Hardlink duplicate: defer creation until all first occurrences are on disk.
+        if let Some(ref source_name) = entry.hlink_source {
+            deferred_hardlinks.push((entry, source_name));
+            continue;
+        }
 
         // Quick check: skip files that are already up-to-date.
         if file_ops.should_skip(entry) {
@@ -950,6 +1010,22 @@ where
         });
     }
 
+    // Create deferred hardlinks now that first occurrences are on disk.
+    for (dup_entry, source_name) in &deferred_hardlinks {
+        if let Some(source) = entries.iter().find(|e| e.name == *source_name) {
+            if let Err(e) = file_ops.hardlink(source, dup_entry) {
+                tracing::warn!(
+                    source = %String::from_utf8_lossy(source_name),
+                    link = %String::from_utf8_lossy(&dup_entry.name),
+                    error = %e,
+                    "deferred hardlink creation failed"
+                );
+            } else {
+                stats.files_transferred += 1;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1014,8 +1090,11 @@ where
 
     // Pre-compute file items: (entry_idx, file_ndx, entry_clone).
     // We clone entries that need transferring so they can be moved
-    // into the spawned tasks.
+    // into the spawned tasks. Hardlink duplicates are excluded from
+    // file_items (no generator request or data transfer) and deferred
+    // until after all first-occurrence files are transferred.
     let mut file_items: Vec<(usize, i32, FileEntry)> = Vec::new();
+    let mut deferred_hardlinks: Vec<(FileEntry, Vec<u8>)> = Vec::new();
     for (idx, entry) in entries.iter().enumerate() {
         if !entry.is_file() {
             continue;
@@ -1024,6 +1103,13 @@ where
             continue;
         }
         file_ops.ensure_parent(entry)?;
+
+        // Hardlink duplicate: defer until first occurrences are transferred.
+        if let Some(ref source_name) = entry.hlink_source {
+            deferred_hardlinks.push((entry.clone(), source_name.clone()));
+            continue;
+        }
+
         file_items.push((idx, entry_ndx[idx], entry.clone()));
     }
 
@@ -1231,6 +1317,22 @@ where
             message: format!("generator task panicked: {e}"),
         })
     })??;
+
+    // Create deferred hardlinks now that first occurrences are on disk.
+    for (dup_entry, source_name) in &deferred_hardlinks {
+        if let Some(source) = entries.iter().find(|e| e.name == *source_name) {
+            if let Err(e) = file_ops.hardlink(source, dup_entry) {
+                tracing::warn!(
+                    source = %String::from_utf8_lossy(source_name),
+                    link = %String::from_utf8_lossy(&dup_entry.name),
+                    error = %e,
+                    "deferred hardlink creation failed"
+                );
+            } else {
+                stats.files_transferred += 1;
+            }
+        }
+    }
 
     Ok((demux_read, mplex_out))
 }

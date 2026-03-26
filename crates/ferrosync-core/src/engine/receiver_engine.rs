@@ -9,16 +9,126 @@
 //! `LocalFileOps`). For borrowed usage (local transfer engine), callers
 //! construct a `ReceiverRef` which borrows a `ReceiverEngine` and adds the
 //! local-only source-path context.
+//!
+//! ## Unified dispatch via `process_entries()`
+//!
+//! The [`DataProvider`] trait abstracts the only thing that differs between
+//! local and wire transfers: how file content is produced. Everything else
+//! (skip checks, hardlinks, symlinks, metadata, stats, progress) is handled
+//! by [`ReceiverEngine::process_entries()`], eliminating the duplicated
+//! dispatch logic that previously lived in both `transfer.rs` and
+//! `wire_transfer.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::chmod::ChmodSpec;
+use crate::delta::checksum;
+use crate::delta::ProtocolContext;
+use crate::engine::delete;
 use crate::engine::file_decision;
 use crate::error::FsError;
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFLNK, S_IFMT};
+use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
-use crate::options::TransferOptions;
+use crate::options::{DeleteMode, TransferOptions};
+use crate::stats::TransferStats;
+
+use super::progress::{ProgressEvent, ProgressTracker};
+
+// ---------------------------------------------------------------------------
+// DataProvider trait
+// ---------------------------------------------------------------------------
+
+/// Source of file data for the receiver.
+///
+/// The only thing that differs between local and wire transfers is how
+/// file content is produced. Local transfers read source files and compute
+/// deltas in-process. Wire transfers receive delta tokens from the remote
+/// sender. Everything else (skip checks, hardlinks, symlinks, metadata,
+/// stats, progress) is identical and handled by
+/// [`ReceiverEngine::process_entries()`].
+///
+/// Methods are async to support both the local delta pipeline (which uses
+/// async I/O internally) and wire transfers (which read from async streams).
+pub trait DataProvider {
+    /// Produce file data for a regular file entry.
+    ///
+    /// `basis` is the existing destination file data (empty if no basis).
+    /// Returns the reconstructed file content to write.
+    ///
+    /// For local transfers: reads source file, applies delta/whole-file.
+    /// For wire transfers: sends signatures to sender, receives delta tokens.
+    fn provide_data(
+        &mut self,
+        index: i32,
+        entry: &FileEntry,
+        basis: &[u8],
+    ) -> impl std::future::Future<Output = std::result::Result<Vec<u8>, crate::FerrosyncError>> + Send;
+
+    /// Compute a file-level checksum of the source file for `--checksum` mode.
+    ///
+    /// Returns `None` if the provider cannot supply source checksums (e.g.,
+    /// wire transfers where the sender performs checksum comparison).
+    fn source_checksum(
+        &self,
+        _entry: &FileEntry,
+        _ctx: &ProtocolContext,
+    ) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Get the source path for this entry (for `--remove-source-files`).
+    ///
+    /// Returns `None` for wire transfers where there is no local source.
+    fn source_path(&self, _entry: &FileEntry) -> Option<PathBuf> {
+        None
+    }
+
+    /// Handle append mode for a file.
+    ///
+    /// Returns `Some(data)` with the append-only tail data if the provider
+    /// handled the append. Returns `None` to fall through to full transfer.
+    fn handle_append(
+        &mut self,
+        _index: i32,
+        _entry: &FileEntry,
+        _dest_path: &Path,
+        _basis: &[u8],
+    ) -> impl std::future::Future<Output = std::result::Result<Option<AppendResult>, crate::FerrosyncError>> + Send {
+        async { Ok(None) }
+    }
+}
+
+/// Result of an append operation.
+pub enum AppendResult {
+    /// Data was appended successfully.
+    Appended {
+        /// Number of literal bytes appended.
+        literal_bytes: u64,
+        /// Number of existing bytes that were kept (matched).
+        matched_bytes: u64,
+    },
+    /// Source is same size or smaller -- skip the file.
+    Skip,
+}
+
+/// Context for [`ReceiverEngine::process_entries()`].
+///
+/// Holds mutable state that the caller provides: statistics, progress
+/// tracker, filters, and optional deleter for `--delete-during`.
+pub struct ProcessContext<'a> {
+    pub stats: &'a mut TransferStats,
+    pub progress: &'a mut ProgressTracker,
+    pub filters: &'a FilterRuleList,
+    pub deleter: Option<&'a delete::Deleter<'a>>,
+    pub protocol_ctx: &'a ProtocolContext,
+}
+
+// ---------------------------------------------------------------------------
+// ReceiverEngine
+// ---------------------------------------------------------------------------
 
 /// Unified receiver that handles all destination-side file operations.
 ///
@@ -395,6 +505,29 @@ impl ReceiverEngine {
     pub fn needs_buffered_receive(&self) -> bool {
         self.options.sparse()
     }
+
+    /// Run the unified receiver dispatch loop over a set of file entries.
+    ///
+    /// See [`process_entries_impl`] for the full dispatch order.
+    pub async fn process_entries<P: DataProvider + Send>(
+        &self,
+        entries: &[(i32, FileEntry)],
+        provider: &mut P,
+        ctx: &mut ProcessContext<'_>,
+    ) -> std::result::Result<(), crate::FerrosyncError> {
+        process_entries_impl(
+            &*self.fs,
+            &self.dest,
+            &self.options,
+            self.chmod_spec.as_ref(),
+            &self.resolved_link_dests,
+            self.resolved_backup_dir.as_deref(),
+            entries,
+            provider,
+            ctx,
+        )
+        .await
+    }
 }
 
 /// Shared skip logic used by both `ReceiverEngine` and `ReceiverRef`.
@@ -640,4 +773,458 @@ impl<'a> ReceiverRef<'a> {
         }
         Ok(())
     }
+
+    /// Run the unified receiver dispatch loop over a set of file entries.
+    ///
+    /// See [`process_entries_impl`] for the full dispatch order.
+    pub async fn process_entries<P: DataProvider + Send>(
+        &self,
+        entries: &[(i32, FileEntry)],
+        provider: &mut P,
+        ctx: &mut ProcessContext<'_>,
+    ) -> std::result::Result<(), crate::FerrosyncError> {
+        process_entries_impl(
+            self.fs,
+            self.dest,
+            self.options,
+            self.chmod_spec.as_ref(),
+            &self.resolved_link_dests,
+            self.resolved_backup_dir.as_deref(),
+            entries,
+            provider,
+            ctx,
+        )
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared process_entries implementation
+// ---------------------------------------------------------------------------
+
+/// Unified receiver dispatch loop.
+///
+/// This is the single implementation of the per-file dispatch logic used by
+/// both `ReceiverEngine::process_entries()` and `ReceiverRef::process_entries()`.
+///
+/// The loop handles (in order):
+/// 1. Directory creation with `--delete-during`
+/// 2. Symlink creation (`-l`)
+/// 3. Hard link deferral (`-H`)
+/// 4. Skip checks (`--existing`, `--ignore-existing`, `--max-size`, etc.)
+/// 5. `--link-dest` and `--copy-dest` satisfaction
+/// 6. `--checksum` file-level comparison
+/// 7. Itemized changes (`-i`)
+/// 8. Dry-run accounting
+/// 9. Append mode handling
+/// 10. Data transfer via provider
+/// 11. Deferred hard link creation
+/// 12. `--delete-after`
+#[allow(clippy::too_many_arguments)]
+async fn process_entries_impl<P: DataProvider + Send>(
+    fs: &dyn FileSystem,
+    dest: &Path,
+    options: &TransferOptions,
+    chmod_spec: Option<&ChmodSpec>,
+    resolved_link_dests: &[PathBuf],
+    backup_dir: Option<&Path>,
+    entries: &[(i32, FileEntry)],
+    provider: &mut P,
+    ctx: &mut ProcessContext<'_>,
+) -> std::result::Result<(), crate::FerrosyncError> {
+    let mut deferred_hardlinks: Vec<(&FileEntry, &[u8])> = Vec::new();
+
+    for (index, entry) in entries {
+        let index = *index;
+        let dest_path = dest.join(entry.path());
+
+        // --- Directories ---
+        if entry.is_dir() {
+            create_directory_impl(fs, &dest_path, entry, options, chmod_spec)?;
+            ctx.stats.directories_created += 1;
+
+            // --delete-during: remove extraneous files in this directory.
+            if options.delete() == DeleteMode::During {
+                if let Some(deleter) = ctx.deleter {
+                    let deleted = deleter.delete_extraneous_in_dir(
+                        &dest_path,
+                        entries.iter().map(|(_, e)| e),
+                        &entry.name,
+                    )?;
+                    ctx.stats.files_deleted += deleted;
+                }
+            }
+
+            continue;
+        }
+
+        // --- Symlinks ---
+        if entry.is_symlink() && options.preserve_links() {
+            if !create_symlink_impl(fs, dest, entry, options)? {
+                ctx.stats.files_skipped += 1;
+                continue;
+            }
+            ctx.stats.symlinks += 1;
+            ctx.progress.emit(ProgressEvent::FileComplete {
+                index,
+                name: super::progress::name_to_pathbuf(&entry.name),
+                literal_bytes: 0,
+                matched_bytes: 0,
+            });
+            continue;
+        }
+
+        // --- Non-regular files: skip ---
+        if !entry.is_file() {
+            continue;
+        }
+
+        // --- Hardlink duplicate: defer until first occurrences are on disk ---
+        if let Some(ref source_name) = entry.hlink_source {
+            deferred_hardlinks.push((entry, source_name.as_slice()));
+            continue;
+        }
+
+        // --- Skip checks ---
+        if should_skip_impl(fs, entry, dest, options) {
+            ctx.stats.files_skipped += 1;
+            ctx.progress.emit(ProgressEvent::FileSkipped {
+                index,
+                name: super::progress::name_to_pathbuf(&entry.name),
+            });
+            continue;
+        }
+
+        // --- link-dest ---
+        if try_link_dest_impl(fs, entry, dest, resolved_link_dests, options) {
+            ctx.stats.files_transferred += 1;
+            ctx.progress.emit(ProgressEvent::FileComplete {
+                index,
+                name: super::progress::name_to_pathbuf(&entry.name),
+                literal_bytes: 0,
+                matched_bytes: entry.len as u64,
+            });
+            continue;
+        }
+
+        // --- copy-dest ---
+        if try_copy_dest_impl(fs, entry, dest, options) {
+            ctx.stats.files_transferred += 1;
+            ctx.progress.emit(ProgressEvent::FileComplete {
+                index,
+                name: super::progress::name_to_pathbuf(&entry.name),
+                literal_bytes: 0,
+                matched_bytes: entry.len as u64,
+            });
+            continue;
+        }
+
+        // --- Checksum mode: file-level comparison ---
+        if options.checksum_mode() {
+            if let Ok(dest_data) = fs.map_file(&dest_path) {
+                if let Some(src_sum) = provider.source_checksum(entry, ctx.protocol_ctx) {
+                    let dst_sum = checksum::file_checksum(&dest_data, ctx.protocol_ctx);
+                    if src_sum == dst_sum {
+                        ctx.stats.files_skipped += 1;
+                        ctx.progress.emit(ProgressEvent::FileSkipped {
+                            index,
+                            name: super::progress::name_to_pathbuf(&entry.name),
+                        });
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // --- Itemized changes ---
+        if options.itemize_changes() {
+            let changes = file_decision::compute_itemized(fs, entry, &dest_path, options);
+            ctx.progress.emit(ProgressEvent::FileItemized {
+                index,
+                name: super::progress::name_to_pathbuf(&entry.name),
+                changes,
+            });
+        }
+
+        ctx.progress.emit(ProgressEvent::FileStart {
+            index,
+            name: super::progress::name_to_pathbuf(&entry.name),
+            size: entry.len,
+        });
+
+        // --- Dry run ---
+        if options.dry_run() {
+            ctx.stats.files_transferred += 1;
+            ctx.stats.total_size += entry.len as u64;
+            ctx.progress.emit(ProgressEvent::FileComplete {
+                index,
+                name: super::progress::name_to_pathbuf(&entry.name),
+                literal_bytes: entry.len as u64,
+                matched_bytes: 0,
+            });
+            continue;
+        }
+
+        // --- Read basis file ---
+        let basis_data = fs.map_file(&dest_path).unwrap_or_default();
+
+        // --- Append mode ---
+        if (options.append() || options.append_verify()) && !basis_data.is_empty() {
+            match provider.handle_append(index, entry, &dest_path, &basis_data).await? {
+                Some(AppendResult::Appended {
+                    literal_bytes,
+                    matched_bytes,
+                }) => {
+                    ctx.stats.files_transferred += 1;
+                    ctx.stats.total_size += entry.len as u64;
+                    ctx.stats.literal_data += literal_bytes;
+                    ctx.stats.bytes_sent += literal_bytes;
+                    ctx.progress.emit(ProgressEvent::FileComplete {
+                        index,
+                        name: super::progress::name_to_pathbuf(&entry.name),
+                        literal_bytes,
+                        matched_bytes,
+                    });
+                    continue;
+                }
+                Some(AppendResult::Skip) => {
+                    ctx.stats.files_skipped += 1;
+                    ctx.progress.emit(ProgressEvent::FileSkipped {
+                        index,
+                        name: super::progress::name_to_pathbuf(&entry.name),
+                    });
+                    continue;
+                }
+                None => {
+                    // Fall through to full transfer.
+                    // This happens for append-verify mismatch.
+                }
+            }
+        }
+
+        // --- Data transfer via provider ---
+        let data = provider.provide_data(index, entry, &basis_data).await?;
+        let literal_bytes = data.len() as u64;
+
+        // Write to destination with backup, metadata, etc.
+        let source_path = provider.source_path(entry);
+        receive_file_impl(
+            fs,
+            dest,
+            entry,
+            &data,
+            source_path.as_deref(),
+            options,
+            chmod_spec,
+            backup_dir,
+        )?;
+
+        ctx.stats.files_transferred += 1;
+        ctx.stats.total_size += entry.len as u64;
+        ctx.stats.literal_data += literal_bytes;
+        ctx.stats.bytes_sent += literal_bytes;
+
+        ctx.progress.emit(ProgressEvent::FileComplete {
+            index,
+            name: super::progress::name_to_pathbuf(&entry.name),
+            literal_bytes,
+            matched_bytes: 0,
+        });
+
+        // --- Bandwidth limiting ---
+        if let Some(limit) = options.bwlimit() {
+            if limit > 0 {
+                let sleep_secs = literal_bytes as f64 / limit as f64;
+                if sleep_secs > 0.001 {
+                    tokio::time::sleep(Duration::from_secs_f64(sleep_secs)).await;
+                }
+            }
+        }
+    }
+
+    // Create deferred hardlinks now that first occurrences are on disk.
+    for (dup_entry, source_name) in &deferred_hardlinks {
+        if let Some((_, source)) = entries.iter().find(|(_, e)| e.name == *source_name) {
+            let source_path = dest.join(source.path());
+            let link_path = dest.join(dup_entry.path());
+            if !options.dry_run() {
+                let _ = fs.remove_file(&link_path);
+                if let Err(e) = fs.hard_link(&source_path, &link_path) {
+                    tracing::warn!(
+                        source = %String::from_utf8_lossy(source_name),
+                        link = %String::from_utf8_lossy(&dup_entry.name),
+                        error = %e,
+                        "deferred hardlink creation failed"
+                    );
+                } else {
+                    ctx.stats.files_transferred += 1;
+                }
+            } else {
+                ctx.stats.files_transferred += 1;
+            }
+        }
+    }
+
+    // --- delete-after ---
+    if options.delete() == DeleteMode::After {
+        if let Some(deleter) = ctx.deleter {
+            let deleted =
+                deleter.delete_extraneous(dest, entries.iter().map(|(_, e)| e))?;
+            ctx.stats.files_deleted = deleted;
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared helper functions for process_entries_impl
+// ---------------------------------------------------------------------------
+
+/// Create a directory (shared between ReceiverEngine, ReceiverRef, and process_entries_impl).
+fn create_directory_impl(
+    fs: &dyn FileSystem,
+    dest_path: &Path,
+    entry: &FileEntry,
+    options: &TransferOptions,
+    chmod_spec: Option<&ChmodSpec>,
+) -> std::result::Result<(), FsError> {
+    let dir_exists_as_symlink = options.keep_dirlinks()
+        && !options.dry_run()
+        && fs
+            .lstat(dest_path)
+            .map(|m| m.mode & S_IFMT == S_IFLNK)
+            .unwrap_or(false)
+        && fs
+            .stat(dest_path)
+            .map(|m| m.mode & S_IFMT == S_IFDIR)
+            .unwrap_or(false);
+
+    if !dir_exists_as_symlink && !options.dry_run() {
+        let mut mode = if options.preserve_perms() {
+            entry.mode & 0o7777
+        } else {
+            0o755
+        };
+        if let Some(spec) = chmod_spec {
+            mode = spec.apply(mode, true);
+        }
+        fs.mkdir(dest_path, mode)?;
+    }
+
+    Ok(())
+}
+
+/// Create a symlink (shared between ReceiverEngine, ReceiverRef, and process_entries_impl).
+fn create_symlink_impl(
+    fs: &dyn FileSystem,
+    dest: &Path,
+    entry: &FileEntry,
+    options: &TransferOptions,
+) -> std::result::Result<bool, crate::FerrosyncError> {
+    if options.safe_links() && file_decision::is_unsafe_symlink(&entry.link_target) {
+        tracing::warn!(
+            path = %dest.join(entry.path()).display(),
+            "skipping unsafe symlink"
+        );
+        return Ok(false);
+    }
+    if !options.dry_run() && !entry.link_target.is_empty() {
+        let dest_path = dest.join(entry.path());
+        fs.create_symlink(&entry.link_target, &dest_path)?;
+    }
+    Ok(true)
+}
+
+/// Try link-dest (shared).
+fn try_link_dest_impl(
+    fs: &dyn FileSystem,
+    entry: &FileEntry,
+    dest: &Path,
+    resolved_link_dests: &[PathBuf],
+    options: &TransferOptions,
+) -> bool {
+    if resolved_link_dests.is_empty() || options.dry_run() {
+        return false;
+    }
+    if let Some(alt_path) =
+        file_decision::check_alt_dest(fs, entry, resolved_link_dests, options)
+    {
+        let dest_path = dest.join(entry.path());
+        let _ = fs.remove_file(&dest_path);
+        if fs.hard_link(&alt_path, &dest_path).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Try copy-dest (shared).
+fn try_copy_dest_impl(
+    fs: &dyn FileSystem,
+    entry: &FileEntry,
+    dest: &Path,
+    options: &TransferOptions,
+) -> bool {
+    if options.copy_dest().is_empty() || options.dry_run() {
+        return false;
+    }
+    if let Some(alt_path) =
+        file_decision::check_alt_dest(fs, entry, options.copy_dest(), options)
+    {
+        let dest_path = dest.join(entry.path());
+        if fs.copy_file(&alt_path, &dest_path).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Write file data to destination (shared).
+#[allow(clippy::too_many_arguments)]
+fn receive_file_impl(
+    fs: &dyn FileSystem,
+    dest: &Path,
+    entry: &FileEntry,
+    data: &[u8],
+    source_path: Option<&Path>,
+    options: &TransferOptions,
+    chmod_spec: Option<&ChmodSpec>,
+    backup_dir: Option<&Path>,
+) -> std::result::Result<(), crate::FerrosyncError> {
+    let dest_path = dest.join(entry.path());
+
+    if options.backup() && fs.lexists(&dest_path) {
+        file_decision::create_backup(fs, &dest_path, options.suffix(), backup_dir)?;
+    }
+
+    let write_path = if let Some(partial_dir) = options.partial_dir() {
+        let partial = partial_dir.join(dest_path.file_name().unwrap_or_default());
+        fs.mkdir(partial_dir, 0o755)?;
+        partial
+    } else {
+        dest_path.clone()
+    };
+
+    file_decision::write_file_with_options(fs, &write_path, data, entry, options, chmod_spec)?;
+
+    if options.partial_dir().is_some() && write_path != dest_path {
+        fs.rename(&write_path, &dest_path)?;
+    }
+
+    file_decision::set_file_metadata(fs, &dest_path, entry, options);
+
+    if let Some(src) = source_path {
+        if options.remove_source_files() && !options.dry_run() {
+            if let Err(e) = fs.remove_file(src) {
+                tracing::warn!(
+                    path = %src.display(),
+                    error = %e,
+                    "failed to remove source file"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }

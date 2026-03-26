@@ -108,6 +108,7 @@ impl IncrementalReceiver {
         delta_state: &mut DeltaState,
     ) -> Result<SubFileList> {
         let ndx_start = self.next_ndx;
+        delta_state.ndx_start = ndx_start;
         let mut entries = Vec::new();
         let mut hlink_decoder = HardLinkDecoder::new();
 
@@ -168,9 +169,12 @@ impl IncrementalSender {
         self.write_sub_flist_marker(w, dir_ndx, opts.wire.int_codec)
             .await?;
 
-        // Write entries.
+        // Write entries. Entry indices must be absolute NDX values (not
+        // 0-based) so hardlink back-references point to the correct entry
+        // in rsync's receiver. self.next_ndx tracks the current absolute NDX.
         let mut delta_state = DeltaState::default();
         let mut hlink_encoder = HardLinkEncoder::new();
+        let ndx_start = self.next_ndx;
         for (i, entry) in entries.iter().enumerate() {
             send_file_entry(
                 w,
@@ -178,8 +182,8 @@ impl IncrementalSender {
                 &mut delta_state,
                 opts,
                 &mut hlink_encoder,
-                None,
-                i as i32,
+                entry.hard_link_info(),
+                ndx_start + i as i32,
                 None,
             )
             .await?;

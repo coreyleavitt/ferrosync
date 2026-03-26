@@ -39,9 +39,9 @@ jobs:
       - name: Run unit tests
         run: cargo test -p ferrosync-core -p ferrosync-cli --lib
 
-      - name: Run transfer engine tests (Unix only)
+      - name: Run engine tests (Unix only)
         if: runner.os != 'Windows'
-        run: cargo test -p ferrosync-core --test transfer_engine
+        run: cargo test -p ferrosync-core --test engine
 
       - name: Run daemon tests
         run: cargo test -p ferrosync-core --test daemon
@@ -65,10 +65,15 @@ jobs:
             sleep 1
           done
 
-      - name: Run rsync interop tests
+      - name: Run wire conformance tests
         run: |
           docker compose -f docker-compose.test.yml run --rm ferrosync-dev \
-            cargo test -p ferrosync-core --test rsync_interop
+            cargo test -p ferrosync-core --test wire
+
+      - name: Run interop tests
+        run: |
+          docker compose -f docker-compose.test.yml run --rm ferrosync-dev \
+            cargo test -p ferrosync-core --test interop
 
       - name: Collect logs on failure
         if: failure()
