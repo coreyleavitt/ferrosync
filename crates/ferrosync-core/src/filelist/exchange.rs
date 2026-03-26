@@ -217,7 +217,7 @@ async fn recv_file_list_batch<R: AsyncRead + Unpin>(
     )
     .await?
     {
-        entries.push(entry);
+        entries.push(*entry);
     }
 
     // For proto < 30 (byte-mode flags), rsync sends an io_error int after the
@@ -354,6 +354,7 @@ async fn recv_file_list_batch_streaming<R: AsyncRead + Unpin>(
         .await?
         {
             ReadEntryResult::Entry(entry) => {
+                let entry = *entry;
                 entries.push(entry.clone());
                 if tx.send(entry).await.is_err() {
                     // Receiver dropped -- transfer engine shut down.

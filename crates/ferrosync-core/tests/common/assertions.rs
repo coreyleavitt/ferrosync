@@ -136,7 +136,12 @@ pub fn assert_trees_match(expected: &Path, actual: &Path, opts: &TreeMatchOpts) 
         let actual_path = actual.join(rel_path);
 
         if opts.check_mtime {
-            assert_mtime_match(&expected_path, &actual_path, opts.mtime_tolerance_secs, rel_path);
+            assert_mtime_match(
+                &expected_path,
+                &actual_path,
+                opts.mtime_tolerance_secs,
+                rel_path,
+            );
         }
 
         #[cfg(unix)]
@@ -190,11 +195,7 @@ pub fn assert_file_content(path: &Path, expected: &[u8]) {
     let actual = std::fs::read(path).unwrap_or_else(|e| {
         panic!("failed to read {}: {e}", path.display());
     });
-    assert_eq!(
-        actual, expected,
-        "content mismatch for {}",
-        path.display()
-    );
+    assert_eq!(actual, expected, "content mismatch for {}", path.display());
 }
 
 /// Assert a file does not exist.
@@ -238,7 +239,8 @@ pub fn assert_permissions(path: &Path, expected_mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let actual = std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
     assert_eq!(
-        actual, expected_mode,
+        actual,
+        expected_mode,
         "permission mismatch for {}: expected {expected_mode:04o}, got {actual:04o}",
         path.display()
     );
@@ -251,10 +253,7 @@ pub fn assert_permissions(path: &Path, expected_mode: u32) {
 /// Assert a remote file has the expected content.
 pub async fn assert_remote_content(path: &str, expected: &str) {
     let actual = crate::common::ssh::remote_cat(path).await;
-    assert_eq!(
-        actual, expected,
-        "remote content mismatch for {path}"
-    );
+    assert_eq!(actual, expected, "remote content mismatch for {path}");
 }
 
 /// Assert a remote file does not exist.

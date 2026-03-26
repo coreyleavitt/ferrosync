@@ -48,10 +48,25 @@ async fn test_interop_push_directory_recursive() {
     );
 
     // Verify subdirectories exist as directories on remote.
-    let is_dir_a = ssh_cmd(&["test", "-d", &format!("{remote_dir}/a"), "&&", "echo", "yes"]).await;
+    let is_dir_a = ssh_cmd(&[
+        "test",
+        "-d",
+        &format!("{remote_dir}/a"),
+        "&&",
+        "echo",
+        "yes",
+    ])
+    .await;
     assert_eq!(is_dir_a.trim(), "yes", "a/ should exist as a directory");
-    let is_dir_ab =
-        ssh_cmd(&["test", "-d", &format!("{remote_dir}/a/b"), "&&", "echo", "yes"]).await;
+    let is_dir_ab = ssh_cmd(&[
+        "test",
+        "-d",
+        &format!("{remote_dir}/a/b"),
+        "&&",
+        "echo",
+        "yes",
+    ])
+    .await;
     assert_eq!(is_dir_ab.trim(), "yes", "a/b/ should exist as a directory");
 
     remote_cleanup(&remote_dir).await;
@@ -219,7 +234,15 @@ async fn test_interop_push_mixed_directory() {
     assert!(remote_exists(&format!("{remote_dir}/medium.bin")).await);
 
     // Verify directory structure exists
-    let is_dir = ssh_cmd(&["test", "-d", &format!("{remote_dir}/sub"), "&&", "echo", "yes"]).await;
+    let is_dir = ssh_cmd(&[
+        "test",
+        "-d",
+        &format!("{remote_dir}/sub"),
+        "&&",
+        "echo",
+        "yes",
+    ])
+    .await;
     assert_eq!(is_dir.trim(), "yes", "sub/ should exist as a directory");
 
     // Verify more files at different depths
@@ -445,7 +468,7 @@ async fn test_interop_push_compress() {
     ])
     .await;
     let head_hex: String = head.split_whitespace().collect();
-    let expected: String = std::iter::repeat("41").take(16).collect();
+    let expected: String = "41".repeat(16);
     assert_eq!(
         head_hex, expected,
         "compressed transfer should produce correct file content"

@@ -361,8 +361,7 @@ pub async fn encode_end_of_flist<W: AsyncWrite + Unpin>(
             write_varint(w, io_error as u32).await?;
         }
         FlagsCodec::ByteExtended if io_error != 0 => {
-            varint::write_shortint(w, (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) as u16)
-                .await?;
+            varint::write_shortint(w, (XMIT_EXTENDED_FLAGS | XMIT_IO_ERROR_ENDLIST) as u16).await?;
             write_varint(w, io_error as u32).await?;
         }
         _ => {
@@ -401,4 +400,3 @@ pub(crate) fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
         .take_while(|(x, y)| x == y)
         .count()
 }
-

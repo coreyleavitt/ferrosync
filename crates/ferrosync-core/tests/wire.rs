@@ -21,8 +21,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use ferrosync_core::engine::session::build_server_options;
 use ferrosync_core::filelist::codec::diagnostic::{compare_decoded, diagnostic_decode_all};
 use ferrosync_core::filelist::codec::{
-    decode_entry, encode_end_of_flist, encode_entry, DeltaState, FileListOptions,
-    HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
+    decode_entry, encode_end_of_flist, encode_entry, DeltaState, FileListOptions, HardLinkDecoder,
+    HardLinkEncoder, ReadEntryResult,
 };
 use ferrosync_core::filelist::entry::FileEntry;
 use ferrosync_core::options::TransferOptions;
@@ -71,7 +71,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for SpyReader<R> {
         if let Poll::Ready(Ok(())) = &result {
             let after = buf.filled().len();
             if after > before {
-                this.captured.extend_from_slice(&buf.filled()[before..after]);
+                this.captured
+                    .extend_from_slice(&buf.filled()[before..after]);
             }
         }
         result
@@ -94,12 +95,7 @@ async fn setup_remote_files(files: &[(&str, &str, Option<i64>)]) -> String {
         // Create parent dirs if needed.
         if let Some(dir) = Path::new(name).parent() {
             if !dir.as_os_str().is_empty() {
-                ssh_cmd(&[
-                    "mkdir",
-                    "-p",
-                    &format!("{src_dir}/{}", dir.display()),
-                ])
-                .await;
+                ssh_cmd(&["mkdir", "-p", &format!("{src_dir}/{}", dir.display())]).await;
             }
         }
 
@@ -129,10 +125,7 @@ async fn capture_rsync_flist_bytes(
     );
 
     let transport: Box<dyn Transport> = Box::new(transport);
-    let mut streams = transport
-        .connect()
-        .await
-        .expect("SSH connect failed");
+    let mut streams = transport.connect().await.expect("SSH connect failed");
 
     // Handshake (non-multiplexed).
     let protocol = handshake::client_handshake(
@@ -147,14 +140,8 @@ async fn capture_rsync_flist_bytes(
     .expect("handshake failed");
 
     // Take ownership of reader/writer.
-    let reader = std::mem::replace(
-        &mut streams.reader,
-        Box::new(tokio::io::empty()),
-    );
-    let writer = std::mem::replace(
-        &mut streams.writer,
-        Box::new(tokio::io::sink()),
-    );
+    let reader = std::mem::replace(&mut streams.reader, Box::new(tokio::io::empty()));
+    let writer = std::mem::replace(&mut streams.writer, Box::new(tokio::io::sink()));
     let _streams_guard = streams;
 
     // Start MUX demux.
@@ -181,21 +168,18 @@ async fn capture_rsync_flist_bytes(
     let mut delta_state = DeltaState::default();
     let mut hlink_decoder = HardLinkDecoder::new();
 
-    loop {
-        match decode_entry(
-            &mut spy,
-            &mut delta_state,
-            &flist_opts,
-            &mut hlink_decoder,
-            &entries,
-            None,
-        )
-        .await
-        .expect("decode_entry failed")
-        {
-            ReadEntryResult::Entry(entry) => entries.push(entry),
-            ReadEntryResult::EndOfList { .. } => break,
-        }
+    while let ReadEntryResult::Entry(entry) = decode_entry(
+        &mut spy,
+        &mut delta_state,
+        &flist_opts,
+        &mut hlink_decoder,
+        &entries,
+        None,
+    )
+    .await
+    .expect("decode_entry failed")
+    {
+        entries.push(*entry);
     }
 
     // Also consume the id lists (uid/gid names) that follow the file
@@ -276,11 +260,7 @@ fn test_ssh_config() -> SshTransportConfig {
 /// 1. Diagnostic-decode rsync's bytes
 /// 2. Diagnostic-decode our encoder's bytes
 /// 3. Compare field-by-field
-async fn assert_wire_conformance(
-    rsync_bytes: &[u8],
-    our_bytes: &[u8],
-    opts: &FileListOptions,
-) {
+async fn assert_wire_conformance(rsync_bytes: &[u8], our_bytes: &[u8], opts: &FileListOptions) {
     let rsync_decoded = diagnostic_decode_all(rsync_bytes, opts)
         .await
         .expect("failed to diagnostic-decode rsync bytes");
@@ -367,7 +347,11 @@ async fn test_wire_conformance_archive_multiple_files() {
     .await
     .expect("capture timed out");
 
-    assert!(entries.len() >= 3, "expected at least 3 entries, got {}", entries.len());
+    assert!(
+        entries.len() >= 3,
+        "expected at least 3 entries, got {}",
+        entries.len()
+    );
 
     let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
@@ -556,11 +540,7 @@ async fn test_wire_conformance_shared_prefix_names() {
 // ---------------------------------------------------------------------------
 
 /// Helper to run a conformance test with given files and options.
-async fn run_conformance(
-    files: &[(&str, &str, Option<i64>)],
-    opts: TransferOptions,
-    label: &str,
-) {
+async fn run_conformance(files: &[(&str, &str, Option<i64>)], opts: TransferOptions, label: &str) {
     if !ssh_test_enabled() {
         eprintln!("skipping: FERROSYNC_SSH_TEST not set");
         return;
@@ -619,7 +599,11 @@ async fn test_wire_conformance_archive_symlink() {
     .await
     .expect("capture timed out");
 
-    assert!(entries.len() >= 2, "expected >= 2 entries, got {}", entries.len());
+    assert!(
+        entries.len() >= 2,
+        "expected >= 2 entries, got {}",
+        entries.len()
+    );
 
     let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
@@ -691,7 +675,13 @@ async fn test_wire_conformance_large_filename() {
     // Create a file with a name > 255 chars to exercise LONG_NAME flag.
     let long_name = "a".repeat(300);
     ssh_cmd(&["sh", "-c", &format!("echo data > {src_dir}/{long_name}")]).await;
-    ssh_cmd(&["touch", "-d", "@1700000000", &format!("{src_dir}/{long_name}")]).await;
+    ssh_cmd(&[
+        "touch",
+        "-d",
+        "@1700000000",
+        &format!("{src_dir}/{long_name}"),
+    ])
+    .await;
     ssh_cmd(&["chmod", "644", &format!("{src_dir}/{long_name}")]).await;
     let remote_src = format!("{remote_dir}/src/");
 
@@ -775,7 +765,11 @@ async fn test_wire_conformance_many_files() {
     .await
     .expect("capture timed out");
 
-    assert!(entries.len() >= 50, "expected >= 50 entries, got {}", entries.len());
+    assert!(
+        entries.len() >= 50,
+        "expected >= 50 entries, got {}",
+        entries.len()
+    );
 
     let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
@@ -831,7 +825,11 @@ async fn test_wire_conformance_hardlinks() {
     .await
     .expect("capture timed out");
 
-    assert!(entries.len() >= 2, "expected >= 2 entries, got {}", entries.len());
+    assert!(
+        entries.len() >= 2,
+        "expected >= 2 entries, got {}",
+        entries.len()
+    );
 
     let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;

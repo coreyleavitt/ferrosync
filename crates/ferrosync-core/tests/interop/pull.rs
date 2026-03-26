@@ -92,7 +92,10 @@ async fn test_interop_pull_empty_file() {
     let remote_path = format!("{remote_dir}/");
     pull_archive(&remote_path, &env.dst(), 30).await;
 
-    assert!(env.dst().join("empty.txt").exists(), "empty file should exist");
+    assert!(
+        env.dst().join("empty.txt").exists(),
+        "empty file should exist"
+    );
     let content = std::fs::read(env.dst().join("empty.txt")).unwrap();
     assert!(content.is_empty());
     assert_eq!(content.len(), 0);
@@ -923,7 +926,10 @@ async fn test_interop_pull_compress() {
         content.iter().all(|&b| b == b'A'),
         "all 65536 bytes should be 'A'"
     );
-    assert_eq!(content, data, "compressed transfer content must match source byte-for-byte");
+    assert_eq!(
+        content, data,
+        "compressed transfer content must match source byte-for-byte"
+    );
 
     remote_cleanup(&remote_dir).await;
 }
@@ -1360,7 +1366,10 @@ async fn test_interop_pull_itemize() {
 
     // Verify the file was retransferred with correct content.
     let content = std::fs::read(env.dst().join("file.txt")).unwrap();
-    assert_eq!(content, b"modified\n", "file should be updated to modified content");
+    assert_eq!(
+        content, b"modified\n",
+        "file should be updated to modified content"
+    );
 
     // The file must have been transferred (not skipped) since content changed.
     assert_eq!(
@@ -1376,7 +1385,10 @@ async fn test_interop_pull_itemize() {
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    assert_eq!(mtime, 1_800_000_000, "mtime should be preserved with -a and -i");
+    assert_eq!(
+        mtime, 1_800_000_000,
+        "mtime should be preserved with -a and -i"
+    );
 
     remote_cleanup(&remote_dir).await;
 }

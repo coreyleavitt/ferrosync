@@ -67,7 +67,7 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 #[derive(Debug)]
 pub enum ReadEntryResult {
     /// A file entry was read.
-    Entry(FileEntry),
+    Entry(Box<FileEntry>),
     /// End of file list, with optional I/O error code.
     EndOfList { io_error: i32 },
 }
@@ -100,8 +100,7 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     };
 
     // --- Hard-link action ---
-    let hlink_action =
-        hlink::resolve_hlink_action(opts, hlink_info, hlink_encoder, entry_index);
+    let hlink_action = hlink::resolve_hlink_action(opts, hlink_info, hlink_encoder, entry_index);
 
     // --- Compute XMIT flags (pure function) ---
     let flags = compute_xmit_flags(entry, &wire_name, state, opts, &hlink_action);
@@ -197,8 +196,16 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     let name = fields::decode_filename(r, state, flags, opts, iconv).await?;
 
     // --- Hard-link back-reference ---
-    match hlink::decode_hlink(r, flags, opts, hlink_decoder, prev_entries, name.clone(), state)
-        .await?
+    match hlink::decode_hlink(
+        r,
+        flags,
+        opts,
+        hlink_decoder,
+        prev_entries,
+        name.clone(),
+        state,
+    )
+    .await?
     {
         hlink::HlinkDecodeResult::Abbreviated(entry) => {
             return Ok(ReadEntryResult::Entry(entry));
@@ -254,5 +261,5 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     // --- Update delta state ---
     state::update_delta_state(state, &entry);
 
-    Ok(ReadEntryResult::Entry(entry))
+    Ok(ReadEntryResult::Entry(Box::new(entry)))
 }

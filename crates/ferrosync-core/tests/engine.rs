@@ -1079,11 +1079,7 @@ async fn test_transfer_hard_links_preserved() {
         .build();
 
     // Create a hard link in source.
-    std::fs::hard_link(
-        env.src().join("original.txt"),
-        env.src().join("link.txt"),
-    )
-    .unwrap();
+    std::fs::hard_link(env.src().join("original.txt"), env.src().join("link.txt")).unwrap();
 
     let options = TransferOptions::builder()
         .recursive(true)
@@ -1105,17 +1101,11 @@ async fn test_transfer_hard_links_preserved() {
     );
 
     // They should share the same inode (hard linked).
-    use crate::common::assertions::{assert_hard_linked, assert_not_hard_linked};
-    assert_hard_linked(
-        &env.dst().join("original.txt"),
-        &env.dst().join("link.txt"),
-    );
+    use crate::common::assertions::assert_hard_linked;
+    assert_hard_linked(&env.dst().join("original.txt"), &env.dst().join("link.txt"));
 
     // Sanity: source files are still hard linked.
-    assert_hard_linked(
-        &env.src().join("original.txt"),
-        &env.src().join("link.txt"),
-    );
+    assert_hard_linked(&env.src().join("original.txt"), &env.src().join("link.txt"));
 }
 
 #[tokio::test]
@@ -1125,11 +1115,7 @@ async fn test_transfer_hard_links_independent_without_flag() {
         .with_src_file("original.txt", b"shared content\n", Some(1_700_000_000))
         .build();
 
-    std::fs::hard_link(
-        env.src().join("original.txt"),
-        env.src().join("link.txt"),
-    )
-    .unwrap();
+    std::fs::hard_link(env.src().join("original.txt"), env.src().join("link.txt")).unwrap();
 
     let options = TransferOptions::builder()
         .recursive(true)
@@ -1151,10 +1137,7 @@ async fn test_transfer_hard_links_independent_without_flag() {
 
     // Without -H, they should NOT be hard linked.
     use crate::common::assertions::assert_not_hard_linked;
-    assert_not_hard_linked(
-        &env.dst().join("original.txt"),
-        &env.dst().join("link.txt"),
-    );
+    assert_not_hard_linked(&env.dst().join("original.txt"), &env.dst().join("link.txt"));
 }
 
 #[tokio::test]
@@ -1288,7 +1271,10 @@ async fn test_transfer_bwlimit_throttles() {
     let elapsed = start.elapsed();
 
     let content = std::fs::read(env.dst().join("large.dat")).unwrap();
-    assert_eq!(content, data, "file content should match after bwlimit transfer");
+    assert_eq!(
+        content, data,
+        "file content should match after bwlimit transfer"
+    );
     assert!(
         elapsed >= std::time::Duration::from_millis(500),
         "bwlimit 50KB/s for 100KB should take >= 500ms, took {:?}",

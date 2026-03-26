@@ -659,7 +659,9 @@ async fn test_diagnostic_roundtrip() {
     encode_end_of_flist(&mut buf, 0, &opts).await.unwrap();
 
     // Diagnostic decode.
-    let decoded = diagnostic::diagnostic_decode_all(&buf, &opts).await.unwrap();
+    let decoded = diagnostic::diagnostic_decode_all(&buf, &opts)
+        .await
+        .unwrap();
     assert_eq!(decoded.len(), 1);
 
     let entry_fields = &decoded[0].fields;
@@ -718,10 +720,12 @@ fn test_compute_xmit_flags_basic() {
     assert!(!flags.same_name());
 
     // After encoding one entry, the next with same mtime/mode should set flags.
-    let mut state = DeltaState::default();
-    state.prev_mtime = 1700000000;
-    state.prev_mode = S_IFREG | 0o644;
-    state.prev_name = b"test.txt".to_vec();
+    let state = DeltaState {
+        prev_mtime: 1700000000,
+        prev_mode: S_IFREG | 0o644,
+        prev_name: b"test.txt".to_vec(),
+        ..Default::default()
+    };
 
     let entry2 = FileEntry {
         name: b"test2.txt".to_vec(),
@@ -762,9 +766,7 @@ mod proptests {
         (
             // name: 1-64 bytes of alphanumeric + / + . + _
             proptest::collection::vec(
-                proptest::sample::select(
-                    b"abcdefghijklmnopqrstuvwxyz0123456789/._".to_vec(),
-                ),
+                proptest::sample::select(b"abcdefghijklmnopqrstuvwxyz0123456789/._".to_vec()),
                 1..64,
             ),
             // len: non-negative file size

@@ -101,8 +101,7 @@ async fn test_auth_password_wrong_password_fails() {
     let fs = crate::common::env::test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await;
 
     match result {
         Ok(Err(e)) => {
@@ -205,8 +204,7 @@ async fn test_auth_batch_mode_no_keys_fails() {
     let fs = crate::common::env::test_filesystem();
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
-    let result =
-        tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), session.run()).await;
 
     match result {
         Ok(Err(e)) => {

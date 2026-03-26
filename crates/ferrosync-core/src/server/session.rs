@@ -473,14 +473,14 @@ fn build_module_entries(
     // Build filter rules from module config, matching rsync's daemon_filter_list
     // population in clientserver.c. Order: filters (highest priority), includes,
     // then excludes -- same as FilterRuleList::from_options.
-    let mut filters = FilterRuleList::from_options(
-        &module.exclude,
-        &module.include,
-        &module.filter,
-    )
-    .map_err(|e| SessionError::Protocol(ProtocolError::Handshake {
-        message: format!("invalid module filter rule: {e}"),
-    }))?;
+    let mut filters =
+        FilterRuleList::from_options(&module.exclude, &module.include, &module.filter).map_err(
+            |e| {
+                SessionError::Protocol(ProtocolError::Handshake {
+                    message: format!("invalid module filter rule: {e}"),
+                })
+            },
+        )?;
 
     let module_path = &module.path;
     let mut entries = Vec::new();

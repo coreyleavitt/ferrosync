@@ -71,11 +71,7 @@ pub trait DataProvider {
     ///
     /// Returns `None` if the provider cannot supply source checksums (e.g.,
     /// wire transfers where the sender performs checksum comparison).
-    fn source_checksum(
-        &self,
-        _entry: &FileEntry,
-        _ctx: &ProtocolContext,
-    ) -> Option<Vec<u8>> {
+    fn source_checksum(&self, _entry: &FileEntry, _ctx: &ProtocolContext) -> Option<Vec<u8>> {
         None
     }
 
@@ -96,7 +92,9 @@ pub trait DataProvider {
         _entry: &FileEntry,
         _dest_path: &Path,
         _basis: &[u8],
-    ) -> impl std::future::Future<Output = std::result::Result<Option<AppendResult>, crate::FerrosyncError>> + Send {
+    ) -> impl std::future::Future<
+        Output = std::result::Result<Option<AppendResult>, crate::FerrosyncError>,
+    > + Send {
         async { Ok(None) }
     }
 }
@@ -970,7 +968,10 @@ async fn process_entries_impl<P: DataProvider + Send>(
 
         // --- Append mode ---
         if (options.append() || options.append_verify()) && !basis_data.is_empty() {
-            match provider.handle_append(index, entry, &dest_path, &basis_data).await? {
+            match provider
+                .handle_append(index, entry, &dest_path, &basis_data)
+                .await?
+            {
                 Some(AppendResult::Appended {
                     literal_bytes,
                     matched_bytes,
@@ -1068,8 +1069,7 @@ async fn process_entries_impl<P: DataProvider + Send>(
     // --- delete-after ---
     if options.delete() == DeleteMode::After {
         if let Some(deleter) = ctx.deleter {
-            let deleted =
-                deleter.delete_extraneous(dest, entries.iter().map(|(_, e)| e))?;
+            let deleted = deleter.delete_extraneous(dest, entries.iter().map(|(_, e)| e))?;
             ctx.stats.files_deleted = deleted;
         }
     }
@@ -1147,9 +1147,7 @@ fn try_link_dest_impl(
     if resolved_link_dests.is_empty() || options.dry_run() {
         return false;
     }
-    if let Some(alt_path) =
-        file_decision::check_alt_dest(fs, entry, resolved_link_dests, options)
-    {
+    if let Some(alt_path) = file_decision::check_alt_dest(fs, entry, resolved_link_dests, options) {
         let dest_path = dest.join(entry.path());
         let _ = fs.remove_file(&dest_path);
         if fs.hard_link(&alt_path, &dest_path).is_ok() {
@@ -1169,9 +1167,7 @@ fn try_copy_dest_impl(
     if options.copy_dest().is_empty() || options.dry_run() {
         return false;
     }
-    if let Some(alt_path) =
-        file_decision::check_alt_dest(fs, entry, options.copy_dest(), options)
-    {
+    if let Some(alt_path) = file_decision::check_alt_dest(fs, entry, options.copy_dest(), options) {
         let dest_path = dest.join(entry.path());
         if fs.copy_file(&alt_path, &dest_path).is_ok() {
             return true;

@@ -18,9 +18,9 @@ mod common;
 
 mod interop {
     pub mod auth;
-    pub mod push;
-    pub mod pull;
-    pub mod reverse;
     pub mod native;
+    pub mod pull;
+    pub mod push;
+    pub mod reverse;
     pub mod scenarios;
 }

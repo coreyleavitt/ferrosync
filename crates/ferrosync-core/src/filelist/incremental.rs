@@ -116,7 +116,7 @@ impl IncrementalReceiver {
             match recv_file_entry(r, delta_state, opts, &mut hlink_decoder, &entries, None).await? {
                 ReadEntryResult::Entry(entry) => {
                     self.next_ndx += 1;
-                    entries.push(entry);
+                    entries.push(*entry);
                 }
                 ReadEntryResult::EndOfList { io_error } => {
                     // Add +1 gap to match rsync's flist_new:

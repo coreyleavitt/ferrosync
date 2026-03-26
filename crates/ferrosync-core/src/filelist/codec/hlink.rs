@@ -176,7 +176,7 @@ pub enum HlinkDecodeResult {
     /// Not a hard-link duplicate -- continue decoding remaining fields.
     Continue,
     /// Duplicate entry cloned from a previous entry.
-    Abbreviated(FileEntry),
+    Abbreviated(Box<FileEntry>),
 }
 
 /// Decode the hard-link back-reference field.
@@ -244,7 +244,7 @@ pub async fn decode_hlink<R: AsyncRead + Unpin>(
             entry.name = name;
             entry.flags = flags.raw();
             super::state::update_delta_state(state, &entry);
-            return Ok(HlinkDecodeResult::Abbreviated(entry));
+            return Ok(HlinkDecodeResult::Abbreviated(Box::new(entry)));
         }
         // Unabbreviated duplicate: first occurrence is in a previous
         // sub-flist. All metadata fields follow on the wire; fall

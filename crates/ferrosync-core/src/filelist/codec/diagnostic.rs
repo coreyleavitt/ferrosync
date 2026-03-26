@@ -7,10 +7,10 @@
 
 use std::io::Cursor;
 
-use crate::error::ProtocolError;
 use super::flags::DecodedFlags;
 use super::options::FileListOptions;
 use super::state::DeltaState;
+use crate::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -191,10 +191,7 @@ pub async fn diagnostic_decode_entry(
             offset: field_start,
             length: consumed,
             raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!(
-                "{uid} ({})",
-                String::from_utf8_lossy(&user_name)
-            ),
+            decoded_value: format!("{uid} ({})", String::from_utf8_lossy(&user_name)),
         });
     }
     *offset += consumed;
@@ -210,10 +207,7 @@ pub async fn diagnostic_decode_entry(
             offset: field_start,
             length: consumed,
             raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!(
-                "{gid} ({})",
-                String::from_utf8_lossy(&group_name)
-            ),
+            decoded_value: format!("{gid} ({})", String::from_utf8_lossy(&group_name)),
         });
     }
     *offset += consumed;
@@ -289,11 +283,10 @@ pub async fn diagnostic_decode_all(
     let mut offset = 0;
     let mut state = DeltaState::default();
 
-    loop {
-        match diagnostic_decode_entry(data, &mut offset, &mut state, opts).await? {
-            DiagnosticResult::Entry(entry) => entries.push(entry),
-            DiagnosticResult::EndOfList { .. } => break,
-        }
+    while let DiagnosticResult::Entry(entry) =
+        diagnostic_decode_entry(data, &mut offset, &mut state, opts).await?
+    {
+        entries.push(entry);
     }
 
     Ok(entries)

@@ -302,11 +302,7 @@ impl<'a> super::receiver_engine::DataProvider for LocalDataProvider<'a> {
         }
     }
 
-    fn source_checksum(
-        &self,
-        entry: &FileEntry,
-        ctx: &ProtocolContext,
-    ) -> Option<Vec<u8>> {
+    fn source_checksum(&self, entry: &FileEntry, ctx: &ProtocolContext) -> Option<Vec<u8>> {
         let source_path = self.get_source_path(entry)?;
         let src_data = self.fs.map_file(source_path).ok()?;
         Some(checksum::file_checksum(&src_data, ctx))
@@ -322,10 +318,8 @@ impl<'a> super::receiver_engine::DataProvider for LocalDataProvider<'a> {
         entry: &FileEntry,
         dest_path: &Path,
         basis: &[u8],
-    ) -> std::result::Result<
-        Option<super::receiver_engine::AppendResult>,
-        crate::FerrosyncError,
-    > {
+    ) -> std::result::Result<Option<super::receiver_engine::AppendResult>, crate::FerrosyncError>
+    {
         let source_path = self
             .get_source_path(entry)
             .ok_or_else(|| FsError::NotFound {
@@ -510,8 +504,7 @@ fn compute_hardlink_groups(entries: &mut [FileListItem]) {
             if info.nlink > 1 {
                 let key = (info.dev, info.ino);
                 if let Some(&first_idx) = first_occurrence.get(&key) {
-                    entries[i].entry.hlink_source =
-                        Some(entries[first_idx].entry.name.clone());
+                    entries[i].entry.hlink_source = Some(entries[first_idx].entry.name.clone());
                 } else {
                     first_occurrence.insert(key, i);
                 }

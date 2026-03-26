@@ -424,9 +424,11 @@ impl AuthPrompter for TtyPrompter {
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         let prompt = format!("{user}@{host}'s password: ");
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || rpassword::read_password_from_tty(Some(&prompt)).ok())
-                .await
-                .ok()?
+            tokio::task::spawn_blocking(move || {
+                rpassword::read_password_from_tty(Some(&prompt)).ok()
+            })
+            .await
+            .ok()?
         })
     }
 

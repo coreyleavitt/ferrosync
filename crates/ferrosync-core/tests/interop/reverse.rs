@@ -182,7 +182,11 @@ async fn test_reverse_push_compress() {
     assert_eq!(content, "compress test data\n");
 
     let size = ssh_cmd(&["stat", "-c", "%s", &format!("{remote_dir}/compressed.txt")]).await;
-    assert_eq!(size.trim(), "19", "compressed transfer should produce correct file size");
+    assert_eq!(
+        size.trim(),
+        "19",
+        "compressed transfer should produce correct file size"
+    );
 
     remote_cleanup(&remote_dir).await;
 }
@@ -207,7 +211,11 @@ async fn test_reverse_pull_compress() {
     assert_eq!(content, "compressed pull");
 
     let metadata = std::fs::metadata(env.dst().join("data.txt")).unwrap();
-    assert_eq!(metadata.len(), 15, "compressed pull should produce correct file size");
+    assert_eq!(
+        metadata.len(),
+        15,
+        "compressed pull should produce correct file size"
+    );
 
     remote_cleanup(&remote_dir).await;
 }
@@ -363,7 +371,11 @@ async fn test_reverse_push_whole_file() {
     assert_eq!(content, "whole file transfer\n");
 
     let size = ssh_cmd(&["stat", "-c", "%s", &format!("{remote_dir}/whole.txt")]).await;
-    assert_eq!(size.trim(), "20", "whole-file transfer should produce correct file size");
+    assert_eq!(
+        size.trim(),
+        "20",
+        "whole-file transfer should produce correct file size"
+    );
 
     remote_cleanup(&remote_dir).await;
 }

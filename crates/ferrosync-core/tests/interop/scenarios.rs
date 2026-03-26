@@ -519,7 +519,11 @@ async fn test_combo_update_merge() {
 
     // Verify first push set mtimes correctly.
     let mtime_b = ssh_cmd(&["stat", "-c", "%Y", &format!("{remote_dir}/file_b.txt")]).await;
-    assert_eq!(mtime_b.trim(), "1700000000", "first push should set file_b mtime");
+    assert_eq!(
+        mtime_b.trim(),
+        "1700000000",
+        "first push should set file_b mtime"
+    );
 
     // On remote, overwrite file_b with newer content and a NEWER mtime.
     // Single arg: SSH invokes a shell that parses the full string correctly.
@@ -530,7 +534,11 @@ async fn test_combo_update_merge() {
 
     // Verify remote modification took effect.
     let mtime_b2 = ssh_cmd(&["stat", "-c", "%Y", &format!("{remote_dir}/file_b.txt")]).await;
-    assert_eq!(mtime_b2.trim(), "1800000000", "remote modify should set newer mtime");
+    assert_eq!(
+        mtime_b2.trim(),
+        "1800000000",
+        "remote modify should set newer mtime"
+    );
 
     // Push with -u (update): should skip file_b because remote is newer.
     let opts = ferrosync_core::options::TransferOptions::builder()
@@ -542,7 +550,10 @@ async fn test_combo_update_merge() {
 
     // Both files should be skipped: file_a has same size+mtime (quick check),
     // file_b is newer on receiver (-u skip).
-    assert_eq!(result.stats.files_transferred, 0, "no files should transfer");
+    assert_eq!(
+        result.stats.files_transferred, 0,
+        "no files should transfer"
+    );
 
     // file_a should have source content (remote was older or same).
     assert_eq!(
@@ -582,7 +593,11 @@ async fn test_combo_update_merge_rsync_control() {
         .output()
         .await
         .expect("rsync push");
-    assert!(output.status.success(), "rsync initial push failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "rsync initial push failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Modify file_b on remote with newer mtime.
     ssh_cmd(&[&format!(
@@ -598,7 +613,11 @@ async fn test_combo_update_merge_rsync_control() {
         .output()
         .await
         .expect("rsync -u push");
-    assert!(output.status.success(), "rsync -u push failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "rsync -u push failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     assert_eq!(
         remote_cat(&format!("{remote_dir}/file_a.txt")).await,

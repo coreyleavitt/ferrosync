@@ -326,10 +326,8 @@ impl SshTransport {
                     instructions,
                     prompts,
                 } => {
-                    let prompt_pairs: Vec<(String, bool)> = prompts
-                        .into_iter()
-                        .map(|p| (p.prompt, p.echo))
-                        .collect();
+                    let prompt_pairs: Vec<(String, bool)> =
+                        prompts.into_iter().map(|p| (p.prompt, p.echo)).collect();
 
                     let answers = match prompter
                         .prompt_keyboard_interactive(
@@ -448,9 +446,7 @@ impl Transport for SshTransport {
             }
 
             // 2. Public key files from disk.
-            if !authenticated
-                && server_methods.contains(&russh::MethodKind::PublicKey)
-            {
+            if !authenticated && server_methods.contains(&russh::MethodKind::PublicKey) {
                 let identity_files = if self.config.identity_files.is_empty() {
                     let ssh_dir = home_ssh_dir();
                     default_identity_files(&ssh_dir)
@@ -473,9 +469,7 @@ impl Transport for SshTransport {
             }
 
             // 3. Keyboard-interactive (requires prompter).
-            if !authenticated
-                && server_methods.contains(&russh::MethodKind::KeyboardInteractive)
-            {
+            if !authenticated && server_methods.contains(&russh::MethodKind::KeyboardInteractive) {
                 if let Some(ref prompter) = self.config.auth_prompter {
                     methods_tried.push("keyboard-interactive");
                     if Self::try_keyboard_interactive(
@@ -492,9 +486,7 @@ impl Transport for SshTransport {
             }
 
             // 4. Password (requires prompter).
-            if !authenticated
-                && server_methods.contains(&russh::MethodKind::Password)
-            {
+            if !authenticated && server_methods.contains(&russh::MethodKind::Password) {
                 if let Some(ref prompter) = self.config.auth_prompter {
                     methods_tried.push("password");
                     if Self::try_password_auth(
