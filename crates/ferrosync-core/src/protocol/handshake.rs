@@ -399,6 +399,13 @@ where
     // Step 4: Checksum seed.
     let seed = varint::read_int(r).await?;
 
+    if checksum == ChecksumType::Md4 {
+        tracing::warn!(
+            "using MD4 checksum (protocol {version}) -- cryptographically weak, \
+             only used for backward compatibility with rsync < 3.0"
+        );
+    }
+
     Ok(NegotiatedProtocol {
         version,
         compat_flags: flags,
@@ -487,6 +494,13 @@ where
     let seed = generate_seed();
     varint::write_int(w, seed).await?;
     w.flush().await?;
+
+    if checksum == ChecksumType::Md4 {
+        tracing::warn!(
+            "using MD4 checksum (protocol {version}) -- cryptographically weak, \
+             only used for backward compatibility with rsync < 3.0"
+        );
+    }
 
     Ok(NegotiatedProtocol {
         version,

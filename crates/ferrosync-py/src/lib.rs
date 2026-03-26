@@ -765,16 +765,6 @@ fn event_to_pydict(py: Python<'_>, event: &ProgressEvent) -> Py<PyAny> {
             let _ = dict.set_item("name", name.to_string_lossy().as_ref());
             let _ = dict.set_item("size", *size);
         }
-        ProgressEvent::FileProgress {
-            index,
-            bytes_transferred,
-            total_size,
-        } => {
-            let _ = dict.set_item("type", "file_progress");
-            let _ = dict.set_item("index", *index);
-            let _ = dict.set_item("bytes_transferred", *bytes_transferred);
-            let _ = dict.set_item("total_size", *total_size);
-        }
         ProgressEvent::FileComplete {
             index,
             name,

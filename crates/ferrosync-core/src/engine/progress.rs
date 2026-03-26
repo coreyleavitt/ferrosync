@@ -17,15 +17,6 @@ pub enum ProgressEvent {
         /// Total file size in bytes.
         size: i64,
     },
-    /// Progress on the current file.
-    FileProgress {
-        /// File index.
-        index: i32,
-        /// Bytes transferred so far for this file.
-        bytes_transferred: u64,
-        /// Total file size.
-        total_size: i64,
-    },
     /// Finished transferring a file.
     FileComplete {
         /// File index.
@@ -173,11 +164,6 @@ impl ProgressTracker {
         match &event {
             ProgressEvent::FileComplete { .. } | ProgressEvent::FileSkipped { .. } => {
                 self.files_done += 1;
-            }
-            ProgressEvent::FileProgress {
-                bytes_transferred, ..
-            } => {
-                self.bytes_transferred = *bytes_transferred;
             }
             _ => {}
         }
