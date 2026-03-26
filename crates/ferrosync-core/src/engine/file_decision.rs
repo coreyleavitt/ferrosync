@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::filelist::entry::FileEntry;
 use crate::fs::FileSystem;
-use crate::options::TransferOptions;
+use crate::options::TransferConfig;
 
 use super::progress::ItemizedChanges;
 
@@ -19,7 +19,7 @@ use super::progress::ItemizedChanges;
 pub fn check_existence_skip(
     fs: &dyn FileSystem,
     dest_path: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> bool {
     let dest_exists = fs.lexists(dest_path);
     if options.existing() && !dest_exists {
@@ -39,7 +39,7 @@ pub fn quick_check_skip(
     fs: &dyn FileSystem,
     src_entry: &FileEntry,
     dest_path: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> bool {
     // --ignore-times: never skip, always transfer
     if options.ignore_times() {
@@ -84,7 +84,7 @@ pub fn check_alt_dest(
     fs: &dyn FileSystem,
     src_entry: &FileEntry,
     alt_dirs: &[PathBuf],
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> Option<PathBuf> {
     let window = options.modify_window() as i64;
     for dir in alt_dirs {
@@ -118,7 +118,7 @@ pub fn resolve_link_dest_dirs(link_dest: &[PathBuf], dest: &Path) -> Vec<PathBuf
 /// Check if a file should be skipped based on size limits.
 ///
 /// Returns `true` if the file exceeds `--max-size` or is below `--min-size`.
-pub fn check_size_limits(entry: &FileEntry, options: &TransferOptions) -> bool {
+pub fn check_size_limits(entry: &FileEntry, options: &TransferConfig) -> bool {
     if let Some(max) = options.max_size() {
         if entry.len as u64 > max {
             return true;
@@ -192,7 +192,7 @@ pub fn write_file_with_options(
     dest_path: &Path,
     data: &[u8],
     entry: &FileEntry,
-    options: &TransferOptions,
+    options: &TransferConfig,
     chmod: Option<&crate::chmod::ChmodSpec>,
 ) -> std::result::Result<(), crate::FerrosyncError> {
     let mode = if options.preserve_perms() {
@@ -239,7 +239,7 @@ pub fn set_file_metadata(
     fs: &dyn FileSystem,
     dest_path: &Path,
     entry: &FileEntry,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) {
     if options.preserve_times() {
         if let Err(e) = fs.set_mtime(dest_path, entry.mtime, entry.mtime_nsec) {
@@ -266,7 +266,7 @@ pub fn compute_itemized(
     fs: &dyn FileSystem,
     src_entry: &FileEntry,
     dest_path: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> ItemizedChanges {
     let file_type = if src_entry.is_dir() {
         'd'
@@ -375,7 +375,7 @@ mod tests {
             .unwrap();
 
         let entry = make_entry("file.txt", 5, 1_700_000_000);
-        let opts = TransferOptions::builder().ignore_times(true).build();
+        let opts = TransferConfig::builder().ignore_times(true).build();
         // Same size, same mtime -- would normally skip, but --ignore-times forces transfer
         assert!(!quick_check_skip(&fs, &entry, &dest, &opts));
     }
@@ -390,7 +390,7 @@ mod tests {
             .unwrap();
 
         let entry = make_entry("file.txt", 5, 1_700_000_000);
-        let opts = TransferOptions::builder().size_only(true).build();
+        let opts = TransferConfig::builder().size_only(true).build();
         // Different mtime but same size -- size-only should skip
         assert!(quick_check_skip(&fs, &entry, &dest, &opts));
     }
@@ -400,7 +400,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fs = crate::fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("nope.txt");
-        let opts = TransferOptions::builder().existing(true).build();
+        let opts = TransferConfig::builder().existing(true).build();
         assert!(check_existence_skip(&fs, &dest, &opts));
     }
 
@@ -410,7 +410,7 @@ mod tests {
         let fs = crate::fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("yes.txt");
         std::fs::write(&dest, "data").unwrap();
-        let opts = TransferOptions::builder().existing(true).build();
+        let opts = TransferConfig::builder().existing(true).build();
         assert!(!check_existence_skip(&fs, &dest, &opts));
     }
 
@@ -420,7 +420,7 @@ mod tests {
         let fs = crate::fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("yes.txt");
         std::fs::write(&dest, "data").unwrap();
-        let opts = TransferOptions::builder().ignore_existing(true).build();
+        let opts = TransferConfig::builder().ignore_existing(true).build();
         assert!(check_existence_skip(&fs, &dest, &opts));
     }
 
@@ -429,7 +429,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fs = crate::fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("nope.txt");
-        let opts = TransferOptions::builder().ignore_existing(true).build();
+        let opts = TransferConfig::builder().ignore_existing(true).build();
         assert!(!check_existence_skip(&fs, &dest, &opts));
     }
 }

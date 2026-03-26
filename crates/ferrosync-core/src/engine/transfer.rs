@@ -13,7 +13,7 @@ use crate::error::FsError;
 use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
 use crate::filter::FilterRuleList;
 use crate::fs::{DirEntry, FileSystem};
-use crate::options::{DeleteMode, DirectoryMode, TransferOptions};
+use crate::options::{DeleteMode, DirectoryMode, TransferConfig, TransferOptions};
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::stats::TransferStats;
 
@@ -39,6 +39,18 @@ pub struct TransferResult {
 pub async fn execute_transfer(
     fs: &dyn FileSystem,
     options: &TransferOptions,
+    ctx: &ProtocolContext,
+    progress: &mut ProgressTracker,
+) -> Result<TransferResult> {
+    execute_transfer_config(fs, options, ctx, progress).await
+}
+
+/// Execute a file transfer using a [`TransferConfig`].
+///
+/// Same as [`execute_transfer`] but takes the decomposed config directly.
+pub async fn execute_transfer_config(
+    fs: &dyn FileSystem,
+    options: &TransferConfig,
     ctx: &ProtocolContext,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
@@ -76,7 +88,7 @@ pub async fn execute_transfer_protocol(
 ) -> Result<TransferResult> {
     let mut ctx = ProtocolContext::from_protocol(protocol);
     ctx.block_size_override = options.block_size();
-    execute_transfer(fs, options, &ctx, progress).await
+    execute_transfer_config(fs, options, &ctx, progress).await
 }
 
 /// Execute a transfer consuming file entries from a channel.
@@ -121,7 +133,7 @@ pub async fn execute_transfer_streaming(
 
 async fn execute_transfer_impl(
     fs: &dyn FileSystem,
-    options: &TransferOptions,
+    options: &TransferConfig,
     ctx: &ProtocolContext,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
@@ -479,7 +491,7 @@ async fn execute_transfer_impl(
 /// file list isn't available upfront.
 async fn execute_transfer_streaming_impl(
     fs: &dyn FileSystem,
-    options: &TransferOptions,
+    options: &TransferConfig,
     _ctx: &ProtocolContext,
     rx: &mut tokio::sync::mpsc::Receiver<FileEntry>,
     progress: &mut ProgressTracker,

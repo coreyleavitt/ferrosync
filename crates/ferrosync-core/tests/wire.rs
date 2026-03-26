@@ -311,7 +311,7 @@ async fn test_wire_conformance_archive_basic() {
 
     assert!(!entries.is_empty(), "no entries received from rsync");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -353,7 +353,7 @@ async fn test_wire_conformance_archive_multiple_files() {
         entries.len()
     );
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -390,7 +390,7 @@ async fn test_wire_conformance_archive_with_subdirs() {
     .await
     .expect("capture timed out");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -422,7 +422,7 @@ async fn test_wire_conformance_checksum_mode() {
     .await
     .expect("capture timed out");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -457,7 +457,7 @@ async fn test_wire_conformance_no_owner_group() {
     .await
     .expect("capture timed out");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -489,7 +489,7 @@ async fn test_wire_conformance_numeric_ids() {
     .await
     .expect("capture timed out");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -527,7 +527,7 @@ async fn test_wire_conformance_shared_prefix_names() {
     .await
     .expect("capture timed out");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -562,7 +562,7 @@ async fn run_conformance(files: &[(&str, &str, Option<i64>)], opts: TransferOpti
         "{label}: no entries received from rsync"
     );
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -605,7 +605,7 @@ async fn test_wire_conformance_archive_symlink() {
         entries.len()
     );
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -697,7 +697,7 @@ async fn test_wire_conformance_large_filename() {
     .await
     .expect("capture timed out");
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -771,7 +771,7 @@ async fn test_wire_conformance_many_files() {
         entries.len()
     );
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;
@@ -831,7 +831,7 @@ async fn test_wire_conformance_hardlinks() {
         entries.len()
     );
 
-    let flist_opts = FileListOptions::from_protocol(&protocol, &opts);
+    let flist_opts = FileListOptions::from_protocol_legacy(&protocol, &opts);
     let our_bytes = encode_entries(&entries, &flist_opts).await;
 
     assert_wire_conformance(&rsync_bytes, &our_bytes, &flist_opts).await;

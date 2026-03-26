@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::error::ProtocolError;
-use crate::options::TransferOptions;
+use crate::options::TransferConfig;
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::protocol::varint;
 
@@ -39,7 +39,7 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
     w: &mut W,
     entries: &[FileEntry],
     protocol: &NegotiatedProtocol,
-    opts: &TransferOptions,
+    opts: &TransferConfig,
 ) -> Result<()> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
@@ -166,7 +166,7 @@ pub struct ReceivedFileList {
 pub async fn recv_file_list<R: AsyncRead + Unpin>(
     r: &mut R,
     protocol: &NegotiatedProtocol,
-    opts: &TransferOptions,
+    opts: &TransferConfig,
 ) -> Result<ReceivedFileList> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
@@ -319,7 +319,7 @@ async fn recv_file_list_incremental<R: AsyncRead + Unpin>(
 pub async fn recv_file_list_streaming<R: AsyncRead + Unpin>(
     r: &mut R,
     protocol: &NegotiatedProtocol,
-    opts: &TransferOptions,
+    opts: &TransferConfig,
     tx: mpsc::Sender<FileEntry>,
 ) -> Result<()> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
@@ -615,8 +615,8 @@ mod tests {
         }
     }
 
-    fn default_opts() -> TransferOptions {
-        TransferOptions::default()
+    fn default_opts() -> TransferConfig {
+        TransferConfig::default()
     }
 
     fn test_entries() -> Vec<FileEntry> {
@@ -812,7 +812,7 @@ mod tests {
     #[tokio::test]
     async fn test_flist_options_from_protocol() {
         let proto = proto_v31();
-        let opts = TransferOptions::builder()
+        let opts = TransferConfig::builder()
             .archive()
             .checksum_mode(true)
             .build();
@@ -832,7 +832,7 @@ mod tests {
     #[tokio::test]
     async fn test_flist_options_from_protocol_v27() {
         let proto = proto_v27();
-        let opts = TransferOptions::default();
+        let opts = TransferConfig::default();
 
         let flist_opts = FileListOptions::from_protocol(&proto, &opts);
         assert_eq!(flist_opts.wire.int_codec, IntCodec::Fixed);
@@ -844,7 +844,7 @@ mod tests {
     async fn test_checksum_type_affects_flist_opts() {
         let mut proto = proto_v31();
         proto.checksum = ChecksumType::None;
-        let opts = TransferOptions::builder().checksum_mode(true).build();
+        let opts = TransferConfig::builder().checksum_mode(true).build();
 
         let flist_opts = FileListOptions::from_protocol(&proto, &opts);
         assert_eq!(flist_opts.checksum_len, 0);

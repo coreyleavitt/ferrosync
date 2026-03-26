@@ -52,6 +52,6 @@ pub mod prelude {
     pub use crate::engine::session::{SyncDirection, SyncSession};
     pub use crate::error::FerrosyncError;
     pub use crate::fs::FileSystem;
-    pub use crate::options::TransferOptions;
+    pub use crate::options::{TransferConfig, TransferOptions};
     pub use crate::transport::{Transport, TransportStreams};
 }

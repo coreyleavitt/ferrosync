@@ -23,7 +23,7 @@ use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
-use crate::options::{DeleteMode, TransferOptions};
+use crate::options::{DeleteMode, TransferConfig, TransferOptions};
 use crate::protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
 use crate::protocol::multiplex::MuxConnection;
 use crate::stats::TransferStats;
@@ -61,6 +61,13 @@ pub enum SyncDirection {
 /// element, followed by any long-form options as individual elements.
 /// Each element maps to one `argv` entry on the remote side.
 pub fn build_server_options(opts: &TransferOptions, am_sender: bool) -> Vec<String> {
+    build_server_options_config(opts, am_sender)
+}
+
+/// Build the argument list for `rsync --server` from a [`TransferConfig`].
+///
+/// Same as [`build_server_options`] but takes the decomposed config directly.
+pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Vec<String> {
     let mut condensed = String::from("-");
 
     // Single-char flags MUST come before the capability string, because
@@ -277,7 +284,19 @@ pub fn parse_server_args(
     module_path: std::path::PathBuf,
     am_sender: bool,
 ) -> TransferOptions {
-    let mut builder = TransferOptions::builder();
+    parse_server_args_config(args, module_path, am_sender)
+}
+
+/// Parse the condensed option string from `rsync --server` arguments
+/// into a [`TransferConfig`].
+///
+/// Same as [`parse_server_args`] but returns the decomposed config.
+pub fn parse_server_args_config(
+    args: &[String],
+    module_path: std::path::PathBuf,
+    am_sender: bool,
+) -> TransferConfig {
+    let mut builder = TransferConfig::builder();
 
     // Find the condensed option string (starts with `-`, not `--`).
     let mut condensed = "";
@@ -542,7 +561,7 @@ pub fn parse_server_args(
 /// ```
 pub struct SyncSession<T: Transport> {
     transport: T,
-    options: TransferOptions,
+    options: TransferConfig,
     fs: Box<dyn FileSystem>,
     direction: SyncDirection,
     progress: ProgressTracker,
@@ -552,10 +571,11 @@ impl<T: Transport> SyncSession<T> {
     /// Create a new sync session.
     pub fn new(
         transport: T,
-        options: TransferOptions,
+        options: impl Into<TransferConfig>,
         fs: Box<dyn FileSystem>,
         direction: SyncDirection,
     ) -> Self {
+        let options = options.into();
         Self {
             transport,
             options,
@@ -578,7 +598,7 @@ impl<T: Transport> SyncSession<T> {
     pub async fn run(self) -> Result<TransferResult> {
         let SyncSession {
             transport,
-            options,
+            options: config,
             fs,
             direction,
             mut progress,
@@ -594,9 +614,9 @@ impl<T: Transport> SyncSession<T> {
             &mut streams.reader,
             &mut streams.writer,
             am_sender,
-            options.compress(),
-            options.checksum_choice(),
-            options.compress_choice(),
+            config.compress(),
+            config.checksum_choice(),
+            config.compress_choice(),
         )
         .await
         .map_err(crate::FerrosyncError::Protocol)?;
@@ -619,9 +639,9 @@ impl<T: Transport> SyncSession<T> {
 
         let fs: Arc<dyn FileSystem> = fs.into();
         if am_sender {
-            run_push(reader, writer, &protocol, &options, &*fs, &mut progress).await
+            run_push(reader, writer, &protocol, &config, &*fs, &mut progress).await
         } else {
-            run_pull(reader, writer, &protocol, &options, fs, &mut progress).await
+            run_pull(reader, writer, &protocol, &config, fs, &mut progress).await
         }
     }
 }
@@ -652,7 +672,7 @@ async fn run_push(
     reader: Box<dyn AsyncRead + Unpin + Send>,
     writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     protocol: &NegotiatedProtocol,
-    options: &TransferOptions,
+    options: &TransferConfig,
     fs: &dyn FileSystem,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
@@ -796,7 +816,7 @@ async fn run_pull(
     reader: Box<dyn AsyncRead + Unpin + Send>,
     writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
     protocol: &NegotiatedProtocol,
-    options: &TransferOptions,
+    options: &TransferConfig,
     fs: Arc<dyn FileSystem>,
     progress: &mut ProgressTracker,
 ) -> Result<TransferResult> {
@@ -1011,7 +1031,7 @@ fn sanitize_path(dest: &std::path::Path, name: &str) -> Result<PathBuf> {
 /// Each rule is a 4-byte LE length followed by the rule string.
 /// A zero length terminates the list. The returned bytes are ready
 /// to be sent as a MUX DATA frame.
-fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
+fn collect_filter_list(options: &TransferConfig) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
 
     // C ref: exclude.c send_filter_list / recv_filter_list
@@ -1056,7 +1076,7 @@ fn collect_filter_list(options: &TransferOptions) -> Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Build FileEntry list from source paths in options.
-fn build_source_entries(fs: &dyn FileSystem, options: &TransferOptions) -> Result<Vec<FileEntry>> {
+fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result<Vec<FileEntry>> {
     let source_paths = options.source();
     let mut filters =
         FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;

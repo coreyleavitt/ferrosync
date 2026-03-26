@@ -822,8 +822,6 @@ impl TransferFlags {
             builder = builder.files_from(ff);
         }
 
-        builder = builder.concurrent(self.concurrent);
-
         builder.build()
     }
 }

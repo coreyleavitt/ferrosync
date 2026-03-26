@@ -20,7 +20,7 @@ use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
 use crate::filelist::exchange;
 use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
-use crate::options::TransferOptions;
+use crate::options::TransferConfig;
 use crate::protocol::handshake::{self, NegotiatedProtocol};
 use crate::protocol::multiplex::MuxConnection;
 use crate::stats::TransferStats;
@@ -151,9 +151,9 @@ impl ServerSession {
             "starting server session"
         );
 
-        // Parse client args into TransferOptions.
+        // Parse client args into TransferConfig.
         let am_sender = self.direction == TransferDirection::Send;
-        let opts = crate::engine::session::parse_server_args(
+        let opts = crate::engine::session::parse_server_args_config(
             &self.args,
             self.module.path.clone(),
             am_sender,
@@ -229,7 +229,7 @@ impl ServerSession {
         writer: W,
         protocol: &NegotiatedProtocol,
         fs: &dyn FileSystem,
-        opts: &TransferOptions,
+        opts: &TransferConfig,
         progress: &mut ProgressTracker,
     ) -> Result<(), SessionError>
     where
@@ -309,7 +309,7 @@ impl ServerSession {
         writer: W,
         protocol: &NegotiatedProtocol,
         fs: std::sync::Arc<dyn FileSystem>,
-        opts: &TransferOptions,
+        opts: &TransferConfig,
         progress: &mut ProgressTracker,
     ) -> Result<(), SessionError>
     where

@@ -60,7 +60,7 @@ impl FileListOptions {
     /// protocol version-specific behavior is correctly applied.
     pub fn from_protocol(
         proto: &crate::protocol::handshake::NegotiatedProtocol,
-        opts: &crate::options::TransferOptions,
+        opts: &crate::options::TransferConfig,
     ) -> Self {
         Self {
             wire: proto.wire.clone(),
@@ -77,5 +77,15 @@ impl FileListOptions {
                 != 0,
             numeric_ids: opts.numeric_ids(),
         }
+    }
+
+    /// Create codec options from a negotiated protocol and transfer options.
+    ///
+    /// Alias for [`from_protocol`] for backward compatibility.
+    pub fn from_protocol_legacy(
+        proto: &crate::protocol::handshake::NegotiatedProtocol,
+        opts: &crate::options::TransferOptions,
+    ) -> Self {
+        Self::from_protocol(proto, opts)
     }
 }

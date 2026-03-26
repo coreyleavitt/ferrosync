@@ -29,7 +29,7 @@ use crate::engine::file_decision;
 use crate::error::FsError;
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFLNK, S_IFMT};
 use crate::fs::{FileData, FileSystem};
-use crate::options::TransferOptions;
+use crate::options::TransferConfig;
 
 // ---------------------------------------------------------------------------
 // dispatch_entry types
@@ -71,7 +71,7 @@ pub enum EntryAction {
 pub struct ReceiverEngine {
     fs: Arc<dyn FileSystem>,
     dest: PathBuf,
-    options: TransferOptions,
+    options: TransferConfig,
     chmod_spec: Option<ChmodSpec>,
     resolved_link_dests: Vec<PathBuf>,
     /// Backup directory resolved relative to dest (if relative path given).
@@ -83,7 +83,7 @@ impl ReceiverEngine {
     ///
     /// Resolves `--link-dest` directories, `--backup-dir` path, and
     /// parses `--chmod` specs upfront.
-    pub fn new(fs: Arc<dyn FileSystem>, dest: PathBuf, options: TransferOptions) -> Self {
+    pub fn new(fs: Arc<dyn FileSystem>, dest: PathBuf, options: TransferConfig) -> Self {
         let resolved_link_dests = file_decision::resolve_link_dest_dirs(options.link_dest(), &dest);
         let chmod_spec = if !options.chmod().is_empty() {
             ChmodSpec::parse(&options.chmod().join(",")).ok()
@@ -422,8 +422,8 @@ impl ReceiverEngine {
         &*self.fs
     }
 
-    /// Access the transfer options.
-    pub fn options(&self) -> &TransferOptions {
+    /// Access the transfer configuration.
+    pub fn options(&self) -> &TransferConfig {
         &self.options
     }
 
@@ -500,7 +500,7 @@ fn should_skip_impl(
     fs: &dyn FileSystem,
     entry: &FileEntry,
     dest: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> bool {
     let dest_path = dest.join(entry.path());
 
@@ -537,7 +537,7 @@ fn should_skip_impl(
 pub struct ReceiverRef<'a> {
     fs: &'a dyn FileSystem,
     dest: &'a Path,
-    options: &'a TransferOptions,
+    options: &'a TransferConfig,
     chmod_spec: Option<ChmodSpec>,
     resolved_link_dests: Vec<PathBuf>,
     resolved_backup_dir: Option<PathBuf>,
@@ -545,7 +545,7 @@ pub struct ReceiverRef<'a> {
 
 impl<'a> ReceiverRef<'a> {
     /// Create a borrowed receiver engine from references.
-    pub fn new(fs: &'a dyn FileSystem, dest: &'a Path, options: &'a TransferOptions) -> Self {
+    pub fn new(fs: &'a dyn FileSystem, dest: &'a Path, options: &'a TransferConfig) -> Self {
         let resolved_link_dests = file_decision::resolve_link_dest_dirs(options.link_dest(), dest);
         let chmod_spec = if !options.chmod().is_empty() {
             ChmodSpec::parse(&options.chmod().join(",")).ok()
@@ -781,7 +781,7 @@ fn create_directory_impl(
     fs: &dyn FileSystem,
     dest_path: &Path,
     entry: &FileEntry,
-    options: &TransferOptions,
+    options: &TransferConfig,
     chmod_spec: Option<&ChmodSpec>,
 ) -> std::result::Result<(), FsError> {
     let dir_exists_as_symlink = options.keep_dirlinks()
@@ -815,7 +815,7 @@ fn create_symlink_impl(
     fs: &dyn FileSystem,
     dest: &Path,
     entry: &FileEntry,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> std::result::Result<bool, crate::FerrosyncError> {
     if options.safe_links() && file_decision::is_unsafe_symlink(&entry.link_target) {
         tracing::warn!(
@@ -837,7 +837,7 @@ fn try_link_dest_impl(
     entry: &FileEntry,
     dest: &Path,
     resolved_link_dests: &[PathBuf],
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> bool {
     if resolved_link_dests.is_empty() || options.dry_run() {
         return false;
@@ -857,7 +857,7 @@ fn try_copy_dest_impl(
     fs: &dyn FileSystem,
     entry: &FileEntry,
     dest: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> bool {
     if options.copy_dest().is_empty() || options.dry_run() {
         return false;
@@ -896,7 +896,7 @@ fn dispatch_entry_impl(
     fs: &dyn FileSystem,
     dest: &Path,
     entry: &FileEntry,
-    options: &TransferOptions,
+    options: &TransferConfig,
     chmod_spec: Option<&ChmodSpec>,
     resolved_link_dests: &[PathBuf],
 ) -> std::result::Result<EntryAction, crate::FerrosyncError> {
@@ -971,7 +971,7 @@ fn dispatch_entry_impl(
 fn create_deferred_hardlinks_impl(
     fs: &dyn FileSystem,
     dest: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
     deferred: &[(&FileEntry, Vec<u8>)],
     all_entries: &[FileEntry],
 ) -> std::result::Result<u64, crate::FerrosyncError> {
@@ -1003,7 +1003,7 @@ fn find_fuzzy_basis_impl(
     fs: &dyn FileSystem,
     entry: &FileEntry,
     dest: &Path,
-    options: &TransferOptions,
+    options: &TransferConfig,
 ) -> Option<FileData> {
     if !options.fuzzy() {
         return None;
