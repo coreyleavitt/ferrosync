@@ -10,10 +10,13 @@ use std::time::Duration;
 use crate::delta::checksum;
 use crate::delta::ProtocolContext;
 use crate::error::FsError;
-use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
+use crate::filelist::entry::FileEntry;
+use crate::filelist::scanner::{
+    self, FileListScanner, HardLinkGrouper, ScanOptions, SymlinkEnricher,
+};
 use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem};
-use crate::options::{DeleteMode, DirectoryMode, TransferConfig, TransferOptions};
+use crate::fs::FileSystem;
+use crate::options::{DeleteMode, TransferConfig, TransferOptions};
 use crate::protocol::handshake::NegotiatedProtocol;
 use crate::stats::TransferStats;
 
@@ -159,28 +162,26 @@ async fn execute_transfer_impl(
     }
 
     // Build the source file list.
-    let mut source_entries = if let Some(files_from) = options.files_from() {
-        build_file_list_from_file(fs, source_paths, files_from, &filters)?
+    let source_entries = if let Some(files_from) = options.files_from() {
+        scanner::build_file_list_from_file(fs, source_paths, files_from, &filters)?
     } else {
-        build_file_list(
-            fs,
-            source_paths,
-            options.dir_mode(),
-            &mut filters,
-            options.one_file_system(),
-            options.copy_links(),
-            options.relative(),
-            options.filter_merge_files(),
-        )?
+        let scan_opts = ScanOptions {
+            dir_mode: options.dir_mode(),
+            one_file_system: options.one_file_system(),
+            copy_links: options.copy_links(),
+            relative: options.relative(),
+            filter_merge_files: options.filter_merge_files(),
+            preserve_hard_links: options.preserve_hard_links(),
+        };
+        let mut scanner = FileListScanner::new(fs, scan_opts);
+        if !options.copy_links() {
+            scanner.add_enricher(Box::new(SymlinkEnricher::new(fs)));
+        }
+        if options.preserve_hard_links() {
+            scanner.add_enricher(Box::new(HardLinkGrouper));
+        }
+        scanner.scan(source_paths, &mut filters)?
     };
-
-    // Compute hardlink groups when -H is active. The file list scanner
-    // populates hard_link_info (dev, ino, nlink) from filesystem metadata.
-    // We need to identify entries that share the same (dev, ino) and mark
-    // all but the first as hardlink duplicates via hlink_source.
-    if options.preserve_hard_links() {
-        compute_hardlink_groups(&mut source_entries);
-    }
 
     stats.total_files = source_entries.len() as u64;
 
@@ -611,326 +612,6 @@ async fn execute_transfer_streaming_impl(
 
     stats.finish();
     Ok(TransferResult { stats })
-}
-
-/// Compute hardlink groups from filesystem metadata.
-///
-/// Groups entries by `(dev, ino)` and marks all but the first occurrence
-/// in each group with `hlink_source` pointing to the first entry's name.
-/// This enables `process_entries()` to defer duplicate hardlink creation.
-fn compute_hardlink_groups(entries: &mut [FileListItem]) {
-    use std::collections::HashMap;
-
-    let mut first_occurrence: HashMap<(u64, u64), usize> = HashMap::new();
-    for i in 0..entries.len() {
-        if let Some(ref info) = entries[i].entry.hard_link_info {
-            if info.nlink > 1 {
-                let key = (info.dev, info.ino);
-                if let Some(&first_idx) = first_occurrence.get(&key) {
-                    entries[i].entry.hlink_source = Some(entries[first_idx].entry.name.clone());
-                } else {
-                    first_occurrence.insert(key, i);
-                }
-            }
-        }
-    }
-}
-
-/// A file list entry with associated source data.
-#[derive(Debug)]
-struct FileListItem {
-    index: i32,
-    entry: FileEntry,
-    source_path: PathBuf,
-}
-
-/// Build a file list from one or more source paths.
-#[allow(clippy::too_many_arguments)]
-fn build_file_list(
-    fs: &dyn FileSystem,
-    source_paths: &[PathBuf],
-    dir_mode: DirectoryMode,
-    filters: &mut FilterRuleList,
-    one_file_system: bool,
-    copy_links: bool,
-    relative: bool,
-    filter_merge_files: u8,
-) -> std::result::Result<Vec<FileListItem>, FsError> {
-    let mut items = Vec::new();
-    let mut index = 0i32;
-
-    for source in source_paths {
-        let meta = if copy_links {
-            match fs.stat(source) {
-                Ok(m) => m,
-                Err(_) => {
-                    tracing::warn!(path = %source.display(), "skipping broken symlink");
-                    continue;
-                }
-            }
-        } else {
-            fs.lstat(source)?
-        };
-        let name = entry::compute_entry_name(source, relative);
-        let is_dir = meta.mode & S_IFMT == S_IFDIR;
-
-        // Don't apply filter rules to top-level source arguments.
-        // rsync only filters discovered children within recursive scans,
-        // not the command-line source paths themselves. Without this,
-        // `--exclude '*'` would skip the source directory before any
-        // children are scanned.
-        if !is_dir && !filters.is_included(&name, false) {
-            continue;
-        }
-
-        if is_dir {
-            match dir_mode {
-                DirectoryMode::Recurse => {
-                    let root_dev = if one_file_system {
-                        Some(meta.dev)
-                    } else {
-                        None
-                    };
-                    let prefix = if relative { name.clone() } else { Vec::new() };
-                    collect_directory(
-                        fs,
-                        source,
-                        &prefix,
-                        &mut items,
-                        &mut index,
-                        filters,
-                        root_dev,
-                        copy_links,
-                        filter_merge_files,
-                    )?;
-                }
-                DirectoryMode::List => {
-                    let entry = meta.to_file_entry(name);
-                    items.push(FileListItem {
-                        index,
-                        entry,
-                        source_path: source.to_path_buf(),
-                    });
-                    index += 1;
-                }
-                DirectoryMode::Skip => {}
-            }
-        } else {
-            let mut entry = meta.to_file_entry(name);
-            if !copy_links
-                && (meta.mode & S_IFMT == entry::WIRE_S_IFLNK || meta.mode & S_IFMT == s_iflnk())
-            {
-                entry.link_target = match fs.read_link(source) {
-                    Ok(target) => target,
-                    Err(e) => {
-                        tracing::warn!(path = %source.display(), error = %e, "failed to read symlink target");
-                        Vec::new()
-                    }
-                };
-            }
-
-            items.push(FileListItem {
-                index,
-                entry,
-                source_path: source.to_path_buf(),
-            });
-            index += 1;
-        }
-    }
-
-    Ok(items)
-}
-
-/// Recursively collect directory entries.
-#[allow(clippy::too_many_arguments)]
-fn collect_directory(
-    fs: &dyn FileSystem,
-    dir_path: &Path,
-    prefix: &[u8],
-    items: &mut Vec<FileListItem>,
-    index: &mut i32,
-    filters: &mut FilterRuleList,
-    root_dev: Option<u64>,
-    copy_links: bool,
-    filter_merge_files: u8,
-) -> std::result::Result<(), FsError> {
-    // Check filesystem boundary (--one-file-system).
-    #[cfg(unix)]
-    if let Some(dev) = root_dev {
-        if let Ok(current_dev) = fs.device_id(dir_path) {
-            if current_dev != dev {
-                return Ok(());
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = root_dev;
-
-    // Add the directory itself.
-    let dir_meta = if copy_links {
-        fs.stat(dir_path)?
-    } else {
-        fs.lstat(dir_path)?
-    };
-    let dir_name = if prefix.is_empty() {
-        b".".to_vec()
-    } else {
-        prefix.to_vec()
-    };
-
-    items.push(FileListItem {
-        index: *index,
-        entry: dir_meta.to_file_entry(dir_name),
-        source_path: dir_path.to_path_buf(),
-    });
-    *index += 1;
-
-    // Per-directory filter merge (-F).
-    let filter_path = dir_path.join(".rsync-filter");
-    let merged = if filter_merge_files > 0 && filter_path.exists() {
-        filters.push_scope();
-        let _ = filters.merge_filter_file(&filter_path);
-        if filter_merge_files >= 2 {
-            let _ = filters.add_exclude(".rsync-filter");
-        }
-        true
-    } else {
-        false
-    };
-
-    let mut entries: Vec<DirEntry> = fs.read_dir(dir_path)?;
-    // Sort for deterministic order.
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-    for dir_entry in entries {
-        let child_name = if prefix.is_empty() {
-            dir_entry.name.clone()
-        } else {
-            let mut n = prefix.to_vec();
-            n.push(b'/');
-            n.extend(&dir_entry.name);
-            n
-        };
-
-        let child_path = dir_path.join(FileEntry::name_to_pathbuf(&dir_entry.name));
-
-        // When --copy-links, re-stat to follow symlinks.
-        let child_meta = if copy_links {
-            match fs.stat(&child_path) {
-                Ok(m) => m,
-                Err(_) => {
-                    tracing::warn!(path = %child_path.display(), "skipping broken symlink");
-                    continue;
-                }
-            }
-        } else {
-            dir_entry.metadata.clone()
-        };
-
-        let is_dir = child_meta.mode & S_IFMT == S_IFDIR;
-
-        if !filters.is_included(&child_name, is_dir) {
-            continue;
-        }
-
-        if is_dir {
-            collect_directory(
-                fs,
-                &child_path,
-                &child_name,
-                items,
-                index,
-                filters,
-                root_dev,
-                copy_links,
-                filter_merge_files,
-            )?;
-        } else {
-            let mut entry = child_meta.to_file_entry(child_name);
-            if !copy_links
-                && (child_meta.mode & S_IFMT == entry::WIRE_S_IFLNK
-                    || child_meta.mode & S_IFMT == s_iflnk())
-            {
-                entry.link_target = match fs.read_link(&child_path) {
-                    Ok(target) => target,
-                    Err(e) => {
-                        tracing::warn!(path = %child_path.display(), error = %e, "failed to read symlink target");
-                        Vec::new()
-                    }
-                };
-            }
-
-            items.push(FileListItem {
-                index: *index,
-                entry,
-                source_path: child_path,
-            });
-            *index += 1;
-        }
-    }
-
-    if merged {
-        filters.pop_scope();
-    }
-
-    Ok(())
-}
-
-/// S_IFLNK value for mode comparisons.
-///
-/// Uses the wire-format constant (0o120000) which is identical to the
-/// platform value on all Unix systems. No libc dependency needed.
-fn s_iflnk() -> u32 {
-    entry::S_IFLNK
-}
-
-/// Build a file list from a `--files-from` file.
-///
-/// Each line in the file is a relative path. We resolve against the first
-/// source path (rsync behavior).
-fn build_file_list_from_file(
-    fs: &dyn FileSystem,
-    source_paths: &[PathBuf],
-    files_from: &Path,
-    filters: &FilterRuleList,
-) -> std::result::Result<Vec<FileListItem>, FsError> {
-    let base = source_paths.first().ok_or_else(|| FsError::NotFound {
-        path: PathBuf::from("<no source>"),
-    })?;
-
-    let content = fs.read_file(files_from)?;
-    let text = String::from_utf8_lossy(&content);
-
-    let mut items = Vec::new();
-    let mut index = 0i32;
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let full_path = base.join(line);
-        let name = line.as_bytes().to_vec();
-
-        if !filters.is_included(&name, false) {
-            continue;
-        }
-
-        let meta = match fs.lstat(&full_path) {
-            Ok(m) => m,
-            Err(_) => continue, // skip missing files
-        };
-
-        items.push(FileListItem {
-            index,
-            entry: meta.to_file_entry(name),
-            source_path: full_path,
-        });
-        index += 1;
-    }
-
-    Ok(items)
 }
 
 #[cfg(all(test, unix))]

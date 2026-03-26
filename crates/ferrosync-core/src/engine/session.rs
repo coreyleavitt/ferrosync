@@ -19,8 +19,9 @@ use crate::engine::delete;
 use crate::engine::progress::{ProgressEvent, ProgressTracker};
 use crate::engine::wire_transfer::{self, LocalFileReader};
 use crate::error::FsError;
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
+use crate::filelist::entry::FileEntry;
 use crate::filelist::exchange;
+use crate::filelist::scanner::{FileListScanner, ScanOptions, SymlinkEnricher};
 use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
 use crate::options::{DeleteMode, TransferConfig, TransferOptions};
@@ -1090,61 +1091,26 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result
         filters.add_includes_from_file(path)?;
     }
 
-    let mut entries = Vec::new();
-
-    for source in source_paths {
-        let meta = if options.copy_links() {
-            match fs.stat(source) {
-                Ok(m) => m,
-                Err(_) => {
-                    tracing::warn!(path = %source.display(), "skipping broken symlink");
-                    continue;
-                }
-            }
-        } else {
-            fs.lstat(source)?
-        };
-        let name = crate::filelist::entry::compute_entry_name(source, options.relative());
-
-        if !filters.is_included(&name, meta.mode & S_IFMT == S_IFDIR) {
-            continue;
-        }
-
-        if meta.mode & S_IFMT == S_IFDIR && options.recursive() {
-            let prefix = if options.relative() {
-                name.clone()
-            } else {
-                Vec::new()
-            };
-            let walk_opts = crate::filelist::walk::WalkOptions {
-                copy_links: options.copy_links(),
-                one_file_system: false,
-                filter_merge_files: options.filter_merge_files(),
-            };
-            crate::filelist::walk::collect_directory_entries(
-                fs,
-                source,
-                &prefix,
-                &mut entries,
-                &mut filters,
-                &walk_opts,
-            )?;
-        } else {
-            let mut entry = meta.to_file_entry(name);
-            if !options.copy_links() && entry.is_symlink() {
-                entry.link_target = match fs.read_link(source) {
-                    Ok(target) => target,
-                    Err(e) => {
-                        tracing::warn!(path = %source.display(), error = %e, "failed to read symlink target");
-                        Vec::new()
-                    }
-                };
-            }
-            entries.push(entry);
-        }
+    let dir_mode = if options.recursive() {
+        crate::options::DirectoryMode::Recurse
+    } else {
+        crate::options::DirectoryMode::List
+    };
+    let scan_opts = ScanOptions {
+        dir_mode,
+        one_file_system: false,
+        copy_links: options.copy_links(),
+        relative: options.relative(),
+        filter_merge_files: options.filter_merge_files(),
+        preserve_hard_links: false,
+    };
+    let mut scanner = FileListScanner::new(fs, scan_opts);
+    if !options.copy_links() {
+        scanner.add_enricher(Box::new(SymlinkEnricher::new(fs)));
     }
-
-    Ok(entries)
+    scanner
+        .scan_entries(source_paths, &mut filters)
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------

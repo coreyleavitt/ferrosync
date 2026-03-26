@@ -16,8 +16,9 @@ use crate::engine::progress::ProgressTracker;
 use crate::engine::receiver_engine::ReceiverEngine;
 use crate::engine::wire_transfer::{self, ModuleFileReader};
 use crate::error::{FsError, ProtocolError};
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
+use crate::filelist::entry::FileEntry;
 use crate::filelist::exchange;
+use crate::filelist::scanner::{FileListScanner, ScanOptions};
 use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
 use crate::options::TransferConfig;
@@ -487,58 +488,21 @@ fn build_module_entries(
             },
         )?;
 
-    let module_path = &module.path;
-    let mut entries = Vec::new();
-
-    let meta = fs.lstat(module_path)?;
-    if meta.mode & S_IFMT == S_IFDIR {
-        if recursive {
-            let walk_opts = crate::filelist::walk::WalkOptions {
-                copy_links: false,
-                one_file_system: false,
-                filter_merge_files: 0,
-            };
-            crate::filelist::walk::collect_directory_entries(
-                fs,
-                module_path,
-                &[],
-                &mut entries,
-                &mut filters,
-                &walk_opts,
-            )?;
-        } else {
-            // Non-recursive: add the directory itself and its immediate
-            // non-directory children only, respecting module filters.
-            entries.push(meta.to_file_entry(b".".to_vec()));
-            let mut children: Vec<crate::fs::DirEntry> = fs.read_dir(module_path)?;
-            children.sort_by(|a, b| a.name.cmp(&b.name));
-            for child in children {
-                let is_dir = child.metadata.mode & S_IFMT == S_IFDIR;
-                if !filters.is_included(&child.name, is_dir) {
-                    continue;
-                }
-                if !is_dir {
-                    entries.push(child.metadata.to_file_entry(child.name));
-                }
-            }
-        }
+    let dir_mode = if recursive {
+        crate::options::DirectoryMode::Recurse
     } else {
-        let name = module_path
-            .file_name()
-            .map(|n| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStrExt;
-                    n.as_bytes().to_vec()
-                }
-                #[cfg(not(unix))]
-                {
-                    n.to_string_lossy().as_bytes().to_vec()
-                }
-            })
-            .unwrap_or_default();
-        entries.push(meta.to_file_entry(name));
-    }
+        crate::options::DirectoryMode::List
+    };
+    let scan_opts = ScanOptions {
+        dir_mode,
+        one_file_system: false,
+        copy_links: false,
+        relative: false,
+        filter_merge_files: 0,
+        preserve_hard_links: false,
+    };
+    let scanner = FileListScanner::new(fs, scan_opts);
+    let entries = scanner.scan_directory(&module.path, &mut filters)?;
 
     Ok(entries)
 }

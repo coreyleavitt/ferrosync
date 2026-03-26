@@ -12,6 +12,7 @@ pub mod entry;
 pub mod exchange;
 pub mod iconv;
 pub mod incremental;
+pub mod scanner;
 pub mod sort;
 pub mod walk;
 pub mod xmit;
