@@ -729,7 +729,10 @@ async fn run_push(
         for entry in &entries {
             println!("{}", entry.format_list_entry());
         }
-        wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+        protocol
+            .wire
+            .sender_goodbye(&mut demux_read, &mut mplex_out)
+            .await?;
         let _ = demux_handle.await;
         stats.finish();
         return Ok(TransferResult { stats });
@@ -763,7 +766,10 @@ async fn run_push(
     // For push (client is sender, am_server=false), handle_stats(-1) is a no-op.
 
     // Goodbye exchange.
-    wire_transfer::sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+    protocol
+        .wire
+        .sender_goodbye(&mut demux_read, &mut mplex_out)
+        .await?;
 
     let _ = demux_handle.await;
 
@@ -856,8 +862,11 @@ async fn run_pull(
             received_flist.num_flists,
         )
         .await?;
-        wire_transfer::read_stats(&mut demux_read, protocol).await?;
-        wire_transfer::receiver_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+        protocol.wire.read_stats(&mut demux_read).await?;
+        protocol
+            .wire
+            .receiver_goodbye(&mut demux_read, &mut mplex_out)
+            .await?;
         let _ = demux_handle.await;
         stats.finish();
         return Ok(TransferResult { stats });
@@ -957,10 +966,13 @@ async fn run_pull(
     .await?;
 
     // Read transfer stats.
-    wire_transfer::read_stats(&mut demux_read, protocol).await?;
+    protocol.wire.read_stats(&mut demux_read).await?;
 
     // Goodbye exchange.
-    wire_transfer::receiver_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+    protocol
+        .wire
+        .receiver_goodbye(&mut demux_read, &mut mplex_out)
+        .await?;
 
     let _ = demux_handle.await;
 

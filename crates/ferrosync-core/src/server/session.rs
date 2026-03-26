@@ -284,10 +284,13 @@ impl ServerSession {
         .await?;
 
         // Write transfer stats.
-        wire_transfer::write_stats(&mut mplex_out, &stats, protocol).await?;
+        protocol.wire.write_stats(&mut mplex_out, &stats).await?;
 
         // Goodbye exchange.
-        wire_transfer::server_sender_goodbye(&mut demux_read, &mut mplex_out, protocol).await?;
+        protocol
+            .wire
+            .server_sender_goodbye(&mut demux_read, &mut mplex_out)
+            .await?;
 
         // Shut down the write half so the remote side's demux task sees EOF.
         let _ = mplex_out.shutdown().await;
@@ -371,7 +374,10 @@ impl ServerSession {
         // the sender (am_server && am_sender, i.e., pull mode).
 
         // Goodbye exchange.
-        wire_transfer::server_receiver_goodbye(&mut mplex_out, protocol).await?;
+        protocol
+            .wire
+            .server_receiver_goodbye(&mut mplex_out)
+            .await?;
 
         // Shut down the write half and abort the demux task.
         let _ = mplex_out.shutdown().await;
