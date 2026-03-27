@@ -257,11 +257,12 @@ impl ServerSession {
             });
         }
 
-        let entries = build_module_entries(fs, module, opts.recursive())?;
+        let mut entries = build_module_entries(fs, module, opts.recursive())?;
 
-        // Send file list.
+        // Send file list. send_file_list sorts entries in canonical order
+        // internally, so build_ndx_map below sees the sorted order.
         let mut flist_buf = Vec::new();
-        exchange::send_file_list(&mut flist_buf, &entries, protocol, opts).await?;
+        exchange::send_file_list(&mut flist_buf, &mut entries, protocol, opts).await?;
 
         mux.write_data(&flist_buf).await?;
         mux.flush().await.map_err(SessionError::Io)?;

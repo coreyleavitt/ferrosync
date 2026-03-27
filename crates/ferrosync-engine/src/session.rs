@@ -750,13 +750,12 @@ async fn run_push(
     // Build and send file list (MUX-framed).
     // C ref: send_file_list (flist.c), called from main.c:1153
     let mut entries = build_source_entries(fs, options)?;
-    ferrosync_codec::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
     let total_bytes: ferrosync_types::types::FileSize = entries.iter().map(|e| e.len).sum();
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
-    exchange::send_file_list(&mut flist_buf, &entries, protocol, options)
+    exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
         .await
         .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 

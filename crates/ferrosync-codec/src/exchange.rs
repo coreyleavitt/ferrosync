@@ -32,15 +32,24 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 
 /// Send a complete file list over the wire.
 ///
+/// Sorts entries in rsync's canonical order before encoding. This ensures
+/// correct NDX assignment regardless of the caller's input order, mirroring
+/// `recv_file_list` which also sorts internally on the receive side.
+///
 /// For protocol < 30: sends all entries as a single batch with end-of-list marker.
 /// For protocol >= 30 with incremental flist: sends entries as sub-lists per
 /// directory, with NDX markers.
 pub async fn send_file_list<W: AsyncWrite + Unpin>(
     w: &mut W,
-    entries: &[FileEntry],
+    entries: &mut [FileEntry],
     protocol: &NegotiatedProtocol,
     opts: &TransferConfig,
 ) -> Result<()> {
+    // The codec owns the wire invariant: entries must be in canonical order
+    // for correct NDX assignment. Sort here so callers can't forget.
+    // TimSort on an already-sorted slice is O(n).
+    crate::sort::canonical_sort(entries);
+
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
     // inc_recurse requires BOTH the capability flag AND recursive mode.
@@ -662,10 +671,10 @@ mod tests {
     async fn test_batch_roundtrip_proto27() {
         let proto = proto_v27();
         let opts = default_opts();
-        let entries = test_entries();
+        let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -685,10 +694,10 @@ mod tests {
     async fn test_batch_roundtrip_proto29() {
         let proto = proto_v29();
         let opts = default_opts();
-        let entries = test_entries();
+        let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -706,10 +715,10 @@ mod tests {
     async fn test_batch_roundtrip_proto30_no_incremental() {
         let proto = proto_v30_no_inc();
         let opts = default_opts();
-        let entries = test_entries();
+        let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -726,10 +735,10 @@ mod tests {
     async fn test_incremental_roundtrip_proto31() {
         let proto = proto_v31();
         let opts = default_opts();
-        let entries = test_entries();
+        let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -753,10 +762,10 @@ mod tests {
     async fn test_streaming_recv_proto31() {
         let proto = proto_v31();
         let opts = default_opts();
-        let entries = test_entries();
+        let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -780,10 +789,10 @@ mod tests {
     async fn test_streaming_recv_proto27() {
         let proto = proto_v27();
         let opts = default_opts();
-        let entries = test_entries();
+        let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -806,10 +815,10 @@ mod tests {
     async fn test_empty_file_list() {
         let proto = proto_v31();
         let opts = default_opts();
-        let entries: Vec<FileEntry> = vec![];
+        let mut entries: Vec<FileEntry> = vec![];
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &entries, &proto, &opts)
+        send_file_list(&mut buf, &mut entries, &proto, &opts)
             .await
             .unwrap();
 
