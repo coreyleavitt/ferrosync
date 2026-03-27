@@ -1,6 +1,6 @@
 //! Filter rule types and rule list evaluation.
 
-use crate::error::FilterError;
+use ferrosync_types::error::FilterError;
 
 use super::pattern::Pattern;
 

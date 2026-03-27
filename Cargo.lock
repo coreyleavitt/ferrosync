@@ -1049,6 +1049,7 @@ dependencies = [
  "criterion",
  "encoding_rs",
  "fastcdc",
+ "ferrosync-filter",
  "ferrosync-types",
  "filetime",
  "flate2",
@@ -1078,6 +1079,14 @@ dependencies = [
  "xattr",
  "xxhash-rust",
  "zstd",
+]
+
+[[package]]
+name = "ferrosync-filter"
+version = "0.3.0-beta.15"
+dependencies = [
+ "ferrosync-types",
+ "tempfile",
 ]
 
 [[package]]

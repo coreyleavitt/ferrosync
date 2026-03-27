@@ -36,7 +36,7 @@ pub mod chmod;
 pub mod delta;
 pub mod engine;
 pub mod filelist;
-pub mod filter;
+pub use ferrosync_filter as filter;
 pub mod fs;
 pub mod protocol;
 pub mod server;

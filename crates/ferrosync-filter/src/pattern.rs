@@ -3,7 +3,7 @@
 //! Implements rsync-compatible glob patterns with `*`, `**`, `?`,
 //! and `[...]` character classes.
 
-use crate::error::FilterError;
+use ferrosync_types::error::FilterError;
 
 /// A compiled glob pattern.
 #[derive(Debug, Clone)]

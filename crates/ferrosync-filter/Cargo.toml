@@ -1,0 +1,14 @@
+[package]
+name = "ferrosync-filter"
+description = "Filter rule engine for ferrosync (include/exclude pattern matching)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
