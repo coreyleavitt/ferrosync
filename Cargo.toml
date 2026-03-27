@@ -75,5 +75,6 @@ tokio-test = "0.4"
 # Internal crates
 ferrosync-core = { path = "crates/ferrosync-core" }
 ferrosync-filter = { path = "crates/ferrosync-filter" }
+ferrosync-protocol = { path = "crates/ferrosync-protocol" }
 ferrosync-types = { path = "crates/ferrosync-types" }
 

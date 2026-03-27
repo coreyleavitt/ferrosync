@@ -13,8 +13,8 @@ use flate2::{Compression, FlushDecompress, Status};
 use std::io::Write;
 use zstd::stream::raw::Operation;
 
-use crate::error::ProtocolError;
-use crate::protocol::handshake::CompressType;
+use crate::handshake::CompressType;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 

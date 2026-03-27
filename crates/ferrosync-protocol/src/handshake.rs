@@ -12,9 +12,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use ferrosync_types::protocol::{compat_flags, ChecksumType, ChunkingStrategy, CompressType};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint;
-use crate::protocol::wire_format::WireFormat;
+use crate::varint;
+use crate::wire_format::WireFormat;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -36,7 +36,7 @@ pub const MAX_PROTOCOL_VERSION: u8 = 32;
 #[derive(Debug, Clone)]
 pub struct NegotiatedProtocol {
     /// Agreed protocol version (min of both sides).
-    pub(crate) version: u8,
+    pub version: u8,
     /// Compatibility flags (proto >= 30).
     compat_flags: u32,
     /// Negotiated checksum algorithm.
@@ -72,7 +72,7 @@ impl NegotiatedProtocol {
     ///
     /// All fields are provided explicitly -- no defaults or fallback logic.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         version: u8,
         compat_flags: u32,
         checksum: ChecksumType,

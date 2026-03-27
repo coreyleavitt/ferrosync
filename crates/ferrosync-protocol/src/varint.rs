@@ -11,8 +11,8 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::ProtocolError;
-use crate::protocol::wire_format::IntCodec;
+use crate::wire_format::IntCodec;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -54,14 +54,14 @@ pub async fn write_shortint<W: AsyncWrite + Unpin>(w: &mut W, val: u16) -> Resul
 // ---------------------------------------------------------------------------
 
 /// Read a 4-byte little-endian signed integer.
-pub(crate) async fn read_int<R: AsyncRead + Unpin>(r: &mut R) -> Result<i32> {
+pub async fn read_int<R: AsyncRead + Unpin>(r: &mut R) -> Result<i32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf).await?;
     Ok(i32::from_le_bytes(buf))
 }
 
 /// Write a 4-byte little-endian signed integer.
-pub(crate) async fn write_int<W: AsyncWrite + Unpin>(w: &mut W, val: i32) -> Result<()> {
+pub async fn write_int<W: AsyncWrite + Unpin>(w: &mut W, val: i32) -> Result<()> {
     w.write_all(&val.to_le_bytes()).await?;
     Ok(())
 }
@@ -72,7 +72,7 @@ pub(crate) async fn write_int<W: AsyncWrite + Unpin>(w: &mut W, val: i32) -> Res
 
 /// Read a 64-bit integer: 4 bytes if it fits in i32, otherwise a 0xFFFFFFFF
 /// sentinel followed by 8 bytes little-endian.
-pub(crate) async fn read_longint<R: AsyncRead + Unpin>(r: &mut R) -> Result<i64> {
+pub async fn read_longint<R: AsyncRead + Unpin>(r: &mut R) -> Result<i64> {
     let val = read_int(r).await?;
     if val != -1 {
         // Not the sentinel -- value fits in 32 bits.
@@ -86,7 +86,7 @@ pub(crate) async fn read_longint<R: AsyncRead + Unpin>(r: &mut R) -> Result<i64>
 
 /// Write a 64-bit integer: 4 bytes if it fits in 0..=0x7FFFFFFF, otherwise
 /// the 0xFFFFFFFF sentinel + 8 bytes.
-pub(crate) async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) -> Result<()> {
+pub async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) -> Result<()> {
     if (0..=0x7FFF_FFFF_i64).contains(&val) {
         write_int(w, val as i32).await
     } else {
@@ -104,7 +104,7 @@ pub(crate) async fn write_longint<W: AsyncWrite + Unpin>(w: &mut W, val: i64) ->
 ///
 /// The first byte's high bits encode the number of extra bytes via the
 /// `INT_BYTE_EXTRA` lookup table. Supports the full u32 range (1-5 bytes).
-pub(crate) async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
+pub async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> {
     let mut ch = [0u8; 1];
     r.read_exact(&mut ch).await?;
     let ch = ch[0];
@@ -142,7 +142,7 @@ pub(crate) async fn read_varint<R: AsyncRead + Unpin>(r: &mut R) -> Result<u32> 
 /// Write a compact variable-length 32-bit integer (protocol >= 30).
 ///
 /// Encodes any u32 value in 1-5 bytes using prefix-coded variable length.
-pub(crate) async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()> {
+pub async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Result<()> {
     let mut b = [0u8; 5]; // b[0] = prefix byte, b[1..4] = LE value bytes
     let le = x.to_le_bytes();
     b[1] = le[0];
@@ -187,7 +187,7 @@ pub(crate) async fn write_varint<W: AsyncWrite + Unpin>(w: &mut W, x: u32) -> Re
 ///
 /// `min_bytes` specifies the minimum number of bytes on the wire (typically 3
 /// for file sizes).
-pub(crate) async fn read_varlong<R: AsyncRead + Unpin>(r: &mut R, min_bytes: usize) -> Result<i64> {
+pub async fn read_varlong<R: AsyncRead + Unpin>(r: &mut R, min_bytes: usize) -> Result<i64> {
     debug_assert!((1..=8).contains(&min_bytes));
 
     let mut b = [0u8; 8];
@@ -226,7 +226,7 @@ pub(crate) async fn read_varlong<R: AsyncRead + Unpin>(r: &mut R, min_bytes: usi
 /// Write a compact variable-length 64-bit integer (protocol >= 30).
 ///
 /// `min_bytes` specifies the minimum number of bytes on the wire.
-pub(crate) async fn write_varlong<W: AsyncWrite + Unpin>(
+pub async fn write_varlong<W: AsyncWrite + Unpin>(
     w: &mut W,
     x: i64,
     min_bytes: usize,
@@ -269,7 +269,7 @@ pub(crate) async fn write_varlong<W: AsyncWrite + Unpin>(
 
 /// Read a 32-bit integer using compact varint for `Compact` codec, fixed 4
 /// bytes for `Fixed`.
-pub(crate) async fn read_varint30<R: AsyncRead + Unpin>(r: &mut R, codec: IntCodec) -> Result<u32> {
+pub async fn read_varint30<R: AsyncRead + Unpin>(r: &mut R, codec: IntCodec) -> Result<u32> {
     match codec {
         IntCodec::Fixed => Ok(read_int(r).await? as u32),
         IntCodec::Compact => read_varint(r).await,
@@ -278,7 +278,7 @@ pub(crate) async fn read_varint30<R: AsyncRead + Unpin>(r: &mut R, codec: IntCod
 
 /// Write a 32-bit integer using compact varint for `Compact` codec, fixed 4
 /// bytes for `Fixed`.
-pub(crate) async fn write_varint30<W: AsyncWrite + Unpin>(
+pub async fn write_varint30<W: AsyncWrite + Unpin>(
     w: &mut W,
     val: u32,
     codec: IntCodec,
@@ -291,7 +291,7 @@ pub(crate) async fn write_varint30<W: AsyncWrite + Unpin>(
 
 /// Read a 64-bit integer using compact varlong for `Compact` codec,
 /// sentinel-based longint for `Fixed`.
-pub(crate) async fn read_varlong30<R: AsyncRead + Unpin>(
+pub async fn read_varlong30<R: AsyncRead + Unpin>(
     r: &mut R,
     min_bytes: usize,
     codec: IntCodec,
@@ -304,7 +304,7 @@ pub(crate) async fn read_varlong30<R: AsyncRead + Unpin>(
 
 /// Write a 64-bit integer using compact varlong for `Compact` codec,
 /// sentinel-based longint for `Fixed`.
-pub(crate) async fn write_varlong30<W: AsyncWrite + Unpin>(
+pub async fn write_varlong30<W: AsyncWrite + Unpin>(
     w: &mut W,
     val: i64,
     min_bytes: usize,
@@ -460,14 +460,14 @@ pub async fn write_ndx<W: AsyncWrite + Unpin>(
 // ---------------------------------------------------------------------------
 
 /// Read a single byte from the stream.
-pub(crate) async fn read_byte<R: AsyncRead + Unpin>(r: &mut R) -> Result<u8> {
+pub async fn read_byte<R: AsyncRead + Unpin>(r: &mut R) -> Result<u8> {
     let mut buf = [0u8; 1];
     r.read_exact(&mut buf).await?;
     Ok(buf[0])
 }
 
 /// Write a single byte to the stream.
-pub(crate) async fn write_byte<W: AsyncWrite + Unpin>(w: &mut W, val: u8) -> Result<()> {
+pub async fn write_byte<W: AsyncWrite + Unpin>(w: &mut W, val: u8) -> Result<()> {
     w.write_all(&[val]).await?;
     Ok(())
 }

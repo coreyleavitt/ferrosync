@@ -38,7 +38,7 @@ pub mod engine;
 pub mod filelist;
 pub use ferrosync_filter as filter;
 pub mod fs;
-pub mod protocol;
+pub use ferrosync_protocol as protocol;
 pub mod server;
 pub mod transport;
 pub mod xattr;

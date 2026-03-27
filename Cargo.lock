@@ -1050,6 +1050,7 @@ dependencies = [
  "encoding_rs",
  "fastcdc",
  "ferrosync-filter",
+ "ferrosync-protocol",
  "ferrosync-types",
  "filetime",
  "flate2",
@@ -1087,6 +1088,20 @@ version = "0.3.0-beta.15"
 dependencies = [
  "ferrosync-types",
  "tempfile",
+]
+
+[[package]]
+name = "ferrosync-protocol"
+version = "0.3.0-beta.15"
+dependencies = [
+ "bytes",
+ "ferrosync-types",
+ "flate2",
+ "lz4_flex",
+ "proptest",
+ "tokio",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]

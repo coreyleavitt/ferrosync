@@ -8,11 +8,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use ferrosync_types::protocol::{DeviceCodec, FlagsCodec, IntCodec};
 
-use super::handshake::compat_flags;
-use super::multiplex::MplexWriter;
-use super::varint;
-use crate::error::ProtocolError;
-use crate::stats::TransferStats;
+use crate::handshake::compat_flags;
+use crate::multiplex::MplexWriter;
+use crate::varint;
+use ferrosync_types::error::ProtocolError;
+use ferrosync_types::stats::TransferStats;
 
 /// All version-dependent wire format decisions, resolved at handshake time.
 ///
@@ -52,7 +52,7 @@ pub struct WireFormat {
     // -- Diagnostics only --
     /// Kept for handshake logging and error messages. Not for branching.
     #[allow(dead_code)]
-    pub(crate) negotiated_version: u8,
+    pub negotiated_version: u8,
 }
 
 impl WireFormat {

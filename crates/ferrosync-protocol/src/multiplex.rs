@@ -17,8 +17,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
-use crate::error::ProtocolError;
-use crate::protocol::constants::{DATA_CHUNK_SIZE, MPLEX_BASE, MPLEX_BUF_SIZE};
+use crate::constants::{DATA_CHUNK_SIZE, MPLEX_BASE, MPLEX_BUF_SIZE};
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -32,7 +32,7 @@ const MAX_PAYLOAD: u32 = 0x00FF_FFFF;
 /// Rsync multiplexed message types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(crate) enum MsgCode {
+pub enum MsgCode {
     /// Raw file/transfer data.
     Data = 0,
     /// Transfer error (FERROR_XFER).
@@ -73,7 +73,7 @@ pub(crate) enum MsgCode {
 
 impl MsgCode {
     /// Convert from the raw tag byte (after subtracting MPLEX_BASE).
-    pub(crate) fn from_tag(tag: u8) -> Result<Self> {
+    pub fn from_tag(tag: u8) -> Result<Self> {
         match tag {
             0 => Ok(Self::Data),
             1 => Ok(Self::ErrorXfer),
@@ -105,7 +105,7 @@ impl MsgCode {
 /// A decoded multiplexed message.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) enum MplexMessage {
+pub enum MplexMessage {
     /// Raw transfer data.
     Data(Bytes),
     /// Informational text (MSG_INFO).
@@ -143,7 +143,7 @@ pub(crate) enum MplexMessage {
 /// Demultiplexes an rsync multiplexed input stream.
 ///
 /// Reads 4-byte headers and dispatches messages by type.
-pub(crate) struct MplexReader<R> {
+pub struct MplexReader<R> {
     inner: R,
     /// Buffered excess bytes from a Data message that didn't fit in the
     /// caller's buffer during `read_data`. Read from this before `self.inner`.
@@ -320,7 +320,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     }
 
     /// Write a multiplexed message with the given code and payload.
-    pub(crate) async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
+    pub async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
         let len = payload.len() as u32;
         if len > MAX_PAYLOAD {
             return Err(ProtocolError::FrameTooLarge {
@@ -356,7 +356,7 @@ impl<W: AsyncWrite + Unpin> MplexWriter<W> {
     /// Write a control message carrying a file list index (MSG_REDO,
     /// MSG_SUCCESS, MSG_DELETED, MSG_NO_SEND).
     #[allow(dead_code)]
-    pub(crate) async fn write_index(&mut self, code: MsgCode, idx: i32) -> Result<()> {
+    pub async fn write_index(&mut self, code: MsgCode, idx: i32) -> Result<()> {
         self.write_message(code, &idx.to_le_bytes()).await
     }
 
@@ -608,7 +608,7 @@ where
 
     /// Write a multiplexed message with the given code and payload.
     #[allow(dead_code)]
-    pub(crate) async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
+    pub async fn write_message(&mut self, code: MsgCode, payload: &[u8]) -> Result<()> {
         self.writer.write_message(code, payload).await
     }
 
