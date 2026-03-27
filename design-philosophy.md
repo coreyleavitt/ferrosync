@@ -14,6 +14,10 @@ The API is not set in stone. If a breaking change results in better code -- clea
 
 When a design is fundamentally wrong, fix the design instead of adding workarounds. Increasing a buffer size to avoid a deadlock moves the threshold, not the root cause. Don't defer correctness to future versions.
 
+## Design from first principles
+
+Approach every non-trivial problem as a greenfield question. Start from the perspective of a computer scientist designing the best possible solution with zero constraints -- no anchoring to existing implementations (ours or anyone else's), no "this is how rsync does it" as justification. Determine the ideal design, then work backwards to fit it into the project. The existing codebase is a starting point, not a constraint. If the ideal design conflicts with what we have, change what we have.
+
 ## SSH transport architecture
 
 Ferrosync uses an asymmetric SSH architecture:
