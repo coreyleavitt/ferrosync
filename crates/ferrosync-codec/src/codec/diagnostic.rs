@@ -76,14 +76,24 @@ pub async fn diagnostic_decode_entry(
         }
     };
     let consumed = cursor.position() as usize;
-    diag.record("xmit_flags", consumed, flags_start, format!("0x{:04x}", flags.raw()));
+    diag.record(
+        "xmit_flags",
+        consumed,
+        flags_start,
+        format!("0x{:04x}", flags.raw()),
+    );
 
     // --- Filename ---
     let field_start = diag.offset;
     let mut cursor = Cursor::new(&data[diag.offset..]);
     let name = super::fields::decode_filename(&mut cursor, state, flags, opts, None).await?;
     let consumed = cursor.position() as usize;
-    diag.record("filename", consumed, field_start, String::from_utf8_lossy(&name).to_string());
+    diag.record(
+        "filename",
+        consumed,
+        field_start,
+        String::from_utf8_lossy(&name).to_string(),
+    );
 
     // --- Hard-link back-reference ---
     if opts.preserve_hard_links && flags.hlinked() {
@@ -231,4 +241,3 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-

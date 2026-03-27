@@ -247,6 +247,13 @@ where
         flags = varint::read_varint(r).await?;
     }
 
+    // Mask INC_RECURSE for push (am_sender=true). Push incremental encoding
+    // is implemented (#129) but has wire-level issues with NDX marker state
+    // that cause interop failures. Re-enable after debugging against real rsync.
+    if am_sender {
+        flags &= !compat_flags::INC_RECURSE;
+    }
+
     let do_negotiated_strings = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
     let proper_seed_order = flags & compat_flags::CHKSUM_SEED_FIX != 0;
 

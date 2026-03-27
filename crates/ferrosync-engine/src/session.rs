@@ -171,10 +171,11 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     // Capability string MUST be last in the condensed options, since `e`
     // consumes the remainder of the argument as its value.
     //
-    // Advertise incremental recursion ('i') for both push and pull when
-    // recursive mode is active. The sender groups entries into per-directory
-    // sub-flists via send_file_list_incremental.
-    let use_inc_recurse = opts.recursive();
+    // Advertise incremental recursion ('i') for pull only. Push incremental
+    // encoding is implemented (#129) but has wire-level issues with NDX marker
+    // state that need debugging against real rsync. Re-enable after interop
+    // tests pass.
+    let use_inc_recurse = opts.recursive() && !am_sender;
     let caps = build_capability_string(use_inc_recurse, true, false);
     condensed.push('e');
     condensed.push_str(&caps);
@@ -755,10 +756,9 @@ async fn run_push(
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
-    let ndx_assignments =
-        exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
-            .await
-            .map_err(ferrosync_types::FerrosyncError::Protocol)?;
+    let ndx_assignments = exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
+        .await
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 
     tracing::debug!(
         entries = entries.len(),

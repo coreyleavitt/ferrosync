@@ -521,8 +521,7 @@ impl FieldVisitor for DiagnosticDecoder<'_> {
     async fn visit_gid(&mut self, ctx: &mut FieldContext<'_>) -> Result<()> {
         let start = self.offset;
         let mut c = self.cursor();
-        let (gid, group_name) =
-            fields::decode_gid(&mut c, ctx.state, ctx.flags, ctx.opts).await?;
+        let (gid, group_name) = fields::decode_gid(&mut c, ctx.state, ctx.flags, ctx.opts).await?;
         let consumed = c.position() as usize;
         self.record(
             "gid",
