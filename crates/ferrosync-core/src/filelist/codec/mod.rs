@@ -123,10 +123,10 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     }
 
     // --- File length ---
-    fields::encode_file_length(w, entry.len, opts).await?;
+    fields::encode_file_length(w, entry.len.bytes(), opts).await?;
 
     // --- Modification time ---
-    fields::encode_mtime(w, entry.mtime, flags, opts).await?;
+    fields::encode_mtime(w, entry.mtime.secs(), flags, opts).await?;
 
     // --- Mtime nanoseconds ---
     fields::encode_mtime_nsec(w, entry.mtime_nsec, flags, opts).await?;
@@ -242,8 +242,8 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
 
     let entry = FileEntry {
         name,
-        len,
-        mtime,
+        len: crate::types::FileSize(len),
+        mtime: crate::types::UnixTimestamp(mtime),
         mtime_nsec,
         mode,
         uid,

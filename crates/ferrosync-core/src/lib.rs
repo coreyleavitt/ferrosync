@@ -43,6 +43,7 @@ pub mod protocol;
 pub mod server;
 pub mod stats;
 pub mod transport;
+pub mod types;
 
 pub use error::FerrosyncError;
 pub type Result<T> = std::result::Result<T, FerrosyncError>;

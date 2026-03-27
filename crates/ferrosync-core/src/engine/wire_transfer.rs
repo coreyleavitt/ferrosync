@@ -217,8 +217,8 @@ where
 {
     let mut ctx = ProtocolContext::from_protocol(protocol);
     ctx.block_size_override = block_size_override;
-    let int_codec = protocol.wire.int_codec;
-    let wire = &protocol.wire;
+    let int_codec = protocol.wire().int_codec;
+    let wire = protocol.wire();
 
     let mut gen_ndx_state = varint::NdxState::default();
     let mut send_ndx_state = varint::NdxState::default();
@@ -290,11 +290,11 @@ where
         // Don't try to read sums -- just count the file and continue.
         if dry_run {
             stats.files_transferred += 1;
-            stats.total_size += entry.len as u64;
+            stats.total_size += entry.len.as_u64();
             progress.emit(ProgressEvent::FileComplete {
                 index: ndx,
                 name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                literal_bytes: entry.len as u64,
+                literal_bytes: entry.len.as_u64(),
                 matched_bytes: 0,
             });
             continue;
@@ -306,7 +306,7 @@ where
         progress.emit(ProgressEvent::FileStart {
             index: ndx,
             name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            size: entry.len,
+            size: entry.len.bytes(),
         });
 
         // Stream sender response: NDX + iflags + sum_head (small header),
@@ -348,7 +348,7 @@ where
             AnyTokenWriter::Plain(token::PlainTokenWriter::new())
         };
 
-        if entry.len >= crate::fs::STREAMING_THRESHOLD {
+        if entry.len.bytes() >= crate::fs::STREAMING_THRESHOLD {
             // Streaming path: process in chunks to avoid O(file_size) memory.
             let mut stream_reader = file_reader.open_stream(entry)?;
             let mut smatcher =
@@ -428,7 +428,7 @@ where
         }
 
         stats.files_transferred += 1;
-        stats.total_size += entry.len as u64;
+        stats.total_size += entry.len.as_u64();
         stats.literal_data += literal_bytes;
         stats.matched_data += matched_bytes;
         stats.bytes_sent += literal_bytes;
@@ -511,8 +511,8 @@ where
 {
     let mut ctx = ProtocolContext::from_protocol(protocol);
     ctx.block_size_override = block_size_override;
-    let int_codec = protocol.wire.int_codec;
-    let has_iflags = protocol.wire.has_iflags;
+    let int_codec = protocol.wire().int_codec;
+    let has_iflags = protocol.wire().has_iflags;
 
     // Clone entries so they can be sent into the spawned generator task.
     let gen_entries: Vec<(usize, i32, FileEntry)> = entries
@@ -667,21 +667,21 @@ where
                     }
                     HandledKind::LinkDest | HandledKind::CopyDest => {
                         stats.files_transferred += 1;
-                        stats.matched_data += entry.len as u64;
+                        stats.matched_data += entry.len.as_u64();
                         progress.emit(ProgressEvent::FileComplete {
                             index: entry_idx as i32,
                             name: crate::engine::progress::name_to_pathbuf(&entry.name),
                             literal_bytes: 0,
-                            matched_bytes: entry.len as u64,
+                            matched_bytes: entry.len.as_u64(),
                         });
                     }
                     HandledKind::DryRun => {
                         stats.files_transferred += 1;
-                        stats.total_size += entry.len as u64;
+                        stats.total_size += entry.len.as_u64();
                         progress.emit(ProgressEvent::FileComplete {
                             index: entry_idx as i32,
                             name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                            literal_bytes: entry.len as u64,
+                            literal_bytes: entry.len.as_u64(),
                             matched_bytes: 0,
                         });
                     }
@@ -703,7 +703,7 @@ where
                 progress.emit(ProgressEvent::FileStart {
                     index: entry_idx as i32,
                     name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                    size: entry.len,
+                    size: entry.len.bytes(),
                 });
 
                 // Read sender's response NDX.
@@ -711,7 +711,7 @@ where
                     varint::read_ndx(&mut demux_read, &mut recv_ndx_state, int_codec).await?;
 
                 // Read iflags (when wire format includes them).
-                let _iflags = protocol.wire.read_iflags(&mut demux_read).await?;
+                let _iflags = protocol.wire().read_iflags(&mut demux_read).await?;
 
                 // Read sum_head from sender.
                 let sum_head = sum::read_sum_head(&mut demux_read).await?;
@@ -763,7 +763,7 @@ where
                 };
 
                 stats.files_transferred += 1;
-                stats.total_size += entry.len as u64;
+                stats.total_size += entry.len.as_u64();
                 stats.literal_data += literal_bytes;
                 stats.bytes_received += literal_bytes;
 
@@ -823,7 +823,7 @@ pub fn build_ndx_map(
     protocol: &NegotiatedProtocol,
     is_recursive: bool,
 ) -> HashMap<i32, usize> {
-    let ndx_start: i32 = if protocol.wire.supports_incremental_flist && is_recursive {
+    let ndx_start: i32 = if protocol.wire().supports_incremental_flist && is_recursive {
         1
     } else {
         0
@@ -848,9 +848,9 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let int_codec = protocol.wire.int_codec;
-    let max_phase: u32 = protocol.wire.phase_count as u32;
-    let flist_cleanup_rounds: u32 = if protocol.wire.supports_incremental_flist {
+    let int_codec = protocol.wire().int_codec;
+    let max_phase: u32 = protocol.wire().phase_count as u32;
+    let flist_cleanup_rounds: u32 = if protocol.wire().supports_incremental_flist {
         (num_flists as u32).saturating_sub(1)
     } else {
         0
@@ -898,8 +898,8 @@ where
     R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
-    let int_codec = protocol.wire.int_codec;
-    let max_phase: u32 = protocol.wire.phase_count as u32;
+    let int_codec = protocol.wire().int_codec;
+    let max_phase: u32 = protocol.wire().phase_count as u32;
     let mut gen_ndx_state = varint::NdxState::default();
     let mut recv_ndx_state = varint::NdxState::default();
 

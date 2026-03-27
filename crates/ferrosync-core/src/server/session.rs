@@ -177,7 +177,7 @@ impl ServerSession {
             version = protocol.version,
             checksum = ?protocol.checksum,
             compress = ?protocol.compress,
-            incremental = protocol.wire.supports_incremental_flist,
+            incremental = protocol.wire().supports_incremental_flist,
             seed = protocol.seed,
             "server handshake complete"
         );
@@ -286,11 +286,11 @@ impl ServerSession {
         // Write transfer stats and goodbye: split since these need both halves
         // via separate references.
         let (mut demux_read, mut mplex_out) = mux.into_split();
-        protocol.wire.write_stats(&mut mplex_out, &stats).await?;
+        protocol.wire().write_stats(&mut mplex_out, &stats).await?;
 
         // Goodbye exchange.
         protocol
-            .wire
+            .wire()
             .server_sender_goodbye(&mut demux_read, &mut mplex_out)
             .await?;
 
@@ -375,7 +375,7 @@ impl ServerSession {
 
         // Goodbye exchange.
         protocol
-            .wire
+            .wire()
             .server_receiver_goodbye(&mut mplex_out)
             .await?;
 

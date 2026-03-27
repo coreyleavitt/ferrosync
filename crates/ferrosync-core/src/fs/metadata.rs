@@ -1,12 +1,14 @@
 //! Platform-independent file metadata.
 
+use crate::types::{FileSize, UnixTimestamp};
+
 /// File metadata used for transfer decisions and attribute preservation.
 #[derive(Debug, Clone, Default)]
 pub struct FileMetadata {
     /// File size in bytes.
-    pub len: i64,
+    pub len: FileSize,
     /// Modification time (Unix timestamp, seconds).
-    pub mtime: i64,
+    pub mtime: UnixTimestamp,
     /// Modification time nanoseconds.
     pub mtime_nsec: u32,
     /// File mode (type + permissions), in platform format.

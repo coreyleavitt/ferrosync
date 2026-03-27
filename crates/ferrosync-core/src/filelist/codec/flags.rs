@@ -202,7 +202,7 @@ pub fn compute_xmit_flags(
     // We mirror this with `has_prev`.
     let has_prev = !state.prev_name.is_empty();
 
-    if entry.mtime == state.prev_mtime && has_prev {
+    if entry.mtime.secs() == state.prev_mtime && has_prev {
         flags |= XmitFlags::SAME_TIME;
     }
     if entry.mode == state.prev_mode && has_prev {

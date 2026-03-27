@@ -210,6 +210,7 @@ mod tests {
     use super::*;
     use crate::filelist::entry::{S_IFDIR, S_IFREG};
     use crate::protocol::wire_format::WireFormat;
+    use crate::types::{FileSize, UnixTimestamp};
     use std::io::Cursor;
 
     fn test_opts() -> FileListOptions {
@@ -230,15 +231,15 @@ mod tests {
         let root_entries = vec![
             FileEntry {
                 name: b"file.txt".to_vec(),
-                len: 100,
-                mtime: 1700000000,
+                len: FileSize(100),
+                mtime: UnixTimestamp(1700000000),
                 mode: S_IFREG | 0o644,
                 ..Default::default()
             },
             FileEntry {
                 name: b"subdir".to_vec(),
-                len: 0,
-                mtime: 1700000000,
+                len: FileSize(0),
+                mtime: UnixTimestamp(1700000000),
                 mode: S_IFDIR | 0o755,
                 ..Default::default()
             },
@@ -246,8 +247,8 @@ mod tests {
 
         let sub_entries = vec![FileEntry {
             name: b"inner.txt".to_vec(),
-            len: 50,
-            mtime: 1700000001,
+            len: FileSize(50),
+            mtime: UnixTimestamp(1700000001),
             mode: S_IFREG | 0o644,
             ..Default::default()
         }];
@@ -323,15 +324,15 @@ mod tests {
         let entries = vec![
             FileEntry {
                 name: b"a.txt".to_vec(),
-                len: 10,
-                mtime: 1700000000,
+                len: FileSize(10),
+                mtime: UnixTimestamp(1700000000),
                 mode: S_IFREG | 0o644,
                 ..Default::default()
             },
             FileEntry {
                 name: b"b.txt".to_vec(),
-                len: 20,
-                mtime: 1700000000,
+                len: FileSize(20),
+                mtime: UnixTimestamp(1700000000),
                 mode: S_IFREG | 0o644,
                 ..Default::default()
             },

@@ -186,7 +186,7 @@ async fn execute_transfer_impl(
     stats.total_files = source_entries.len() as u64;
 
     // Calculate total bytes for progress.
-    let total_bytes: i64 = source_entries.iter().map(|e| e.entry.len).sum();
+    let total_bytes: i64 = source_entries.iter().map(|e| e.entry.len.bytes()).sum();
     progress.set_totals(stats.total_files, total_bytes as u64);
 
     // --list-only: print file list and return without transferring.
@@ -264,7 +264,7 @@ async fn execute_transfer_impl(
                             index,
                             name: super::progress::name_to_pathbuf(&item.entry.name),
                             literal_bytes: 0,
-                            matched_bytes: item.entry.len as u64,
+                            matched_bytes: item.entry.len.as_u64(),
                         });
                     }
                     super::receiver_engine::HandledKind::DryRun => {
@@ -286,14 +286,14 @@ async fn execute_transfer_impl(
                         progress.emit(ProgressEvent::FileStart {
                             index,
                             name: super::progress::name_to_pathbuf(&item.entry.name),
-                            size: item.entry.len,
+                            size: item.entry.len.bytes(),
                         });
                         stats.files_transferred += 1;
-                        stats.total_size += item.entry.len as u64;
+                        stats.total_size += item.entry.len.as_u64();
                         progress.emit(ProgressEvent::FileComplete {
                             index,
                             name: super::progress::name_to_pathbuf(&item.entry.name),
-                            literal_bytes: item.entry.len as u64,
+                            literal_bytes: item.entry.len.as_u64(),
                             matched_bytes: 0,
                         });
                     }
@@ -345,7 +345,7 @@ async fn execute_transfer_impl(
                 progress.emit(ProgressEvent::FileStart {
                     index,
                     name: super::progress::name_to_pathbuf(&item.entry.name),
-                    size: item.entry.len,
+                    size: item.entry.len.bytes(),
                 });
 
                 let source_path = source_path_map
@@ -388,7 +388,7 @@ async fn execute_transfer_impl(
                             let literal_bytes = append_data.len() as u64;
                             let matched_bytes = dest_len as u64;
                             stats.files_transferred += 1;
-                            stats.total_size += item.entry.len as u64;
+                            stats.total_size += item.entry.len.as_u64();
                             stats.literal_data += literal_bytes;
                             stats.bytes_sent += literal_bytes;
                             progress.emit(ProgressEvent::FileComplete {
@@ -403,7 +403,7 @@ async fn execute_transfer_impl(
                         let literal_bytes = append_data.len() as u64;
                         let matched_bytes = dest_len as u64;
                         stats.files_transferred += 1;
-                        stats.total_size += item.entry.len as u64;
+                        stats.total_size += item.entry.len.as_u64();
                         stats.literal_data += literal_bytes;
                         stats.bytes_sent += literal_bytes;
                         progress.emit(ProgressEvent::FileComplete {
@@ -440,7 +440,7 @@ async fn execute_transfer_impl(
                 receiver.apply_transfer(&item.entry, &data, Some(source_path))?;
 
                 stats.files_transferred += 1;
-                stats.total_size += item.entry.len as u64;
+                stats.total_size += item.entry.len.as_u64();
                 stats.literal_data += literal_bytes;
                 stats.bytes_sent += literal_bytes;
 
@@ -576,16 +576,16 @@ async fn execute_transfer_streaming_impl(
         progress.emit(ProgressEvent::FileStart {
             index,
             name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            size: entry.len,
+            size: entry.len.bytes(),
         });
 
         if options.dry_run() {
             stats.files_transferred += 1;
-            stats.total_size += entry.len as u64;
+            stats.total_size += entry.len.as_u64();
             progress.emit(ProgressEvent::FileComplete {
                 index,
                 name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                literal_bytes: entry.len as u64,
+                literal_bytes: entry.len.as_u64(),
                 matched_bytes: 0,
             });
             index += 1;
@@ -598,12 +598,12 @@ async fn execute_transfer_streaming_impl(
         }
 
         stats.files_transferred += 1;
-        stats.total_size += entry.len as u64;
+        stats.total_size += entry.len.as_u64();
 
         progress.emit(ProgressEvent::FileComplete {
             index,
             name: crate::engine::progress::name_to_pathbuf(&entry.name),
-            literal_bytes: entry.len as u64,
+            literal_bytes: entry.len.as_u64(),
             matched_bytes: 0,
         });
 
@@ -619,6 +619,7 @@ mod tests {
     use super::*;
     use crate::delta::chunker::ChunkingStrategy;
     use crate::fs::unix::UnixFileSystem;
+    use crate::types::{FileSize, UnixTimestamp};
     use tempfile::TempDir;
 
     async fn do_transfer(
@@ -1314,17 +1315,16 @@ mod tests {
         std::fs::create_dir_all(&dst).unwrap();
         std::fs::write(src.join("file.txt"), "protocol test").unwrap();
 
-        let protocol = NegotiatedProtocol {
-            version: 31,
-            compat_flags: compat_flags::DEFAULT,
-
-            checksum: ChecksumType::Md5,
-            compress: CompressType::None,
-            proper_seed_order: true,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(31, compat_flags::DEFAULT),
-        };
+        let protocol = NegotiatedProtocol::new(
+            31,
+            compat_flags::DEFAULT,
+            ChecksumType::Md5,
+            CompressType::None,
+            true,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(31, compat_flags::DEFAULT),
+        );
 
         let opts = TransferOptions::builder()
             .source(src.join("file.txt"))
@@ -1356,17 +1356,16 @@ mod tests {
         let dst = tmp.path().join("dst");
         std::fs::create_dir_all(&dst).unwrap();
 
-        let protocol = NegotiatedProtocol {
-            version: 31,
-            compat_flags: compat_flags::DEFAULT,
-
-            checksum: ChecksumType::Md5,
-            compress: CompressType::None,
-            proper_seed_order: true,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(31, compat_flags::DEFAULT),
-        };
+        let protocol = NegotiatedProtocol::new(
+            31,
+            compat_flags::DEFAULT,
+            ChecksumType::Md5,
+            CompressType::None,
+            true,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(31, compat_flags::DEFAULT),
+        );
 
         let opts = TransferOptions::builder()
             .dest(dst.clone())
@@ -1378,8 +1377,8 @@ mod tests {
         // Send entries.
         tx.send(FileEntry {
             name: b"a.txt".to_vec(),
-            len: 100,
-            mtime: 1700000000,
+            len: FileSize(100),
+            mtime: UnixTimestamp(1700000000),
             mode: S_IFREG | 0o644,
             ..Default::default()
         })
@@ -1387,8 +1386,8 @@ mod tests {
         .unwrap();
         tx.send(FileEntry {
             name: b"b.txt".to_vec(),
-            len: 200,
-            mtime: 1700000001,
+            len: FileSize(200),
+            mtime: UnixTimestamp(1700000001),
             mode: S_IFREG | 0o644,
             ..Default::default()
         })
@@ -1420,17 +1419,16 @@ mod tests {
         let dst = tmp.path().join("dst");
         std::fs::create_dir_all(&dst).unwrap();
 
-        let protocol = NegotiatedProtocol {
-            version: 31,
-            compat_flags: compat_flags::DEFAULT,
-
-            checksum: ChecksumType::Md5,
-            compress: CompressType::None,
-            proper_seed_order: true,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(31, compat_flags::DEFAULT),
-        };
+        let protocol = NegotiatedProtocol::new(
+            31,
+            compat_flags::DEFAULT,
+            ChecksumType::Md5,
+            CompressType::None,
+            true,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(31, compat_flags::DEFAULT),
+        );
 
         let opts = TransferOptions::builder()
             .dest(dst.clone())
@@ -1441,8 +1439,8 @@ mod tests {
 
         tx.send(FileEntry {
             name: b"subdir".to_vec(),
-            len: 0,
-            mtime: 1700000000,
+            len: FileSize(0),
+            mtime: UnixTimestamp(1700000000),
             mode: S_IFDIR | 0o755,
             ..Default::default()
         })
@@ -1450,8 +1448,8 @@ mod tests {
         .unwrap();
         tx.send(FileEntry {
             name: b"file.txt".to_vec(),
-            len: 50,
-            mtime: 1700000000,
+            len: FileSize(50),
+            mtime: UnixTimestamp(1700000000),
             mode: S_IFREG | 0o644,
             ..Default::default()
         })
@@ -1481,17 +1479,16 @@ mod tests {
         let dst = tmp.path().join("dst");
         std::fs::create_dir_all(&dst).unwrap();
 
-        let protocol = NegotiatedProtocol {
-            version: 31,
-            compat_flags: compat_flags::DEFAULT,
-
-            checksum: ChecksumType::Md5,
-            compress: CompressType::None,
-            proper_seed_order: true,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(31, compat_flags::DEFAULT),
-        };
+        let protocol = NegotiatedProtocol::new(
+            31,
+            compat_flags::DEFAULT,
+            ChecksumType::Md5,
+            CompressType::None,
+            true,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(31, compat_flags::DEFAULT),
+        );
 
         let opts = TransferOptions::builder()
             .dest(dst.clone())
@@ -1503,8 +1500,8 @@ mod tests {
 
         tx.send(FileEntry {
             name: b"small.txt".to_vec(),
-            len: 100,
-            mtime: 1700000000,
+            len: FileSize(100),
+            mtime: UnixTimestamp(1700000000),
             mode: S_IFREG | 0o644,
             ..Default::default()
         })
@@ -1512,8 +1509,8 @@ mod tests {
         .unwrap();
         tx.send(FileEntry {
             name: b"large.txt".to_vec(),
-            len: 200,
-            mtime: 1700000000,
+            len: FileSize(200),
+            mtime: UnixTimestamp(1700000000),
             mode: S_IFREG | 0o644,
             ..Default::default()
         })

@@ -44,7 +44,7 @@ pub struct ProtocolContext {
 impl ProtocolContext {
     /// Create from a negotiated protocol (post-handshake).
     pub fn from_protocol(proto: &NegotiatedProtocol) -> Self {
-        let char_offset = if proto.wire.int_codec == IntCodec::Compact {
+        let char_offset = if proto.wire().int_codec == IntCodec::Compact {
             checksum::CHAR_OFFSET_V30
         } else {
             checksum::CHAR_OFFSET_OLD

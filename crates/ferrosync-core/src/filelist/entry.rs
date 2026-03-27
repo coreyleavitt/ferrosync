@@ -4,6 +4,8 @@
 //! The struct is designed to be protocol-version independent -- the codec
 //! layer handles wire format differences.
 
+use crate::types::{FileSize, UnixTimestamp};
+
 /// Metadata for a single file in an rsync file list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileEntry {
@@ -12,10 +14,10 @@ pub struct FileEntry {
     pub name: Vec<u8>,
 
     /// File size in bytes.
-    pub len: i64,
+    pub len: FileSize,
 
     /// Modification time (Unix timestamp, seconds).
-    pub mtime: i64,
+    pub mtime: UnixTimestamp,
 
     /// Modification time nanoseconds (proto >= 31, 0 otherwise).
     pub mtime_nsec: u32,
@@ -134,10 +136,10 @@ impl FileEntry {
     /// Format this entry for `--list-only` output (rsync ls -l style).
     pub fn format_list_entry(&self) -> String {
         let mode_str = format_mode(self.mode);
-        let size = self.len;
+        let size = self.len.bytes();
         let name = String::from_utf8_lossy(&self.name);
         // Format mtime as YYYY/MM/DD HH:MM:SS
-        let mtime_str = format_mtime(self.mtime);
+        let mtime_str = format_mtime(self.mtime.secs());
         format!("{mode_str} {size:>12} {mtime_str} {name}")
     }
 
@@ -384,7 +386,7 @@ mod tests {
         assert!(!e.is_dir());
         assert!(!e.is_symlink());
         assert!(e.name.is_empty());
-        assert_eq!(e.len, 0);
+        assert_eq!(e.len, FileSize(0));
     }
 
     #[test]

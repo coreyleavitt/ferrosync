@@ -4,6 +4,7 @@ use super::*;
 use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFREG, WIRE_S_IFLNK};
 use crate::filelist::xmit::XMIT_TOP_DIR;
 use crate::protocol::wire_format::WireFormat;
+use crate::types::{FileSize, UnixTimestamp};
 use std::io::Cursor;
 
 fn default_opts() -> FileListOptions {
@@ -22,8 +23,8 @@ async fn test_roundtrip_simple_file() {
     let opts = default_opts();
     let entry = FileEntry {
         name: b"hello.txt".to_vec(),
-        len: 1234,
-        mtime: 1700000000,
+        len: FileSize(1234),
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         ..Default::default()
     };
@@ -60,8 +61,8 @@ async fn test_roundtrip_simple_file() {
     match result {
         ReadEntryResult::Entry(decoded) => {
             assert_eq!(decoded.name, b"hello.txt");
-            assert_eq!(decoded.len, 1234);
-            assert_eq!(decoded.mtime, 1700000000);
+            assert_eq!(decoded.len, FileSize(1234));
+            assert_eq!(decoded.mtime, UnixTimestamp(1700000000));
             assert_eq!(decoded.mode, S_IFREG | 0o644);
         }
         ReadEntryResult::EndOfList { .. } => panic!("expected entry, got end of list"),
@@ -90,22 +91,22 @@ async fn test_roundtrip_multiple_entries_prefix_compression() {
     let entries = vec![
         FileEntry {
             name: b"src/main.rs".to_vec(),
-            len: 100,
-            mtime: 1700000000,
+            len: FileSize(100),
+            mtime: UnixTimestamp(1700000000),
             mode: S_IFREG | 0o644,
             ..Default::default()
         },
         FileEntry {
             name: b"src/lib.rs".to_vec(),
-            len: 200,
-            mtime: 1700000001,
+            len: FileSize(200),
+            mtime: UnixTimestamp(1700000001),
             mode: S_IFREG | 0o644,
             ..Default::default()
         },
         FileEntry {
             name: b"src/main_test.rs".to_vec(),
-            len: 300,
-            mtime: 1700000002,
+            len: FileSize(300),
+            mtime: UnixTimestamp(1700000002),
             mode: S_IFREG | 0o644,
             ..Default::default()
         },
@@ -159,8 +160,8 @@ async fn test_roundtrip_directory() {
     let opts = default_opts();
     let entry = FileEntry {
         name: b"mydir".to_vec(),
-        len: 0,
-        mtime: 1700000000,
+        len: FileSize(0),
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFDIR | 0o755,
         flags: XMIT_TOP_DIR,
         ..Default::default()
@@ -215,8 +216,8 @@ async fn test_roundtrip_with_uid_gid() {
 
     let entry = FileEntry {
         name: b"owned.txt".to_vec(),
-        len: 50,
-        mtime: 1700000000,
+        len: FileSize(50),
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         uid: 1000,
         gid: 100,
@@ -273,8 +274,8 @@ async fn test_roundtrip_symlink() {
 
     let entry = FileEntry {
         name: b"link.txt".to_vec(),
-        len: 0,
-        mtime: 1700000000,
+        len: FileSize(0),
+        mtime: UnixTimestamp(1700000000),
         mode: WIRE_S_IFLNK | 0o777,
         link_target: b"/tmp/target".to_vec(),
         ..Default::default()
@@ -328,8 +329,8 @@ async fn test_roundtrip_with_checksum() {
     let checksum = vec![0xAA; 16];
     let entry = FileEntry {
         name: b"data.bin".to_vec(),
-        len: 4096,
-        mtime: 1700000000,
+        len: FileSize(4096),
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         checksum: checksum.clone(),
         ..Default::default()
@@ -377,16 +378,16 @@ async fn test_roundtrip_same_mode_time() {
 
     let entry1 = FileEntry {
         name: b"a.txt".to_vec(),
-        len: 100,
-        mtime: 1700000000,
+        len: FileSize(100),
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         ..Default::default()
     };
     let entry2 = FileEntry {
         name: b"b.txt".to_vec(),
-        len: 200,
-        mtime: 1700000000,     // Same mtime
-        mode: S_IFREG | 0o644, // Same mode
+        len: FileSize(200),
+        mtime: UnixTimestamp(1700000000), // Same mtime
+        mode: S_IFREG | 0o644,            // Same mode
         ..Default::default()
     };
 
@@ -455,7 +456,7 @@ async fn test_roundtrip_same_mode_time() {
     {
         ReadEntryResult::Entry(d) => {
             assert_eq!(d.name, b"b.txt");
-            assert_eq!(d.mtime, 1700000000);
+            assert_eq!(d.mtime, UnixTimestamp(1700000000));
             assert_eq!(d.mode, S_IFREG | 0o644);
         }
         _ => panic!("expected entry"),
@@ -467,8 +468,8 @@ async fn test_roundtrip_mtime_nsec() {
     let opts = default_opts();
     let entry = FileEntry {
         name: b"precise.txt".to_vec(),
-        len: 42,
-        mtime: 1700000000,
+        len: FileSize(42),
+        mtime: UnixTimestamp(1700000000),
         mtime_nsec: 123456789,
         mode: S_IFREG | 0o644,
         ..Default::default()
@@ -582,8 +583,8 @@ async fn test_roundtrip_proto27() {
 
     let entry = FileEntry {
         name: b"old.txt".to_vec(),
-        len: 500,
-        mtime: 1600000000,
+        len: FileSize(500),
+        mtime: UnixTimestamp(1600000000),
         mode: S_IFREG | 0o644,
         ..Default::default()
     };
@@ -619,8 +620,8 @@ async fn test_roundtrip_proto27() {
     {
         ReadEntryResult::Entry(decoded) => {
             assert_eq!(decoded.name, b"old.txt");
-            assert_eq!(decoded.len, 500);
-            assert_eq!(decoded.mtime, 1600000000);
+            assert_eq!(decoded.len, FileSize(500));
+            assert_eq!(decoded.mtime, UnixTimestamp(1600000000));
         }
         ReadEntryResult::EndOfList { .. } => panic!("expected entry"),
     }
@@ -635,8 +636,8 @@ async fn test_diagnostic_roundtrip() {
     let opts = default_opts();
     let entry = FileEntry {
         name: b"test.txt".to_vec(),
-        len: 100,
-        mtime: 1700000000,
+        len: FileSize(100),
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         ..Default::default()
     };
@@ -701,7 +702,7 @@ fn test_compute_xmit_flags_basic() {
 
     let entry = FileEntry {
         name: b"test.txt".to_vec(),
-        mtime: 1700000000,
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         ..Default::default()
     };
@@ -729,7 +730,7 @@ fn test_compute_xmit_flags_basic() {
 
     let entry2 = FileEntry {
         name: b"test2.txt".to_vec(),
-        mtime: 1700000000,
+        mtime: UnixTimestamp(1700000000),
         mode: S_IFREG | 0o644,
         ..Default::default()
     };
@@ -785,8 +786,8 @@ mod proptests {
         )
             .prop_map(|(name, len, mtime, mtime_nsec, mode)| FileEntry {
                 name,
-                len,
-                mtime,
+                len: FileSize(len),
+                mtime: UnixTimestamp(mtime),
                 mtime_nsec,
                 mode,
                 ..Default::default()

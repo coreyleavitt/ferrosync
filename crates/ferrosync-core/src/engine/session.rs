@@ -626,7 +626,7 @@ impl<T: Transport> SyncSession<T> {
             version = protocol.version,
             checksum = ?protocol.checksum,
             compress = ?protocol.compress,
-            incremental = protocol.wire.supports_incremental_flist,
+            incremental = protocol.wire().supports_incremental_flist,
             seed = protocol.seed,
             "handshake complete"
         );
@@ -720,8 +720,8 @@ async fn run_push(
     let mut entries = build_source_entries(fs, options)?;
     crate::filelist::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
-    let total_bytes: i64 = entries.iter().map(|e| e.len).sum();
-    progress.set_totals(stats.total_files, total_bytes as u64);
+    let total_bytes: crate::types::FileSize = entries.iter().map(|e| e.len).sum();
+    progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
     exchange::send_file_list(&mut flist_buf, &entries, protocol, options)
@@ -748,7 +748,7 @@ async fn run_push(
         }
         let (mut demux_read, mut mplex_out) = mux.into_split();
         protocol
-            .wire
+            .wire()
             .sender_goodbye(&mut demux_read, &mut mplex_out)
             .await?;
         stats.finish();
@@ -785,7 +785,7 @@ async fn run_push(
     // via separate references.
     let (mut demux_read, mut mplex_out) = mux.into_split();
     protocol
-        .wire
+        .wire()
         .sender_goodbye(&mut demux_read, &mut mplex_out)
         .await?;
 
@@ -847,8 +847,8 @@ async fn run_pull(
     let entry_ndx = received_flist.entry_ndx;
     stats.total_files = entries.len() as u64;
 
-    let total_bytes: i64 = entries.iter().map(|e| e.len).sum();
-    progress.set_totals(stats.total_files, total_bytes as u64);
+    let total_bytes: crate::types::FileSize = entries.iter().map(|e| e.len).sum();
+    progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     tracing::debug!(count = entries.len(), "received file list");
 
@@ -876,9 +876,9 @@ async fn run_pull(
             received_flist.num_flists,
         )
         .await?;
-        protocol.wire.read_stats(&mut demux_read).await?;
+        protocol.wire().read_stats(&mut demux_read).await?;
         protocol
-            .wire
+            .wire()
             .receiver_goodbye(&mut demux_read, &mut mplex_out)
             .await?;
         stats.finish();
@@ -926,11 +926,11 @@ async fn run_pull(
                 stats.directories_created += 1;
             } else if entry.is_file() {
                 stats.files_transferred += 1;
-                stats.total_size += entry.len as u64;
+                stats.total_size += entry.len.as_u64();
                 progress.emit(ProgressEvent::FileComplete {
                     index: idx as i32,
                     name: crate::engine::progress::name_to_pathbuf(&entry.name),
-                    literal_bytes: entry.len as u64,
+                    literal_bytes: entry.len.as_u64(),
                     matched_bytes: 0,
                 });
             }
@@ -983,11 +983,11 @@ async fn run_pull(
     .await?;
 
     // Read transfer stats.
-    protocol.wire.read_stats(&mut demux_read).await?;
+    protocol.wire().read_stats(&mut demux_read).await?;
 
     // Goodbye exchange.
     protocol
-        .wire
+        .wire()
         .receiver_goodbye(&mut demux_read, &mut mplex_out)
         .await?;
 

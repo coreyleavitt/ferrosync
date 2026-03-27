@@ -63,7 +63,7 @@ impl FileListOptions {
         opts: &crate::options::TransferConfig,
     ) -> Self {
         Self {
-            wire: proto.wire.clone(),
+            wire: proto.wire().clone(),
             preserve_uid: opts.preserve_owner(),
             preserve_gid: opts.preserve_group() || opts.preserve_owner(),
             preserve_devices: opts.preserve_devices(),
@@ -72,7 +72,7 @@ impl FileListOptions {
             preserve_hard_links: opts.preserve_hard_links(),
             always_checksum: opts.checksum_mode(),
             checksum_len: proto.checksum.digest_len(),
-            xmit_id0_names: proto.compat_flags
+            xmit_id0_names: proto.compat_flags()
                 & crate::protocol::handshake::compat_flags::ID0_NAMES
                 != 0,
             numeric_ids: opts.numeric_ids(),

@@ -45,7 +45,7 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
 
     // inc_recurse requires BOTH the capability flag AND recursive mode.
     // rsync sets inc_recurse=0 when -r is not active, even with CF_INC_RECURSE.
-    if protocol.wire.supports_incremental_flist && opts.recursive() {
+    if protocol.wire().supports_incremental_flist && opts.recursive() {
         send_file_list_incremental(w, entries, &flist_opts).await
     } else {
         send_file_list_batch(w, entries, &flist_opts).await?;
@@ -171,7 +171,7 @@ pub async fn recv_file_list<R: AsyncRead + Unpin>(
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
     let (entries, ndx_start, entry_ndx, num_flists) =
-        if protocol.wire.supports_incremental_flist && opts.recursive() {
+        if protocol.wire().supports_incremental_flist && opts.recursive() {
             // Incremental: entries are already sorted per-flist with correct NDX.
             recv_file_list_incremental(r, &flist_opts).await?
         } else {
@@ -324,7 +324,7 @@ pub async fn recv_file_list_streaming<R: AsyncRead + Unpin>(
 ) -> Result<()> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
-    if protocol.wire.supports_incremental_flist && opts.recursive() {
+    if protocol.wire().supports_incremental_flist && opts.recursive() {
         recv_file_list_incremental_streaming(r, &flist_opts, tx).await
     } else {
         recv_file_list_batch_streaming(r, &flist_opts, tx).await
@@ -554,65 +554,62 @@ mod tests {
         compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
     };
     use crate::protocol::wire_format::{FlagsCodec, IntCodec, WireFormat};
+    use crate::types::{FileSize, UnixTimestamp};
     use std::io::Cursor;
 
     fn proto_v31() -> NegotiatedProtocol {
-        NegotiatedProtocol {
-            version: 31,
-            compat_flags: compat_flags::DEFAULT | compat_flags::INC_RECURSE,
-
-            checksum: ChecksumType::Md5,
-            compress: CompressType::None,
-            proper_seed_order: true,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(31, compat_flags::DEFAULT | compat_flags::INC_RECURSE),
-        }
+        NegotiatedProtocol::new(
+            31,
+            compat_flags::DEFAULT | compat_flags::INC_RECURSE,
+            ChecksumType::Md5,
+            CompressType::None,
+            true,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(31, compat_flags::DEFAULT | compat_flags::INC_RECURSE),
+        )
     }
 
     fn proto_v27() -> NegotiatedProtocol {
-        NegotiatedProtocol {
-            version: 27,
-            compat_flags: 0,
-
-            checksum: ChecksumType::Md4,
-            compress: CompressType::None,
-            proper_seed_order: false,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(27, 0),
-        }
+        NegotiatedProtocol::new(
+            27,
+            0,
+            ChecksumType::Md4,
+            CompressType::None,
+            false,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(27, 0),
+        )
     }
 
     fn proto_v29() -> NegotiatedProtocol {
-        NegotiatedProtocol {
-            version: 29,
-            compat_flags: 0,
-
-            checksum: ChecksumType::Md4,
-            compress: CompressType::None,
-            proper_seed_order: false,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(29, 0),
-        }
+        NegotiatedProtocol::new(
+            29,
+            0,
+            ChecksumType::Md4,
+            CompressType::None,
+            false,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(29, 0),
+        )
     }
 
     fn proto_v30_no_inc() -> NegotiatedProtocol {
-        NegotiatedProtocol {
-            version: 30,
-            compat_flags: compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS,
-
-            checksum: ChecksumType::Md5,
-            compress: CompressType::None,
-            proper_seed_order: false,
-            seed: 42,
-            chunking: ChunkingStrategy::default(),
-            wire: WireFormat::new(
+        NegotiatedProtocol::new(
+            30,
+            compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS,
+            ChecksumType::Md5,
+            CompressType::None,
+            false,
+            42,
+            ChunkingStrategy::default(),
+            WireFormat::new(
                 30,
                 compat_flags::SAFE_FLIST | compat_flags::VARINT_FLIST_FLAGS,
             ),
-        }
+        )
     }
 
     fn default_opts() -> TransferConfig {
@@ -623,22 +620,22 @@ mod tests {
         vec![
             FileEntry {
                 name: b"alpha.txt".to_vec(),
-                len: 100,
-                mtime: 1700000000,
+                len: FileSize(100),
+                mtime: UnixTimestamp(1700000000),
                 mode: S_IFREG | 0o644,
                 ..Default::default()
             },
             FileEntry {
                 name: b"beta".to_vec(),
-                len: 0,
-                mtime: 1700000000,
+                len: FileSize(0),
+                mtime: UnixTimestamp(1700000000),
                 mode: S_IFDIR | 0o755,
                 ..Default::default()
             },
             FileEntry {
                 name: b"gamma.txt".to_vec(),
-                len: 200,
-                mtime: 1700000001,
+                len: FileSize(200),
+                mtime: UnixTimestamp(1700000001),
                 mode: S_IFREG | 0o644,
                 ..Default::default()
             },
@@ -665,7 +662,7 @@ mod tests {
         assert_eq!(received.len(), 3);
         // Entries are sorted by sort_file_list.
         assert_eq!(received[0].name, b"alpha.txt");
-        assert_eq!(received[0].len, 100);
+        assert_eq!(received[0].len, FileSize(100));
     }
 
     #[tokio::test]
@@ -730,9 +727,9 @@ mod tests {
         // With rsync's canonical sort (proto >= 29), files sort before dirs:
         // alpha.txt, gamma.txt, beta (dir).
         assert_eq!(received[0].name, b"alpha.txt");
-        assert_eq!(received[0].len, 100);
+        assert_eq!(received[0].len, FileSize(100));
         assert_eq!(received[1].name, b"gamma.txt");
-        assert_eq!(received[1].len, 200);
+        assert_eq!(received[1].len, FileSize(200));
         assert_eq!(received[2].name, b"beta");
     }
 

@@ -168,7 +168,7 @@ pub struct NegotiatedProtocol {
     /// Agreed protocol version (min of both sides).
     pub(crate) version: u8,
     /// Compatibility flags (proto >= 30).
-    pub compat_flags: u32,
+    compat_flags: u32,
     /// Negotiated checksum algorithm.
     pub checksum: ChecksumType,
     /// Negotiated compression algorithm.
@@ -184,7 +184,45 @@ pub struct NegotiatedProtocol {
     /// negotiation (wire negotiation not yet implemented).
     pub chunking: ChunkingStrategy,
     /// All version-dependent wire format decisions, resolved at handshake time.
-    pub wire: WireFormat,
+    wire: WireFormat,
+}
+
+impl NegotiatedProtocol {
+    /// Access the wire format descriptor.
+    pub fn wire(&self) -> &WireFormat {
+        &self.wire
+    }
+
+    /// Access the negotiated compatibility flags.
+    pub fn compat_flags(&self) -> u32 {
+        self.compat_flags
+    }
+
+    /// Create a `NegotiatedProtocol` for use in tests and internal construction.
+    ///
+    /// All fields are provided explicitly -- no defaults or fallback logic.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        version: u8,
+        compat_flags: u32,
+        checksum: ChecksumType,
+        compress: CompressType,
+        proper_seed_order: bool,
+        seed: i32,
+        chunking: ChunkingStrategy,
+        wire: WireFormat,
+    ) -> Self {
+        Self {
+            version,
+            compat_flags,
+            checksum,
+            compress,
+            proper_seed_order,
+            seed,
+            chunking,
+            wire,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,16 +444,16 @@ where
         );
     }
 
-    Ok(NegotiatedProtocol {
+    Ok(NegotiatedProtocol::new(
         version,
-        compat_flags: flags,
+        flags,
         checksum,
         compress,
         proper_seed_order,
         seed,
-        chunking: ChunkingStrategy::default(),
-        wire: WireFormat::new(version, flags),
-    })
+        ChunkingStrategy::default(),
+        WireFormat::new(version, flags),
+    ))
 }
 
 /// Perform the server-side handshake (used when running as `--server`).
@@ -502,16 +540,16 @@ where
         );
     }
 
-    Ok(NegotiatedProtocol {
+    Ok(NegotiatedProtocol::new(
         version,
-        compat_flags: flags,
+        flags,
         checksum,
         compress,
         proper_seed_order,
         seed,
-        chunking: ChunkingStrategy::default(),
-        wire: WireFormat::new(version, flags),
-    })
+        ChunkingStrategy::default(),
+        WireFormat::new(version, flags),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +723,7 @@ mod tests {
         assert_eq!(result.version, 31);
         assert_eq!(result.checksum, ChecksumType::Blake3);
         assert_eq!(result.seed, 12345);
-        assert!(result.wire.supports_incremental_flist);
+        assert!(result.wire().supports_incremental_flist);
         assert!(result.proper_seed_order);
 
         // Verify the client sent the expected bytes.

@@ -37,8 +37,8 @@ impl UnixFileSystem {
 
     fn metadata_from_std(m: &std::fs::Metadata) -> FileMetadata {
         FileMetadata {
-            len: m.len() as i64,
-            mtime: m.mtime(),
+            len: crate::types::FileSize(m.len() as i64),
+            mtime: crate::types::UnixTimestamp(m.mtime()),
             mtime_nsec: m.mtime_nsec() as u32,
             mode: m.mode(),
             uid: m.uid(),
@@ -424,7 +424,7 @@ mod tests {
 
         fs.set_mtime(&path, 1000000, 0).unwrap();
         let meta = fs.stat(&path).unwrap();
-        assert_eq!(meta.mtime, 1000000);
+        assert_eq!(meta.mtime, crate::types::UnixTimestamp(1000000));
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         let meta = fs.stat(&path).unwrap();
         let entry = meta.to_file_entry(b"entry_test.txt".to_vec());
         assert_eq!(entry.name, b"entry_test.txt");
-        assert_eq!(entry.len, 9);
+        assert_eq!(entry.len, crate::types::FileSize(9));
         assert!(entry.is_file());
     }
 

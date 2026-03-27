@@ -70,7 +70,7 @@ pub fn quick_check_skip(
 
     // Same size and mtime within --modify-window tolerance -> skip.
     let window = options.modify_window() as i64;
-    if (dest_meta.mtime - src_entry.mtime).abs() <= window {
+    if dest_meta.mtime.abs_diff(src_entry.mtime) <= window {
         return true;
     }
 
@@ -90,7 +90,7 @@ pub fn check_alt_dest(
     for dir in alt_dirs {
         let alt_path = dir.join(src_entry.path());
         if let Ok(meta) = fs.lstat(&alt_path) {
-            if meta.len == src_entry.len && (meta.mtime - src_entry.mtime).abs() <= window {
+            if meta.len == src_entry.len && meta.mtime.abs_diff(src_entry.mtime) <= window {
                 return Some(alt_path);
             }
         }
@@ -120,12 +120,12 @@ pub fn resolve_link_dest_dirs(link_dest: &[PathBuf], dest: &Path) -> Vec<PathBuf
 /// Returns `true` if the file exceeds `--max-size` or is below `--min-size`.
 pub fn check_size_limits(entry: &FileEntry, options: &TransferConfig) -> bool {
     if let Some(max) = options.max_size() {
-        if entry.len as u64 > max {
+        if entry.len.as_u64() > max {
             return true;
         }
     }
     if let Some(min) = options.min_size() {
-        if (entry.len as u64) < min {
+        if entry.len.as_u64() < min {
             return true;
         }
     }
@@ -242,7 +242,7 @@ pub fn set_file_metadata(
     options: &TransferConfig,
 ) {
     if options.preserve_times() {
-        if let Err(e) = fs.set_mtime(dest_path, entry.mtime, entry.mtime_nsec) {
+        if let Err(e) = fs.set_mtime(dest_path, entry.mtime.secs(), entry.mtime_nsec) {
             tracing::warn!(path = %dest_path.display(), error = %e, "failed to set mtime");
         }
     }
@@ -354,12 +354,13 @@ fn longest_common_subsequence_len(a: &[u8], b: &[u8]) -> usize {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::types::{FileSize, UnixTimestamp};
 
     fn make_entry(name: &str, len: i64, mtime: i64) -> FileEntry {
         FileEntry {
             name: name.as_bytes().to_vec(),
-            len,
-            mtime,
+            len: FileSize(len),
+            mtime: UnixTimestamp(mtime),
             mode: 0o100644,
             ..Default::default()
         }

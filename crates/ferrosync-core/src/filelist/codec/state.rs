@@ -35,7 +35,7 @@ pub struct DeltaState {
 /// Update delta state after encoding/decoding an entry.
 pub fn update_delta_state(state: &mut DeltaState, entry: &FileEntry) {
     state.prev_name.clone_from(&entry.name);
-    state.prev_mtime = entry.mtime;
+    state.prev_mtime = entry.mtime.secs();
     state.prev_mode = entry.mode;
     state.prev_uid = entry.uid;
     state.prev_gid = entry.gid;

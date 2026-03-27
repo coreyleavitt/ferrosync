@@ -99,8 +99,8 @@ impl WindowsFileSystem {
         let is_dir = m.is_dir();
 
         FileMetadata {
-            len: m.len() as i64,
-            mtime,
+            len: crate::types::FileSize(m.len() as i64),
+            mtime: crate::types::UnixTimestamp(mtime),
             mtime_nsec,
             mode: Self::mode_from_attrs(attrs, is_dir),
             uid: 0,
