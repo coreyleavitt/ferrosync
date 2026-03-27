@@ -7,6 +7,7 @@
 /objects
 /refs
 **/*.rs.bk
+**/proptest-regressions/
 *.swp
 *.swo
 *~
