@@ -16,17 +16,17 @@ use tokio::sync::mpsc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::error::ProtocolError;
-use crate::options::TransferConfig;
-use crate::protocol::handshake::NegotiatedProtocol;
-use crate::protocol::varint;
+use ferrosync_protocol::handshake::NegotiatedProtocol;
+use ferrosync_protocol::varint;
+use ferrosync_types::error::ProtocolError;
+use ferrosync_types::options::TransferConfig;
 
-use super::codec::{
+use crate::codec::{
     recv_file_entry, send_file_entry, write_end_of_flist, DeltaState, FileListOptions,
     HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
 };
-use super::entry::FileEntry;
-use super::incremental::{IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF, NDX_FLIST_OFFSET};
+use crate::entry::FileEntry;
+use crate::incremental::{IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF, NDX_FLIST_OFFSET};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -107,7 +107,7 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     entries: &[FileEntry],
     opts: &FileListOptions,
 ) -> Result<()> {
-    use super::codec::{send_file_entry, write_end_of_flist, DeltaState, HardLinkEncoder};
+    use crate::codec::{send_file_entry, write_end_of_flist, DeltaState, HardLinkEncoder};
 
     let mut sender = IncrementalSender::default();
     let mut hlink_encoder = HardLinkEncoder::new();
@@ -185,7 +185,7 @@ pub async fn recv_file_list<R: AsyncRead + Unpin>(
         } else {
             // Batch: sort entries and assign NDX by sorted position.
             let mut entries = recv_file_list_batch(r, &flist_opts).await?;
-            entries.sort_by(super::sort::f_name_cmp);
+            entries.sort_by(crate::sort::f_name_cmp);
 
             // Read uid/gid name lists (sent after file entries in batch mode).
             // rsync's recv_id_list reads these when preserve_uid/gid and !numeric_ids.
@@ -252,7 +252,7 @@ async fn recv_file_list_incremental<R: AsyncRead + Unpin>(
     r: &mut R,
     opts: &FileListOptions,
 ) -> Result<(Vec<FileEntry>, i32, Vec<i32>, usize)> {
-    use super::codec::DeltaState;
+    use crate::codec::DeltaState;
 
     let mut receiver = IncrementalReceiver::default();
     let mut all_entries = Vec::new();
@@ -272,7 +272,7 @@ async fn recv_file_list_incremental<R: AsyncRead + Unpin>(
         all_entries: &mut Vec<FileEntry>,
         all_ndx: &mut Vec<i32>,
     ) {
-        entries.sort_by(super::sort::f_name_cmp);
+        entries.sort_by(crate::sort::f_name_cmp);
         for (i, entry) in entries.into_iter().enumerate() {
             all_ndx.push(ndx_start + i as i32);
             all_entries.push(entry);
@@ -564,13 +564,13 @@ async fn recv_id_list<R: AsyncRead + Unpin>(r: &mut R, opts: &FileListOptions) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::chunker::ChunkingStrategy;
-    use crate::filelist::entry::{S_IFDIR, S_IFREG};
-    use crate::protocol::handshake::{
+    use crate::entry::{S_IFDIR, S_IFREG};
+    use ferrosync_protocol::handshake::{
         compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
     };
-    use crate::protocol::wire_format::{FlagsCodec, IntCodec, WireFormat};
-    use crate::types::{FileSize, UnixTimestamp};
+    use ferrosync_protocol::wire_format::{FlagsCodec, IntCodec, WireFormat};
+    use ferrosync_types::protocol::ChunkingStrategy;
+    use ferrosync_types::types::{FileSize, UnixTimestamp};
     use std::io::Cursor;
 
     fn proto_v31() -> NegotiatedProtocol {

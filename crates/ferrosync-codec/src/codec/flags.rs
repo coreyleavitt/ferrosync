@@ -7,16 +7,16 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint::{self, read_byte, read_varint, write_byte, write_varint};
-use crate::protocol::wire_format::FlagsCodec;
+use ferrosync_protocol::varint::{self, read_byte, read_varint, write_byte, write_varint};
+use ferrosync_protocol::wire_format::FlagsCodec;
+use ferrosync_types::error::ProtocolError;
 
 use super::options::FileListOptions;
 use super::state::DeltaState;
 use super::HardLinkAction;
-use crate::filelist::entry::{FileEntry, S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT, S_IFSOCK};
-use crate::filelist::xmit::*;
-use crate::protocol::wire_format::DeviceCodec;
+use crate::entry::{FileEntry, S_IFBLK, S_IFCHR, S_IFIFO, S_IFMT, S_IFSOCK};
+use crate::xmit::*;
+use ferrosync_protocol::wire_format::DeviceCodec;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 

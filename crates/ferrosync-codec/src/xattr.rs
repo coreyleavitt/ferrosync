@@ -10,8 +10,8 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint::{read_varint, write_varint};
+use ferrosync_protocol::varint::{read_varint, write_varint};
+use ferrosync_types::error::ProtocolError;
 
 // Re-export xattr type definitions from ferrosync-types.
 pub use ferrosync_types::entry::{ExtendedAttributes, XattrEntry};

@@ -13,11 +13,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::error::FsError;
-use crate::filelist::entry::{self, FileEntry, S_IFDIR, S_IFMT};
-use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem};
-use crate::options::DirectoryMode;
+use ferrosync_codec::entry::{self, FileEntry, S_IFDIR, S_IFMT};
+use ferrosync_types::error::FsError;
+
+use ferrosync_filter::FilterRuleList;
+use ferrosync_fs::{DirEntry, FileSystem};
+use ferrosync_types::options::DirectoryMode;
 
 // ---------------------------------------------------------------------------
 // FileListItem
@@ -155,7 +156,7 @@ impl<'a> FileListEnricher for AclEnricher<'a> {
         }
 
         let access = match self.fs.get_xattr(path, b"system.posix_acl_access") {
-            Ok(Some(data)) => match crate::acl::parse_posix_acl_binary(&data) {
+            Ok(Some(data)) => match ferrosync_codec::acl::parse_posix_acl_binary(&data) {
                 Ok(acl) => Some(acl),
                 Err(e) => {
                     tracing::warn!(path = %path.display(), error = %e, "failed to parse access ACL");
@@ -171,7 +172,7 @@ impl<'a> FileListEnricher for AclEnricher<'a> {
 
         let default = if entry.is_dir() {
             match self.fs.get_xattr(path, b"system.posix_acl_default") {
-                Ok(Some(data)) => match crate::acl::parse_posix_acl_binary(&data) {
+                Ok(Some(data)) => match ferrosync_codec::acl::parse_posix_acl_binary(&data) {
                     Ok(acl) => Some(acl),
                     Err(e) => {
                         tracing::warn!(path = %path.display(), error = %e, "failed to parse default ACL");
@@ -186,10 +187,12 @@ impl<'a> FileListEnricher for AclEnricher<'a> {
         };
 
         if let Some(access_acl) = access {
-            entry.acl = Some(crate::acl::Acl::Posix(crate::acl::PosixAcl {
-                access: access_acl,
-                default,
-            }));
+            entry.acl = Some(ferrosync_codec::entry::Acl::Posix(
+                ferrosync_codec::entry::PosixAcl {
+                    access: access_acl,
+                    default,
+                },
+            ));
         }
     }
 }
@@ -263,7 +266,7 @@ impl<'a> FileListEnricher for XattrEnricher<'a> {
                     // Add null terminator to name for wire format.
                     let mut wire_name = name;
                     wire_name.push(0);
-                    xattr_entries.push(crate::xattr::XattrEntry {
+                    xattr_entries.push(ferrosync_codec::entry::XattrEntry {
                         name: wire_name,
                         value,
                     });
@@ -283,7 +286,7 @@ impl<'a> FileListEnricher for XattrEnricher<'a> {
         xattr_entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         if !xattr_entries.is_empty() {
-            entry.xattrs = Some(crate::xattr::ExtendedAttributes {
+            entry.xattrs = Some(ferrosync_codec::entry::ExtendedAttributes {
                 entries: xattr_entries,
             });
         }
@@ -810,11 +813,11 @@ pub fn build_file_list_from_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::FilterRuleList;
+    use ferrosync_filter::FilterRuleList;
 
     #[cfg(unix)]
-    fn make_fs() -> crate::fs::unix::UnixFileSystem {
-        crate::fs::unix::UnixFileSystem::new()
+    fn make_fs() -> ferrosync_fs::unix::UnixFileSystem {
+        ferrosync_fs::unix::UnixFileSystem::new()
     }
 
     #[cfg(unix)]
@@ -966,7 +969,7 @@ mod tests {
                 index: 0,
                 entry: FileEntry {
                     name: b"first".to_vec(),
-                    hard_link_info: Some(crate::filelist::codec::HardLinkInfo {
+                    hard_link_info: Some(ferrosync_codec::entry::HardLinkInfo {
                         dev: 1,
                         ino: 100,
                         nlink: 2,
@@ -979,7 +982,7 @@ mod tests {
                 index: 1,
                 entry: FileEntry {
                     name: b"second".to_vec(),
-                    hard_link_info: Some(crate::filelist::codec::HardLinkInfo {
+                    hard_link_info: Some(ferrosync_codec::entry::HardLinkInfo {
                         dev: 1,
                         ino: 100,
                         nlink: 2,

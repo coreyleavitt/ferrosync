@@ -10,7 +10,7 @@ use std::io::Cursor;
 use super::flags::DecodedFlags;
 use super::options::FileListOptions;
 use super::state::DeltaState;
-use crate::error::ProtocolError;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -96,7 +96,7 @@ pub async fn diagnostic_decode_entry(
     if opts.preserve_hard_links && flags.hlinked() {
         let field_start = *offset;
         let mut cursor = Cursor::new(&data[*offset..]);
-        let ndx = crate::protocol::varint::read_varint(&mut cursor).await? as i32;
+        let ndx = ferrosync_protocol::varint::read_varint(&mut cursor).await? as i32;
         let consumed = cursor.position() as usize;
         fields.push(DecodedField {
             name: if flags.hlink_first() {

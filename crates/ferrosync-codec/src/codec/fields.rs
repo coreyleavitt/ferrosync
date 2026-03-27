@@ -7,17 +7,17 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint::{
+use ferrosync_protocol::varint::{
     read_byte, read_int, read_varint, read_varint30, read_varlong, read_varlong30, write_byte,
     write_int, write_varint, write_varint30, write_varlong, write_varlong30,
 };
-use crate::protocol::wire_format::{DeviceCodec, FlagsCodec, IntCodec};
+use ferrosync_protocol::wire_format::{DeviceCodec, FlagsCodec, IntCodec};
+use ferrosync_types::error::ProtocolError;
 
 use super::flags::{common_prefix_len, should_send_rdev, XmitFlags};
 use super::options::FileListOptions;
 use super::state::DeltaState;
-use crate::filelist::entry::{S_IFMT, S_IFREG, WIRE_S_IFLNK};
+use crate::entry::{S_IFMT, S_IFREG, WIRE_S_IFLNK};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -60,7 +60,7 @@ pub async fn decode_filename<R: AsyncRead + Unpin>(
     state: &DeltaState,
     flags: XmitFlags,
     opts: &FileListOptions,
-    iconv: Option<&crate::filelist::iconv::FilenameConverter>,
+    iconv: Option<&crate::iconv::FilenameConverter>,
 ) -> Result<Vec<u8>> {
     let codec = opts.wire.int_codec;
 

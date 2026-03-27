@@ -3,7 +3,7 @@
 //! Each file entry is delta-encoded against the previous entry's fields.
 //! `DeltaState` tracks the "previous" values across sequential calls.
 
-use crate::filelist::entry::FileEntry;
+use crate::entry::FileEntry;
 
 /// Delta state maintained across sequential file entry encode/decode calls.
 #[derive(Debug, Clone, Default)]

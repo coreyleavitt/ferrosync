@@ -7,13 +7,13 @@ use std::collections::HashMap;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint::{read_varint, write_varint};
+use ferrosync_protocol::varint::{read_varint, write_varint};
+use ferrosync_types::error::ProtocolError;
 
 use super::flags::XmitFlags;
 use super::options::FileListOptions;
 use super::state::DeltaState;
-use crate::filelist::entry::FileEntry;
+use crate::entry::FileEntry;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 

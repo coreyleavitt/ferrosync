@@ -4,7 +4,7 @@
 //! directories as if they have a trailing `/` separator. This ensures that
 //! at any given directory level, regular files sort before subdirectories.
 
-use super::entry::{FileEntry, S_IFDIR, S_IFMT};
+use crate::entry::{FileEntry, S_IFDIR, S_IFMT};
 
 /// Sort a file list in rsync's canonical order.
 ///
@@ -256,7 +256,7 @@ pub fn f_name_cmp(a: &FileEntry, b: &FileEntry) -> std::cmp::Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filelist::entry::{S_IFDIR, S_IFREG};
+    use crate::entry::{S_IFDIR, S_IFREG};
 
     fn file_entry(name: &[u8], is_dir: bool) -> FileEntry {
         FileEntry {

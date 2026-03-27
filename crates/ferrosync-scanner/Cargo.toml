@@ -1,0 +1,18 @@
+[package]
+name = "ferrosync-scanner"
+description = "File list scanner with composable enrichers for ferrosync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+ferrosync-fs = { workspace = true }
+ferrosync-filter = { workspace = true }
+ferrosync-codec = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -31,8 +31,8 @@
 //! let result = session.run().await?;
 //! ```
 
-pub mod acl;
-pub mod chmod;
+pub use ferrosync_codec::acl;
+pub use ferrosync_codec::chmod;
 pub use ferrosync_delta as delta;
 pub mod engine;
 pub mod filelist;
@@ -40,8 +40,8 @@ pub use ferrosync_filter as filter;
 pub use ferrosync_fs as fs;
 pub use ferrosync_protocol as protocol;
 pub mod server;
+pub use ferrosync_codec::xattr;
 pub use ferrosync_transport as transport;
-pub mod xattr;
 
 // Re-export from ferrosync-types for backward compatibility.
 // All existing `use crate::{error,options,stats,types}::*` imports

@@ -80,4 +80,6 @@ ferrosync-protocol = { path = "crates/ferrosync-protocol" }
 ferrosync-fs = { path = "crates/ferrosync-fs" }
 ferrosync-transport = { path = "crates/ferrosync-transport" }
 ferrosync-types = { path = "crates/ferrosync-types" }
+ferrosync-codec = { path = "crates/ferrosync-codec" }
+ferrosync-scanner = { path = "crates/ferrosync-scanner" }
 

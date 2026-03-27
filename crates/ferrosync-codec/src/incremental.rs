@@ -11,15 +11,15 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint::{self, NdxState};
-use crate::protocol::wire_format::IntCodec;
+use ferrosync_protocol::varint::{self, NdxState};
+use ferrosync_protocol::wire_format::IntCodec;
+use ferrosync_types::error::ProtocolError;
 
-use super::codec::{
+use crate::codec::{
     recv_file_entry, send_file_entry, write_end_of_flist, DeltaState, FileListOptions,
     HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
 };
-use super::entry::FileEntry;
+use crate::entry::FileEntry;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -225,17 +225,17 @@ impl IncrementalSender {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filelist::entry::{S_IFDIR, S_IFREG};
-    use crate::protocol::wire_format::WireFormat;
-    use crate::types::{FileSize, UnixTimestamp};
+    use crate::entry::{S_IFDIR, S_IFREG};
+    use ferrosync_protocol::wire_format::WireFormat;
+    use ferrosync_types::types::{FileSize, UnixTimestamp};
     use std::io::Cursor;
 
     fn test_opts() -> FileListOptions {
         FileListOptions {
             wire: WireFormat::new(
                 31,
-                crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
-                    | crate::protocol::handshake::compat_flags::INC_RECURSE,
+                ferrosync_protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
+                    | ferrosync_protocol::handshake::compat_flags::INC_RECURSE,
             ),
             ..Default::default()
         }

@@ -1,6 +1,6 @@
 //! Transfer options that affect the file list wire format.
 
-use crate::protocol::wire_format::WireFormat;
+use ferrosync_protocol::wire_format::WireFormat;
 
 /// Options that control which fields are present in the file list wire format.
 #[derive(Debug, Clone)]
@@ -40,8 +40,8 @@ impl Default for FileListOptions {
         Self {
             wire: WireFormat::new(
                 31,
-                crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
-                    | crate::protocol::handshake::compat_flags::INC_RECURSE,
+                ferrosync_protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
+                    | ferrosync_protocol::handshake::compat_flags::INC_RECURSE,
             ),
             preserve_uid: false,
             preserve_gid: false,
@@ -65,8 +65,8 @@ impl FileListOptions {
     /// This bridges the handshake output to the file list codec, ensuring
     /// protocol version-specific behavior is correctly applied.
     pub fn from_protocol(
-        proto: &crate::protocol::handshake::NegotiatedProtocol,
-        opts: &crate::options::TransferConfig,
+        proto: &ferrosync_protocol::handshake::NegotiatedProtocol,
+        opts: &ferrosync_types::options::TransferConfig,
     ) -> Self {
         Self {
             wire: proto.wire().clone(),
@@ -79,7 +79,7 @@ impl FileListOptions {
             always_checksum: opts.checksum_mode(),
             checksum_len: proto.checksum.digest_len(),
             xmit_id0_names: proto.compat_flags()
-                & crate::protocol::handshake::compat_flags::ID0_NAMES
+                & ferrosync_protocol::handshake::compat_flags::ID0_NAMES
                 != 0,
             numeric_ids: opts.numeric_ids(),
             preserve_acls: opts.preserve_acls(),
@@ -91,8 +91,8 @@ impl FileListOptions {
     ///
     /// Alias for [`from_protocol`] for backward compatibility.
     pub fn from_protocol_legacy(
-        proto: &crate::protocol::handshake::NegotiatedProtocol,
-        opts: &crate::options::TransferOptions,
+        proto: &ferrosync_protocol::handshake::NegotiatedProtocol,
+        opts: &ferrosync_types::options::TransferOptions,
     ) -> Self {
         Self::from_protocol(proto, opts)
     }

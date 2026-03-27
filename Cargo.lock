@@ -1041,6 +1041,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrosync-codec"
+version = "0.3.0-beta.15"
+dependencies = [
+ "encoding_rs",
+ "ferrosync-protocol",
+ "ferrosync-types",
+ "proptest",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ferrosync-core"
 version = "0.3.0-beta.15"
 dependencies = [
@@ -1049,10 +1061,12 @@ dependencies = [
  "criterion",
  "encoding_rs",
  "fastcdc",
+ "ferrosync-codec",
  "ferrosync-delta",
  "ferrosync-filter",
  "ferrosync-fs",
  "ferrosync-protocol",
+ "ferrosync-scanner",
  "ferrosync-transport",
  "ferrosync-types",
  "filetime",
@@ -1132,6 +1146,18 @@ dependencies = [
  "ferrosync-core",
  "pyo3",
  "tokio",
+]
+
+[[package]]
+name = "ferrosync-scanner"
+version = "0.3.0-beta.15"
+dependencies = [
+ "ferrosync-codec",
+ "ferrosync-filter",
+ "ferrosync-fs",
+ "ferrosync-types",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

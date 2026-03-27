@@ -1,0 +1,19 @@
+[package]
+name = "ferrosync-codec"
+description = "rsync file list codec: entry encoding, ACL/xattr wire format, file list exchange"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+ferrosync-protocol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+encoding_rs = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+proptest = "1"

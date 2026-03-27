@@ -1,18 +1,18 @@
 //! Unit tests for the codec module.
 
 use super::*;
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFREG, WIRE_S_IFLNK};
-use crate::filelist::xmit::XMIT_TOP_DIR;
-use crate::protocol::wire_format::WireFormat;
-use crate::types::{FileSize, UnixTimestamp};
+use crate::entry::{FileEntry, S_IFDIR, S_IFREG, WIRE_S_IFLNK};
+use crate::xmit::XMIT_TOP_DIR;
+use ferrosync_protocol::wire_format::WireFormat;
+use ferrosync_types::types::{FileSize, UnixTimestamp};
 use std::io::Cursor;
 
 fn default_opts() -> FileListOptions {
     FileListOptions {
         wire: WireFormat::new(
             31,
-            crate::protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
-                | crate::protocol::handshake::compat_flags::INC_RECURSE,
+            ferrosync_protocol::handshake::compat_flags::VARINT_FLIST_FLAGS
+                | ferrosync_protocol::handshake::compat_flags::INC_RECURSE,
         ),
         ..Default::default()
     }
@@ -800,7 +800,7 @@ fn test_compute_xmit_flags_basic() {
 
 mod proptests {
     use super::*;
-    use crate::filelist::entry::S_IFREG;
+    use crate::entry::S_IFREG;
     use proptest::prelude::*;
 
     fn rt() -> tokio::runtime::Runtime {

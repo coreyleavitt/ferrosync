@@ -5,10 +5,11 @@
 //! and the server session (`server/session.rs`), eliminating code
 //! duplication.
 
-use crate::error::FsError;
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
-use crate::filter::FilterRuleList;
-use crate::fs::{DirEntry, FileSystem};
+use ferrosync_filter::FilterRuleList;
+use ferrosync_fs::{DirEntry, FileSystem};
+use ferrosync_types::entry::FileEntry;
+use ferrosync_types::error::FsError;
+use ferrosync_types::mode::{S_IFDIR, S_IFMT};
 
 /// Options controlling directory walk behavior.
 #[derive(Debug, Clone)]

@@ -53,7 +53,7 @@ pub use self::encode_entry as send_file_entry;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::ProtocolError;
+use ferrosync_types::error::ProtocolError;
 
 use super::entry::FileEntry;
 
@@ -90,7 +90,7 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     hlink_encoder: &mut HardLinkEncoder,
     hlink_info: Option<&HardLinkInfo>,
     entry_index: i32,
-    iconv: Option<&crate::filelist::iconv::FilenameConverter>,
+    iconv: Option<&crate::iconv::FilenameConverter>,
     acl_encoder: &mut crate::acl::AclEncoder,
     xattr_encoder: &mut crate::xattr::XattrEncoder,
 ) -> Result<()> {
@@ -195,7 +195,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     opts: &FileListOptions,
     hlink_decoder: &mut HardLinkDecoder,
     prev_entries: &[FileEntry],
-    iconv: Option<&crate::filelist::iconv::FilenameConverter>,
+    iconv: Option<&crate::iconv::FilenameConverter>,
     acl_decoder: &mut crate::acl::AclDecoder,
     xattr_decoder: &mut crate::xattr::XattrDecoder,
 ) -> Result<ReadEntryResult> {
@@ -256,8 +256,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     let checksum = fields::decode_checksum(r, mode, opts).await?;
 
     // --- ACL (after checksum, before xattrs) ---
-    let is_symlink =
-        (mode & crate::filelist::entry::S_IFMT) == crate::filelist::entry::WIRE_S_IFLNK;
+    let is_symlink = (mode & crate::entry::S_IFMT) == crate::entry::WIRE_S_IFLNK;
     let acl = if opts.preserve_acls && !is_symlink {
         crate::acl::decode_acl(r, mode, acl_decoder).await?
     } else {
@@ -273,8 +272,8 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
 
     let entry = FileEntry {
         name,
-        len: crate::types::FileSize(len),
-        mtime: crate::types::UnixTimestamp(mtime),
+        len: ferrosync_types::types::FileSize(len),
+        mtime: ferrosync_types::types::UnixTimestamp(mtime),
         mtime_nsec,
         mode,
         uid,

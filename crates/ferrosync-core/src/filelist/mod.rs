@@ -1,18 +1,15 @@
-//! File list encoding, decoding, and sorting for the rsync wire protocol.
+//! File list encoding, decoding, scanning, and sorting for the rsync wire protocol.
 //!
-//! This module implements Phase 2 of the ferrosync roadmap:
-//! - `entry` -- `FileEntry` struct with file metadata
-//! - `xmit` -- XMIT flag constants
-//! - `codec` -- Delta-encoded file entry encoder/decoder
-//! - `sort` -- Canonical sort order matching rsync's `f_name_cmp`
-//! - `incremental` -- Incremental file list exchange (protocol >= 30)
+//! This module re-exports from `ferrosync-codec` and `ferrosync-scanner`
+//! for backward compatibility.
 
-pub mod codec;
-pub mod entry;
-pub mod exchange;
-pub mod iconv;
-pub mod incremental;
-pub mod scanner;
-pub mod sort;
-pub mod walk;
-pub mod xmit;
+pub use ferrosync_codec::codec;
+pub use ferrosync_codec::entry;
+pub use ferrosync_codec::exchange;
+pub use ferrosync_codec::iconv;
+pub use ferrosync_codec::incremental;
+pub use ferrosync_codec::sort;
+pub use ferrosync_codec::xmit;
+
+pub use ferrosync_scanner as scanner;
+pub use ferrosync_scanner::walk;

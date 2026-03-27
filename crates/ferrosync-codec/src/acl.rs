@@ -6,8 +6,8 @@
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::ProtocolError;
-use crate::protocol::varint::{read_varint, write_varint};
+use ferrosync_protocol::varint::{read_varint, write_varint};
+use ferrosync_types::error::ProtocolError;
 
 // Re-export ACL type definitions from ferrosync-types.
 pub use ferrosync_types::entry::{AceKind, Acl, PosixAce, PosixAcl, PosixAclEntries};
@@ -370,7 +370,7 @@ pub async fn encode_acl<W: AsyncWrite + Unpin>(
     mode: u32,
     encoder: &mut AclEncoder,
 ) -> Result<()> {
-    let is_dir = (mode & crate::filelist::entry::S_IFMT) == crate::filelist::entry::S_IFDIR;
+    let is_dir = (mode & crate::entry::S_IFMT) == crate::entry::S_IFDIR;
 
     let empty = PosixAclEntries::default();
 
@@ -396,7 +396,7 @@ pub async fn decode_acl<R: AsyncRead + Unpin>(
     mode: u32,
     decoder: &mut AclDecoder,
 ) -> Result<Option<Acl>> {
-    let is_dir = (mode & crate::filelist::entry::S_IFMT) == crate::filelist::entry::S_IFDIR;
+    let is_dir = (mode & crate::entry::S_IFMT) == crate::entry::S_IFDIR;
 
     let access = decode_one_acl(r, &mut decoder.access_list).await?;
     let default = if is_dir {
@@ -642,7 +642,7 @@ mod tests {
             default: None,
         }));
 
-        let mode = crate::filelist::entry::S_IFREG | 0o644;
+        let mode = crate::entry::S_IFREG | 0o644;
         let mut buf = Vec::new();
         let mut encoder = AclEncoder::new();
         encode_acl(&mut buf, &acl, mode, &mut encoder)
@@ -681,7 +681,7 @@ mod tests {
             }),
         }));
 
-        let mode = crate::filelist::entry::S_IFDIR | 0o755;
+        let mode = crate::entry::S_IFDIR | 0o755;
         let mut buf = Vec::new();
         let mut encoder = AclEncoder::new();
         encode_acl(&mut buf, &acl, mode, &mut encoder)
@@ -698,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn test_encode_decode_none_acl() {
         // No ACL: sends empty and decodes as None.
-        let mode = crate::filelist::entry::S_IFREG | 0o644;
+        let mode = crate::entry::S_IFREG | 0o644;
         let mut buf = Vec::new();
         let mut encoder = AclEncoder::new();
         encode_acl(&mut buf, &None, mode, &mut encoder)
