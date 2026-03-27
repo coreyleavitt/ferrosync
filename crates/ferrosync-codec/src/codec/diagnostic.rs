@@ -47,231 +47,89 @@ pub enum DiagnosticResult {
 
 /// Diagnostic decoder that wraps a byte buffer and tracks positions.
 ///
-/// Uses the same decode logic as the real decoder but captures byte
-/// ranges for each field, enabling field-by-field comparison.
+/// Uses the `FieldVisitor` pattern via `DiagnosticDecoder` visitor.
+/// The field traversal order is defined once in `traverse_fields`,
+/// shared with the real encoder and decoder -- divergence is impossible.
 pub async fn diagnostic_decode_entry(
     data: &[u8],
     offset: &mut usize,
     state: &mut DeltaState,
     opts: &FileListOptions,
 ) -> Result<DiagnosticResult> {
-    let mut fields = Vec::new();
+    use super::visitor;
+
+    let mut diag = visitor::DiagnosticDecoder {
+        data,
+        offset: *offset,
+        fields: Vec::new(),
+    };
 
     // --- Flags ---
-    let flags_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
+    let flags_start = diag.offset;
+    let mut cursor = Cursor::new(&data[diag.offset..]);
     let flags = match super::flags::decode_xmit_flags(&mut cursor, opts).await? {
         DecodedFlags::Entry(f) => f,
         DecodedFlags::EndOfList { io_error } => {
             let consumed = cursor.position() as usize;
-            *offset += consumed;
+            *offset = diag.offset + consumed;
             return Ok(DiagnosticResult::EndOfList { io_error });
         }
     };
     let consumed = cursor.position() as usize;
-    fields.push(DecodedField {
-        name: "xmit_flags",
-        offset: flags_start,
-        length: consumed,
-        raw_bytes: data[flags_start..flags_start + consumed].to_vec(),
-        decoded_value: format!("0x{:04x}", flags.raw()),
-    });
-    *offset += consumed;
+    diag.record("xmit_flags", consumed, flags_start, format!("0x{:04x}", flags.raw()));
 
     // --- Filename ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
+    let field_start = diag.offset;
+    let mut cursor = Cursor::new(&data[diag.offset..]);
     let name = super::fields::decode_filename(&mut cursor, state, flags, opts, None).await?;
     let consumed = cursor.position() as usize;
-    fields.push(DecodedField {
-        name: "filename",
-        offset: field_start,
-        length: consumed,
-        raw_bytes: data[field_start..field_start + consumed].to_vec(),
-        decoded_value: String::from_utf8_lossy(&name).to_string(),
-    });
-    *offset += consumed;
+    diag.record("filename", consumed, field_start, String::from_utf8_lossy(&name).to_string());
 
     // --- Hard-link back-reference ---
     if opts.preserve_hard_links && flags.hlinked() {
-        let field_start = *offset;
-        let mut cursor = Cursor::new(&data[*offset..]);
+        let field_start = diag.offset;
+        let mut cursor = Cursor::new(&data[diag.offset..]);
         let ndx = ferrosync_protocol::varint::read_varint(&mut cursor).await? as i32;
         let consumed = cursor.position() as usize;
-        fields.push(DecodedField {
-            name: if flags.hlink_first() {
-                "hlink_self_ref"
-            } else {
-                "hlink_backref"
-            },
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("{ndx}"),
-        });
-        *offset += consumed;
+        let field_name = if flags.hlink_first() {
+            "hlink_self_ref"
+        } else {
+            "hlink_backref"
+        };
+        diag.record(field_name, consumed, field_start, format!("{ndx}"));
 
         if !flags.hlink_first() {
             // Abbreviated entry -- update state and return.
             state.prev_name = name;
-            return Ok(DiagnosticResult::Entry(DecodedEntry { fields }));
+            *offset = diag.offset;
+            return Ok(DiagnosticResult::Entry(DecodedEntry {
+                fields: diag.fields,
+            }));
         }
     }
 
-    // --- File length ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let len = super::fields::decode_file_length(&mut cursor, opts).await?;
-    let consumed = cursor.position() as usize;
-    fields.push(DecodedField {
-        name: "file_length",
-        offset: field_start,
-        length: consumed,
-        raw_bytes: data[field_start..field_start + consumed].to_vec(),
-        decoded_value: format!("{len}"),
-    });
-    *offset += consumed;
-
-    // --- Modification time ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let mtime = super::fields::decode_mtime(&mut cursor, state, flags, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "mtime",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("{mtime}"),
-        });
+    // --- Metadata fields via visitor traversal ---
+    let mut values = visitor::FieldValues {
+        name,
+        ..Default::default()
+    };
+    {
+        let mut ctx = visitor::FieldContext {
+            flags,
+            state,
+            opts,
+            values: &mut values,
+        };
+        visitor::traverse_fields(&mut diag, &mut ctx).await?;
     }
-    *offset += consumed;
 
-    // --- Mtime nanoseconds ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let mtime_nsec = super::fields::decode_mtime_nsec(&mut cursor, flags, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "mtime_nsec",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("{mtime_nsec}"),
-        });
-    }
-    *offset += consumed;
+    // --- Update delta state (shared with real decoder) ---
+    values.update_state(state);
 
-    // --- File mode ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let mode = super::fields::decode_mode(&mut cursor, state, flags).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "mode",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("0o{mode:06o}"),
-        });
-    }
-    *offset += consumed;
-
-    // --- UID ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let (uid, user_name) = super::fields::decode_uid(&mut cursor, state, flags, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "uid",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("{uid} ({})", String::from_utf8_lossy(&user_name)),
-        });
-    }
-    *offset += consumed;
-
-    // --- GID ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let (gid, group_name) = super::fields::decode_gid(&mut cursor, state, flags, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "gid",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("{gid} ({})", String::from_utf8_lossy(&group_name)),
-        });
-    }
-    *offset += consumed;
-
-    // --- Device numbers ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let rdev = super::fields::decode_rdev(&mut cursor, mode, state, flags, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "rdev",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: format!("{rdev}"),
-        });
-    }
-    *offset += consumed;
-
-    // --- Symlink target ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let link_target = super::fields::decode_symlink(&mut cursor, mode, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "symlink_target",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: String::from_utf8_lossy(&link_target).to_string(),
-        });
-    }
-    *offset += consumed;
-
-    // --- File checksum ---
-    let field_start = *offset;
-    let mut cursor = Cursor::new(&data[*offset..]);
-    let checksum = super::fields::decode_checksum(&mut cursor, mode, opts).await?;
-    let consumed = cursor.position() as usize;
-    if consumed > 0 {
-        fields.push(DecodedField {
-            name: "checksum",
-            offset: field_start,
-            length: consumed,
-            raw_bytes: data[field_start..field_start + consumed].to_vec(),
-            decoded_value: hex::encode(&checksum),
-        });
-    }
-    *offset += consumed;
-
-    // Update delta state.
-    state.prev_name = name;
-    state.prev_mtime = mtime;
-    state.prev_mode = mode;
-    state.prev_uid = uid;
-    state.prev_gid = gid;
-    state.prev_rdev = rdev;
-    state.prev_rdev_major = (rdev >> 8) as u32;
-    state.prev_user_name = user_name;
-    state.prev_group_name = group_name;
-
-    Ok(DiagnosticResult::Entry(DecodedEntry { fields }))
+    *offset = diag.offset;
+    Ok(DiagnosticResult::Entry(DecodedEntry {
+        fields: diag.fields,
+    }))
 }
 
 /// Decode all entries from a byte buffer, returning field-level diagnostics.
@@ -374,9 +232,3 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-// Conditionally use hex crate or inline implementation.
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-}

@@ -28,6 +28,7 @@ pub mod flags;
 pub mod hlink;
 pub mod options;
 pub mod state;
+pub mod visitor;
 
 #[cfg(test)]
 mod tests;
@@ -78,9 +79,21 @@ pub enum ReadEntryResult {
 
 /// Encode a file entry to the wire format.
 ///
-/// The encoder orchestrator calls per-field functions in the canonical order.
-/// Flag computation is separated into `compute_xmit_flags` (a pure function),
-/// and each field encode function is independently testable.
+/// Uses the `FieldVisitor` pattern: field order is defined once in
+/// `traverse_fields`, and the `Encoder` visitor writes each field to
+/// the wire. Adding a new field requires implementing `visit_X` on the
+/// visitor trait -- the compiler forces all three visitors (Encoder,
+/// Decoder, DiagnosticDecoder) to implement it.
+///
+/// ## Adding a new field
+///
+/// 1. Add `encode_X` / `decode_X` to `fields.rs`
+/// 2. Add field to `visitor::FieldValues`
+/// 3. Add `async fn visit_X(...)` to `visitor::FieldVisitor`
+/// 4. Implement `visit_X` in Encoder, Decoder, and DiagnosticDecoder
+/// 5. Add `visitor.visit_X(ctx).await?;` in `visitor::traverse_fields`
+/// 6. Update `compute_xmit_flags()` in `flags.rs` if delta-encoded
+/// 7. Update `DeltaState` and `update_delta_state()` in `state.rs`
 #[allow(clippy::too_many_arguments)]
 pub async fn encode_entry<W: AsyncWrite + Unpin>(
     w: &mut W,
@@ -105,18 +118,17 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     let hlink_action = hlink::resolve_hlink_action(opts, hlink_info, hlink_encoder, entry_index);
 
     // --- Compute XMIT flags (pure function) ---
-    let flags = compute_xmit_flags(entry, &wire_name, state, opts, &hlink_action);
+    let xmit_flags = compute_xmit_flags(entry, &wire_name, state, opts, &hlink_action);
 
     // --- Write XMIT flags ---
-    encode_xmit_flags(w, flags, opts).await?;
+    encode_xmit_flags(w, xmit_flags, opts).await?;
 
     // --- Filename ---
-    fields::encode_filename(w, &wire_name, state, flags, opts).await?;
+    fields::encode_filename(w, &wire_name, state, xmit_flags, opts).await?;
 
     // --- Hard-link back-reference ---
     match hlink::encode_hlink(w, &hlink_action).await? {
         HlinkEncodeResult::Abbreviated => {
-            // Duplicate entry: remaining fields were skipped.
             state::update_delta_state(state, entry);
             state.prev_name = wire_name;
             return Ok(());
@@ -124,55 +136,25 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
         HlinkEncodeResult::Continue => {}
     }
 
-    // --- File length ---
-    fields::encode_file_length(w, entry.len.bytes(), opts).await?;
-
-    // --- Modification time ---
-    fields::encode_mtime(w, entry.mtime.secs(), flags, opts).await?;
-
-    // --- Mtime nanoseconds ---
-    fields::encode_mtime_nsec(w, entry.mtime_nsec, flags, opts).await?;
-
-    // --- File mode ---
-    fields::encode_mode(w, entry.mode, flags).await?;
-
-    // --- UID ---
-    fields::encode_uid(w, entry.uid, &entry.user_name, flags, opts).await?;
-
-    // --- GID ---
-    fields::encode_gid(w, entry.gid, &entry.group_name, flags, opts).await?;
-
-    // --- Device numbers ---
-    fields::encode_rdev(
-        w,
-        entry.mode,
-        entry.rdev,
-        entry.rdev_major(),
-        entry.rdev_minor(),
-        flags,
-        opts,
-    )
-    .await?;
-
-    // --- Symlink target ---
-    fields::encode_symlink(w, entry.mode, &entry.link_target, opts).await?;
-
-    // --- File checksum ---
-    fields::encode_checksum(w, entry.mode, &entry.checksum, opts).await?;
-
-    // --- ACL (after checksum, before xattrs) ---
-    if opts.preserve_acls && !entry.is_symlink() {
-        crate::acl::encode_acl(w, &entry.acl, entry.mode, acl_encoder).await?;
+    // --- Metadata fields via visitor traversal ---
+    let mut values = visitor::FieldValues::from_entry(entry, wire_name);
+    {
+        let mut ctx = visitor::FieldContext {
+            flags: xmit_flags,
+            state,
+            opts,
+            values: &mut values,
+        };
+        let mut enc = visitor::Encoder {
+            writer: w,
+            acl_encoder,
+            xattr_encoder,
+        };
+        visitor::traverse_fields(&mut enc, &mut ctx).await?;
     }
 
-    // --- Xattrs (after ACLs) ---
-    if opts.preserve_xattrs {
-        crate::xattr::encode_xattrs(w, &entry.xattrs, xattr_encoder).await?;
-    }
-
-    // --- Update delta state ---
-    state::update_delta_state(state, entry);
-    state.prev_name = wire_name;
+    // --- Update delta state (after ctx is dropped) ---
+    values.update_state(state);
 
     Ok(())
 }
@@ -186,8 +168,8 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
 /// Returns `ReadEntryResult::Entry` with the decoded entry, or
 /// `ReadEntryResult::EndOfList` when the end-of-list marker is encountered.
 ///
-/// The decoder orchestrator calls per-field functions in the same order as
-/// the encoder, ensuring symmetric encode/decode.
+/// Uses the `FieldVisitor` pattern: `traverse_fields` defines the field
+/// order once, and the `Decoder` visitor reads each field from the wire.
 #[allow(clippy::too_many_arguments)]
 pub async fn decode_entry<R: AsyncRead + Unpin>(
     r: &mut R,
@@ -200,7 +182,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     xattr_decoder: &mut crate::xattr::XattrDecoder,
 ) -> Result<ReadEntryResult> {
     // --- Read XMIT flags ---
-    let flags = match decode_xmit_flags(r, opts).await? {
+    let xmit_flags = match decode_xmit_flags(r, opts).await? {
         DecodedFlags::Entry(f) => f,
         DecodedFlags::EndOfList { io_error } => {
             return Ok(ReadEntryResult::EndOfList { io_error });
@@ -208,12 +190,12 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     };
 
     // --- Filename ---
-    let name = fields::decode_filename(r, state, flags, opts, iconv).await?;
+    let name = fields::decode_filename(r, state, xmit_flags, opts, iconv).await?;
 
     // --- Hard-link back-reference ---
     match hlink::decode_hlink(
         r,
-        flags,
+        xmit_flags,
         opts,
         hlink_decoder,
         prev_entries,
@@ -228,69 +210,29 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
         hlink::HlinkDecodeResult::Continue => {}
     }
 
-    // --- File length ---
-    let len = fields::decode_file_length(r, opts).await?;
-
-    // --- Modification time ---
-    let mtime = fields::decode_mtime(r, state, flags, opts).await?;
-
-    // --- Mtime nanoseconds ---
-    let mtime_nsec = fields::decode_mtime_nsec(r, flags, opts).await?;
-
-    // --- File mode ---
-    let mode = fields::decode_mode(r, state, flags).await?;
-
-    // --- UID ---
-    let (uid, user_name) = fields::decode_uid(r, state, flags, opts).await?;
-
-    // --- GID ---
-    let (gid, group_name) = fields::decode_gid(r, state, flags, opts).await?;
-
-    // --- Device numbers ---
-    let rdev = fields::decode_rdev(r, mode, state, flags, opts).await?;
-
-    // --- Symlink target ---
-    let link_target = fields::decode_symlink(r, mode, opts).await?;
-
-    // --- File checksum ---
-    let checksum = fields::decode_checksum(r, mode, opts).await?;
-
-    // --- ACL (after checksum, before xattrs) ---
-    let is_symlink = (mode & crate::entry::S_IFMT) == crate::entry::WIRE_S_IFLNK;
-    let acl = if opts.preserve_acls && !is_symlink {
-        crate::acl::decode_acl(r, mode, acl_decoder).await?
-    } else {
-        None
-    };
-
-    // --- Xattrs (after ACLs) ---
-    let xattrs = if opts.preserve_xattrs {
-        crate::xattr::decode_xattrs(r, xattr_decoder).await?
-    } else {
-        None
-    };
-
-    let entry = FileEntry {
+    // --- Metadata fields via visitor traversal ---
+    let mut values = visitor::FieldValues {
         name,
-        len: ferrosync_types::types::FileSize(len),
-        mtime: ferrosync_types::types::UnixTimestamp(mtime),
-        mtime_nsec,
-        mode,
-        uid,
-        gid,
-        rdev,
-        link_target,
-        checksum,
-        flags: flags.raw(),
-        user_name,
-        group_name,
-        hlink_source: None,
-        hard_link_info: None,
-        acl,
-        xattrs,
+        ..Default::default()
     };
+    {
+        let mut ctx = visitor::FieldContext {
+            flags: xmit_flags,
+            state,
+            opts,
+            values: &mut values,
+        };
+        let mut dec = visitor::Decoder {
+            reader: r,
+            acl_decoder,
+            xattr_decoder,
+        };
+        visitor::traverse_fields(&mut dec, &mut ctx).await?;
+    }
 
-    // --- Update delta state ---
+    let entry = values.into_entry(xmit_flags);
+
+    // --- Update delta state (after ctx is dropped) ---
     state::update_delta_state(state, &entry);
 
     Ok(ReadEntryResult::Entry(Box::new(entry)))
