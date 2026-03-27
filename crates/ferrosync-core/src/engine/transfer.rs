@@ -151,16 +151,15 @@ async fn execute_transfer_impl(
     })?;
 
     // Build filter rules from options.
-    let mut filters =
-        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    let mut filters = FilterRuleList::from_options(
+        options.exclude(),
+        options.include(),
+        options.filter(),
+        options.include_from(),
+        options.exclude_from(),
+    )?;
     if options.cvs_exclude() {
         filters.add_cvs_excludes();
-    }
-    for path in options.exclude_from() {
-        filters.add_excludes_from_file(path)?;
-    }
-    for path in options.include_from() {
-        filters.add_includes_from_file(path)?;
     }
 
     // Build the source file list.
@@ -516,16 +515,15 @@ async fn execute_transfer_streaming_impl(
 
     let receiver = super::receiver_engine::ReceiverRef::new(fs, dest, options);
 
-    let mut filters =
-        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    let mut filters = FilterRuleList::from_options(
+        options.exclude(),
+        options.include(),
+        options.filter(),
+        options.include_from(),
+        options.exclude_from(),
+    )?;
     if options.cvs_exclude() {
         filters.add_cvs_excludes();
-    }
-    for path in options.exclude_from() {
-        filters.add_excludes_from_file(path)?;
-    }
-    for path in options.include_from() {
-        filters.add_includes_from_file(path)?;
     }
 
     let mut index = 0i32;

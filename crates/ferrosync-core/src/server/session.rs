@@ -480,13 +480,12 @@ fn build_module_entries(
     // population in clientserver.c. Order: filters (highest priority), includes,
     // then excludes -- same as FilterRuleList::from_options.
     let mut filters =
-        FilterRuleList::from_options(&module.exclude, &module.include, &module.filter).map_err(
-            |e| {
+        FilterRuleList::from_options(&module.exclude, &module.include, &module.filter, &[], &[])
+            .map_err(|e| {
                 SessionError::Protocol(ProtocolError::Handshake {
                     message: format!("invalid module filter rule: {e}"),
                 })
-            },
-        )?;
+            })?;
 
     let dir_mode = if recursive {
         crate::options::DirectoryMode::Recurse

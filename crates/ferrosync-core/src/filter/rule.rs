@@ -96,23 +96,37 @@ impl FilterRuleList {
         Ok(())
     }
 
-    /// Build a filter rule list from [`TransferOptions`] exclude/include/filter lists.
+    /// Build a filter rule list from all filter sources.
+    ///
+    /// Order: filter rules first, then includes (inline + from-file),
+    /// then excludes (from-file + inline). This ensures include rules
+    /// take priority over excludes (first match wins in rsync).
     pub fn from_options(
         excludes: &[String],
         includes: &[String],
         filters: &[String],
+        include_from: &[std::path::PathBuf],
+        exclude_from: &[std::path::PathBuf],
     ) -> Result<Self, FilterError> {
         let mut list = Self::new();
 
-        // Filter rules are added first (they have highest priority in rsync).
+        // Filter rules first (highest priority).
         for f in filters {
             list.add_rule(f)?;
         }
-        // Then includes.
+        // Inline includes.
         for i in includes {
             list.add_include(i)?;
         }
-        // Then excludes.
+        // Include-from files.
+        for path in include_from {
+            list.add_includes_from_file(path)?;
+        }
+        // Exclude-from files.
+        for path in exclude_from {
+            list.add_excludes_from_file(path)?;
+        }
+        // Inline excludes last.
         for e in excludes {
             list.add_exclude(e)?;
         }
@@ -327,7 +341,7 @@ mod tests {
         let includes = vec!["important.tmp".to_string()];
         let filters = vec![];
 
-        let list = FilterRuleList::from_options(&excludes, &includes, &filters).unwrap();
+        let list = FilterRuleList::from_options(&excludes, &includes, &filters, &[], &[]).unwrap();
         assert_eq!(list.len(), 3);
 
         // include rule comes before exclude, so important.tmp is included.
@@ -341,7 +355,7 @@ mod tests {
         let includes = vec!["*.secret".to_string()];
         let excludes = vec![];
 
-        let list = FilterRuleList::from_options(&excludes, &includes, &filters).unwrap();
+        let list = FilterRuleList::from_options(&excludes, &includes, &filters, &[], &[]).unwrap();
 
         // Filter rule comes first, overrides the include.
         assert!(!list.is_included(b"password.secret", false));

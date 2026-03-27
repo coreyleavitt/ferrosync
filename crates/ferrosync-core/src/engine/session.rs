@@ -886,16 +886,15 @@ async fn run_pull(
     }
 
     // Delete extraneous files before/during the transfer.
-    let mut filters =
-        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    let mut filters = FilterRuleList::from_options(
+        options.exclude(),
+        options.include(),
+        options.filter(),
+        options.include_from(),
+        options.exclude_from(),
+    )?;
     if options.cvs_exclude() {
         filters.add_cvs_excludes();
-    }
-    for path in options.exclude_from() {
-        filters.add_excludes_from_file(path)?;
-    }
-    for path in options.include_from() {
-        filters.add_includes_from_file(path)?;
     }
     let delete_excluded = options.delete() == DeleteMode::Excluded;
     let delete_budget = delete::DeleteBudget::new(options.max_delete());
@@ -1079,16 +1078,15 @@ fn collect_filter_list(options: &TransferConfig) -> Result<Vec<u8>> {
 /// Build FileEntry list from source paths in options.
 fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result<Vec<FileEntry>> {
     let source_paths = options.source();
-    let mut filters =
-        FilterRuleList::from_options(options.exclude(), options.include(), options.filter())?;
+    let mut filters = FilterRuleList::from_options(
+        options.exclude(),
+        options.include(),
+        options.filter(),
+        options.include_from(),
+        options.exclude_from(),
+    )?;
     if options.cvs_exclude() {
         filters.add_cvs_excludes();
-    }
-    for path in options.exclude_from() {
-        filters.add_excludes_from_file(path)?;
-    }
-    for path in options.include_from() {
-        filters.add_includes_from_file(path)?;
     }
 
     let dir_mode = if options.recursive() {
