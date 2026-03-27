@@ -7,6 +7,7 @@
 //! error enums, and semantic newtypes -- with zero implementation logic.
 
 pub mod constants;
+pub mod entry;
 pub mod error;
 pub mod mode;
 pub mod options;

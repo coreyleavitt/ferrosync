@@ -1,0 +1,20 @@
+[package]
+name = "ferrosync-fs"
+description = "Filesystem abstraction layer for ferrosync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+tracing = { workspace = true }
+memmap2 = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+filetime = "0.2"
+xattr = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

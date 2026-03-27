@@ -21,13 +21,8 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 // Types
 // ---------------------------------------------------------------------------
 
-/// Hard-link identity from the source filesystem.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HardLinkInfo {
-    pub dev: u64,
-    pub ino: u64,
-    pub nlink: u64,
-}
+// Re-export from ferrosync-types.
+pub use ferrosync_types::entry::HardLinkInfo;
 
 /// What to do with a file during hard-link encoding.
 #[derive(Debug)]

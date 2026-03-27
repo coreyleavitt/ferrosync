@@ -13,28 +13,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::error::ProtocolError;
 use crate::protocol::varint::{read_varint, write_varint};
 
+// Re-export xattr type definitions from ferrosync-types.
+pub use ferrosync_types::entry::{ExtendedAttributes, XattrEntry};
+
 type Result<T> = std::result::Result<T, ProtocolError>;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Extended attributes for a file.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ExtendedAttributes {
-    /// Individual xattr entries, sorted by name for deterministic dedup.
-    pub entries: Vec<XattrEntry>,
-}
-
-/// A single extended attribute.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct XattrEntry {
-    /// Attribute name (null-terminated on wire, stored WITH null terminator
-    /// to match rsync wire format).
-    pub name: Vec<u8>,
-    /// Attribute value.
-    pub value: Vec<u8>,
-}
 
 // ---------------------------------------------------------------------------
 // XattrEncoder / XattrDecoder -- wire format with dedup

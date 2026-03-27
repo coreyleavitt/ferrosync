@@ -7,8 +7,8 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
-use crate::error::FsError;
-use crate::fs::{DirEntry, FileData, FileMetadata, FileSystem};
+use crate::{DirEntry, FileData, FileMetadata, FileSystem};
+use ferrosync_types::error::FsError;
 
 type Result<T> = std::result::Result<T, FsError>;
 

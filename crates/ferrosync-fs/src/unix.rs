@@ -3,11 +3,11 @@
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
-use crate::error::FsError;
+use ferrosync_types::error::FsError;
 
-use super::atomic_writer::{unique_tmp_name, AtomicFileWriter};
-use super::metadata::FileMetadata;
-use super::{DirEntry, FileSystem};
+use crate::atomic_writer::{unique_tmp_name, AtomicFileWriter};
+use crate::metadata::FileMetadata;
+use crate::{DirEntry, FileSystem};
 
 type Result<T> = std::result::Result<T, FsError>;
 
@@ -37,8 +37,8 @@ impl UnixFileSystem {
 
     fn metadata_from_std(m: &std::fs::Metadata) -> FileMetadata {
         FileMetadata {
-            len: crate::types::FileSize(m.len() as i64),
-            mtime: crate::types::UnixTimestamp(m.mtime()),
+            len: ferrosync_types::types::FileSize(m.len() as i64),
+            mtime: ferrosync_types::types::UnixTimestamp(m.mtime()),
             mtime_nsec: m.mtime_nsec() as u32,
             mode: m.mode(),
             uid: m.uid(),
@@ -286,26 +286,26 @@ impl FileSystem for UnixFileSystem {
             .map(|_| ())
     }
 
-    fn map_file(&self, path: &Path) -> Result<super::FileData> {
+    fn map_file(&self, path: &Path) -> Result<crate::FileData> {
         let meta = std::fs::metadata(path).map_err(|e| Self::map_io_err(path, e))?;
         let len = meta.len() as i64;
         if len == 0 {
-            return Ok(super::FileData::Empty);
+            return Ok(crate::FileData::Empty);
         }
-        if len < super::MMAP_THRESHOLD {
+        if len < crate::MMAP_THRESHOLD {
             let data = std::fs::read(path).map_err(|e| Self::map_io_err(path, e))?;
-            return Ok(super::FileData::Vec(data));
+            return Ok(crate::FileData::Vec(data));
         }
         let file = std::fs::File::open(path).map_err(|e| Self::map_io_err(path, e))?;
         // SAFETY: The file is not truncated while mapped. In rsync's protocol,
         // the sender reads its own source files (not modified during transfer),
         // and the receiver's basis file is overwritten via temp + atomic rename.
         match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(mmap) => Ok(super::FileData::Mmap(mmap)),
+            Ok(mmap) => Ok(crate::FileData::Mmap(mmap)),
             Err(_) => {
                 // Fallback to read if mmap fails (e.g. some FUSE mounts).
                 let data = std::fs::read(path).map_err(|e| Self::map_io_err(path, e))?;
-                Ok(super::FileData::Vec(data))
+                Ok(crate::FileData::Vec(data))
             }
         }
     }
@@ -411,8 +411,8 @@ mod tests {
 
         let meta = fs.lstat(&link_path).unwrap();
         assert_eq!(
-            meta.mode & crate::filelist::entry::S_IFMT,
-            crate::filelist::entry::S_IFLNK
+            meta.mode & ferrosync_types::mode::S_IFMT,
+            ferrosync_types::mode::S_IFLNK
         );
     }
 
@@ -424,7 +424,7 @@ mod tests {
 
         fs.set_mtime(&path, 1000000, 0).unwrap();
         let meta = fs.stat(&path).unwrap();
-        assert_eq!(meta.mtime, crate::types::UnixTimestamp(1000000));
+        assert_eq!(meta.mtime, ferrosync_types::types::UnixTimestamp(1000000));
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         let meta = fs.stat(&path).unwrap();
         let entry = meta.to_file_entry(b"entry_test.txt".to_vec());
         assert_eq!(entry.name, b"entry_test.txt");
-        assert_eq!(entry.len, crate::types::FileSize(9));
+        assert_eq!(entry.len, ferrosync_types::types::FileSize(9));
         assert!(entry.is_file());
     }
 

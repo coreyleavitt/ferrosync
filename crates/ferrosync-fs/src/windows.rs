@@ -6,12 +6,12 @@ use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::error::FsError;
-use crate::filelist::entry::{S_IFDIR, S_IFREG, WIRE_S_IFLNK};
+use ferrosync_types::error::FsError;
+use ferrosync_types::mode::{S_IFDIR, S_IFREG, WIRE_S_IFLNK};
 
-use super::atomic_writer::{unique_tmp_name, AtomicFileWriter};
-use super::metadata::FileMetadata;
-use super::{DirEntry, FileSystem};
+use crate::atomic_writer::{unique_tmp_name, AtomicFileWriter};
+use crate::metadata::FileMetadata;
+use crate::{DirEntry, FileSystem};
 
 type Result<T> = std::result::Result<T, FsError>;
 
@@ -99,8 +99,8 @@ impl WindowsFileSystem {
         let is_dir = m.is_dir();
 
         FileMetadata {
-            len: crate::types::FileSize(m.len() as i64),
-            mtime: crate::types::UnixTimestamp(mtime),
+            len: ferrosync_types::types::FileSize(m.len() as i64),
+            mtime: ferrosync_types::types::UnixTimestamp(mtime),
             mtime_nsec,
             mode: Self::mode_from_attrs(attrs, is_dir),
             uid: 0,
@@ -348,25 +348,25 @@ impl FileSystem for WindowsFileSystem {
             .map(|_| ())
     }
 
-    fn map_file(&self, path: &Path) -> Result<super::FileData> {
+    fn map_file(&self, path: &Path) -> Result<crate::FileData> {
         let meta = fs::metadata(path).map_err(|e| Self::map_io_err(path, e))?;
         let len = meta.len() as i64;
         if len == 0 {
-            return Ok(super::FileData::Empty);
+            return Ok(crate::FileData::Empty);
         }
-        if len < super::MMAP_THRESHOLD {
+        if len < crate::MMAP_THRESHOLD {
             let data = fs::read(path).map_err(|e| Self::map_io_err(path, e))?;
-            return Ok(super::FileData::Vec(data));
+            return Ok(crate::FileData::Vec(data));
         }
         let file = fs::File::open(path).map_err(|e| Self::map_io_err(path, e))?;
         // SAFETY: The file is not truncated while mapped. In rsync's protocol,
         // the sender reads its own source files (not modified during transfer),
         // and the receiver's basis file is overwritten via temp + atomic rename.
         match unsafe { memmap2::Mmap::map(&file) } {
-            Ok(mmap) => Ok(super::FileData::Mmap(mmap)),
+            Ok(mmap) => Ok(crate::FileData::Mmap(mmap)),
             Err(_) => {
                 let data = fs::read(path).map_err(|e| Self::map_io_err(path, e))?;
-                Ok(super::FileData::Vec(data))
+                Ok(crate::FileData::Vec(data))
             }
         }
     }

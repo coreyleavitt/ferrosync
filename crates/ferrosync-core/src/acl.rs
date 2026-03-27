@@ -9,52 +9,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::ProtocolError;
 use crate::protocol::varint::{read_varint, write_varint};
 
+// Re-export ACL type definitions from ferrosync-types.
+pub use ferrosync_types::entry::{AceKind, Acl, PosixAce, PosixAcl, PosixAclEntries};
+
 type Result<T> = std::result::Result<T, ProtocolError>;
-
-// ---------------------------------------------------------------------------
-// ACL types
-// ---------------------------------------------------------------------------
-
-/// Abstract ACL representation. Extensible for future non-POSIX ACLs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Acl {
-    Posix(PosixAcl),
-}
-
-/// POSIX ACL with access and optional default (directories only).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PosixAcl {
-    pub access: PosixAclEntries,
-    pub default: Option<PosixAclEntries>,
-}
-
-/// A set of POSIX ACL entries.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PosixAclEntries {
-    pub user_obj: Option<u32>,
-    pub group_obj: Option<u32>,
-    pub mask: Option<u32>,
-    pub other: Option<u32>,
-    pub named: Vec<PosixAce>,
-}
-
-// Derive Default: all fields default to None/empty.
-
-/// A named ACL entry (user or group with specific ID).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PosixAce {
-    pub kind: AceKind,
-    pub id: u32,
-    pub name: Option<Vec<u8>>,
-    pub access: u32,
-}
-
-/// Whether a named ACE applies to a user or group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AceKind {
-    User,
-    Group,
-}
 
 // ---------------------------------------------------------------------------
 // Linux kernel POSIX ACL binary format

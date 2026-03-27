@@ -77,5 +77,6 @@ ferrosync-core = { path = "crates/ferrosync-core" }
 ferrosync-delta = { path = "crates/ferrosync-delta" }
 ferrosync-filter = { path = "crates/ferrosync-filter" }
 ferrosync-protocol = { path = "crates/ferrosync-protocol" }
+ferrosync-fs = { path = "crates/ferrosync-fs" }
 ferrosync-types = { path = "crates/ferrosync-types" }
 

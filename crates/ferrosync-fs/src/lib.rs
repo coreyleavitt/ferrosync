@@ -23,7 +23,7 @@ pub use metadata::FileMetadata;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use crate::error::FsError;
+use ferrosync_types::error::FsError;
 
 type Result<T> = std::result::Result<T, FsError>;
 

@@ -37,7 +37,7 @@ pub use ferrosync_delta as delta;
 pub mod engine;
 pub mod filelist;
 pub use ferrosync_filter as filter;
-pub mod fs;
+pub use ferrosync_fs as fs;
 pub use ferrosync_protocol as protocol;
 pub mod server;
 pub mod transport;

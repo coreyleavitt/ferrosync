@@ -684,11 +684,11 @@ impl PyFileEntry {
     }
     #[getter]
     fn size(&self) -> i64 {
-        self.inner.len
+        self.inner.len.bytes()
     }
     #[getter]
     fn mtime(&self) -> i64 {
-        self.inner.mtime
+        self.inner.mtime.secs()
     }
     #[getter]
     fn mtime_nsec(&self) -> u32 {

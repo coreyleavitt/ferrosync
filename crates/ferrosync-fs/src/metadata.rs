@@ -1,6 +1,8 @@
 //! Platform-independent file metadata.
 
-use crate::types::{FileSize, UnixTimestamp};
+use ferrosync_types::entry::{FileEntry, HardLinkInfo};
+use ferrosync_types::mode::*;
+use ferrosync_types::types::{FileSize, UnixTimestamp};
 
 /// File metadata used for transfer decisions and attribute preservation.
 #[derive(Debug, Clone, Default)]
@@ -29,9 +31,9 @@ pub struct FileMetadata {
 
 impl FileMetadata {
     /// Get hard-link identity info (only meaningful when nlink > 1).
-    pub fn hard_link_info(&self) -> Option<crate::filelist::codec::HardLinkInfo> {
+    pub fn hard_link_info(&self) -> Option<HardLinkInfo> {
         if self.nlink > 1 {
-            Some(crate::filelist::codec::HardLinkInfo {
+            Some(HardLinkInfo {
                 dev: self.dev,
                 ino: self.ino,
                 nlink: self.nlink,
@@ -41,15 +43,14 @@ impl FileMetadata {
         }
     }
 
-    /// Convert to a [`crate::filelist::entry::FileEntry`] for file list building.
-    pub fn to_file_entry(&self, name: Vec<u8>) -> crate::filelist::entry::FileEntry {
-        use crate::filelist::entry;
-        crate::filelist::entry::FileEntry {
+    /// Convert to a [`FileEntry`] for file list building.
+    pub fn to_file_entry(&self, name: Vec<u8>) -> FileEntry {
+        FileEntry {
             name,
             len: self.len,
             mtime: self.mtime,
             mtime_nsec: self.mtime_nsec,
-            mode: entry::to_wire_mode(self.mode),
+            mode: to_wire_mode(self.mode),
             uid: self.uid,
             gid: self.gid,
             rdev: self.rdev,
@@ -57,4 +58,23 @@ impl FileMetadata {
             ..Default::default()
         }
     }
+}
+
+/// Convert a platform file mode to the wire representation.
+///
+/// The only transformation: symlink modes are normalized to use `0120000`
+/// as the file-type bits, regardless of the platform's `S_IFLNK` value.
+#[cfg(unix)]
+fn to_wire_mode(mode: u32) -> u32 {
+    if (mode & S_IFMT) == S_IFLNK {
+        (mode & !S_IFMT) | WIRE_S_IFLNK
+    } else {
+        mode
+    }
+}
+
+/// Convert a platform file mode to the wire representation (non-Unix).
+#[cfg(not(unix))]
+fn to_wire_mode(mode: u32) -> u32 {
+    mode
 }

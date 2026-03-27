@@ -1051,6 +1051,7 @@ dependencies = [
  "fastcdc",
  "ferrosync-delta",
  "ferrosync-filter",
+ "ferrosync-fs",
  "ferrosync-protocol",
  "ferrosync-types",
  "filetime",
@@ -1104,6 +1105,18 @@ version = "0.3.0-beta.15"
 dependencies = [
  "ferrosync-types",
  "tempfile",
+]
+
+[[package]]
+name = "ferrosync-fs"
+version = "0.3.0-beta.15"
+dependencies = [
+ "ferrosync-types",
+ "filetime",
+ "memmap2",
+ "tempfile",
+ "tracing",
+ "xattr",
 ]
 
 [[package]]
