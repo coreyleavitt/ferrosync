@@ -10,11 +10,12 @@
 //!             -> per-file delta transfer (generator/sender/receiver over wire)
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::io::AsyncRead;
 
+use crate::batch;
 use crate::delete;
 use crate::progress::{ProgressEvent, ProgressTracker};
 use crate::wire_transfer::{self, LocalFileReader};
@@ -634,9 +635,40 @@ impl<T: Transport> SyncSession<T> {
         // 3. Exchange file lists and transfer.
         // Take ownership of reader/writer, keeping background_task alive.
         let reader = std::mem::replace(&mut streams.reader, Box::new(tokio::io::empty()));
-        let writer = std::mem::replace(&mut streams.writer, Box::new(tokio::io::sink()));
+        let raw_writer = std::mem::replace(&mut streams.writer, Box::new(tokio::io::sink()));
         // Keep streams alive so background_task is not aborted.
         let _streams_guard = streams;
+
+        // Wrap writer in DualWriter for --write-batch: tee all outgoing
+        // bytes to the batch file for later replay.
+        let writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send> =
+            if let Some(batch_path) = config.write_batch() {
+                let mut batch_file = std::fs::File::create(batch_path).map_err(|e| {
+                    ferrosync_types::FerrosyncError::from(std::io::Error::new(
+                        e.kind(),
+                        format!("failed to create batch file: {e}"),
+                    ))
+                })?;
+
+                // Write header synchronously before wrapping in DualWriter.
+                batch::write_batch_header(
+                    &mut batch_file,
+                    protocol.version,
+                    protocol.compat_flags(),
+                    protocol.seed,
+                    &config,
+                )
+                .map_err(ferrosync_types::FerrosyncError::from)?;
+
+                // Write the companion .sh replay script.
+                if let Err(e) = batch::write_batch_shell_file(batch_path) {
+                    tracing::warn!("failed to write batch shell script: {}", e);
+                }
+
+                Box::new(batch::DualWriter::new(raw_writer, batch_file))
+            } else {
+                raw_writer
+            };
 
         let fs: Arc<dyn FileSystem> = fs.into();
         if am_sender {
@@ -989,6 +1021,182 @@ async fn run_pull(
         .wire()
         .receiver_goodbye(&mut demux_read, &mut mplex_out)
         .await?;
+
+    stats.finish();
+    Ok(TransferResult { stats })
+}
+
+// ---------------------------------------------------------------------------
+// Read-batch replay
+// ---------------------------------------------------------------------------
+
+/// Replay a batch file as if receiving from a remote sender.
+///
+/// Reads the batch header to reconstruct the protocol context, overrides
+/// config flags to match the recorded session, then runs the receiver
+/// pipeline reading from the batch file instead of the wire.
+pub async fn run_read_batch(
+    batch_path: &Path,
+    options: &mut TransferConfig,
+    fs: Arc<dyn FileSystem>,
+    progress: &mut ProgressTracker,
+) -> Result<TransferResult> {
+    let mut stats = TransferStats::new();
+    stats.start();
+
+    // Read header from batch file.
+    let mut file = std::fs::File::open(batch_path).map_err(|e| {
+        ferrosync_types::FerrosyncError::from(std::io::Error::new(
+            e.kind(),
+            format!("failed to open batch file: {e}"),
+        ))
+    })?;
+    let (version, compat_flags, seed, stream_flags) =
+        batch::read_batch_header(&mut file).map_err(ferrosync_types::FerrosyncError::from)?;
+
+    tracing::info!(
+        version,
+        compat_flags,
+        seed,
+        stream_flags,
+        "read batch header"
+    );
+
+    // Override config to match the recorded session.
+    batch::apply_stream_flags(stream_flags, options);
+
+    // Reconstruct protocol context from batch header.
+    let checksum = ferrosync_protocol::handshake::ChecksumType::default_for_version(version);
+    let compress = ferrosync_protocol::handshake::CompressType::None;
+    let proper_seed_order =
+        compat_flags & ferrosync_types::protocol::compat_flags::CHKSUM_SEED_FIX != 0;
+    let wire = ferrosync_protocol::wire_format::WireFormat::new(version, compat_flags);
+    let protocol = ferrosync_protocol::handshake::NegotiatedProtocol::new(
+        version,
+        compat_flags,
+        checksum,
+        compress,
+        proper_seed_order,
+        seed,
+        ferrosync_types::protocol::ChunkingStrategy::default(),
+        wire,
+    );
+
+    // Wrap the remaining file content (after header) in a tokio File for
+    // async reading. We use the already-positioned std::fs::File.
+    let batch_reader = tokio::fs::File::from_std(file);
+
+    // Create MuxConnection: reader from batch file, writer to sink
+    // (no remote to send to during replay).
+    let mut mux = MuxConnection::new(batch_reader, tokio::io::sink());
+
+    // Receive file list from batch data.
+    let received_flist = exchange::recv_file_list(&mut mux, &protocol, options)
+        .await
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
+    let entries = received_flist.entries;
+    let entry_ndx = received_flist.entry_ndx;
+    stats.total_files = entries.len() as u64;
+
+    let total_bytes: ferrosync_types::types::FileSize = entries.iter().map(|e| e.len).sum();
+    progress.set_totals(stats.total_files, total_bytes.as_u64());
+
+    tracing::debug!(count = entries.len(), "received file list from batch");
+
+    let dest = options.dest().cloned().ok_or_else(|| {
+        ferrosync_types::FerrosyncError::Fs(FsError::NotFound {
+            path: PathBuf::from("<no destination>"),
+        })
+    })?;
+
+    // Validate paths.
+    for entry in &entries {
+        let name_str = String::from_utf8_lossy(&entry.name);
+        sanitize_path(&dest, &name_str)?;
+    }
+
+    // Delete extraneous files before the transfer.
+    let mut filters = FilterRuleList::from_options(
+        options.exclude(),
+        options.include(),
+        options.filter(),
+        options.include_from(),
+        options.exclude_from(),
+    )?;
+    if options.cvs_exclude() {
+        filters.add_cvs_excludes();
+    }
+    let delete_excluded = options.delete() == DeleteMode::Excluded;
+    let delete_budget = delete::DeleteBudget::new(options.max_delete());
+    let deleter = delete::Deleter::new(
+        &*fs,
+        &filters,
+        &delete_budget,
+        options.dry_run(),
+        delete_excluded,
+    );
+
+    if matches!(
+        options.delete(),
+        DeleteMode::Before | DeleteMode::During | DeleteMode::Excluded
+    ) {
+        let deleted = deleter.delete_extraneous(&dest, entries.iter())?;
+        stats.files_deleted = deleted;
+    }
+
+    // Split connection for pipelined receiver.
+    let (demux_read, mplex_out) = mux.into_split();
+
+    if options.dry_run() {
+        for (idx, entry) in entries.iter().enumerate() {
+            if entry.is_dir() {
+                stats.directories_created += 1;
+            } else if entry.is_file() {
+                stats.files_transferred += 1;
+                stats.total_size += entry.len.as_u64();
+                progress.emit(ProgressEvent::FileComplete {
+                    index: idx as i32,
+                    name: crate::progress::name_to_pathbuf(&entry.name),
+                    literal_bytes: entry.len.as_u64(),
+                    matched_bytes: 0,
+                });
+            }
+        }
+    } else {
+        let engine = Arc::new(super::receiver_engine::ReceiverEngine::new(
+            Arc::clone(&fs),
+            dest.clone(),
+            options.clone(),
+        ));
+
+        let (_dr, _mo) = wire_transfer::receiver_loop_pipelined(
+            demux_read,
+            mplex_out,
+            &entries,
+            &entry_ndx,
+            engine,
+            &protocol,
+            &mut stats,
+            progress,
+            options.block_size(),
+        )
+        .await?;
+    }
+
+    // Delete extraneous files after the transfer.
+    if options.delete() == DeleteMode::After {
+        let deleted = deleter.delete_extraneous(&dest, entries.iter())?;
+        stats.files_deleted = deleted;
+    }
+
+    // Handle --prune-empty-dirs (-m).
+    if options.prune_empty_dirs() {
+        let pruned = delete::prune_empty_dirs(&*fs, &dest, options.dry_run())?;
+        stats.files_deleted += pruned;
+    }
+
+    // No phase exchange or goodbye needed for batch replay --
+    // we just consumed all the data from the file.
 
     stats.finish();
     Ok(TransferResult { stats })

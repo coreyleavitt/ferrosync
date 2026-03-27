@@ -6,7 +6,6 @@
 //! - **SSH:** Spawn `ssh <host> rsync --server ...` for remote transfers.
 //! - **Daemon:** TCP connection to port 873 for rsync daemon protocol.
 
-pub mod batch;
 pub mod daemon;
 pub mod noise;
 pub mod quic;

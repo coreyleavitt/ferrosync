@@ -9,6 +9,7 @@
 //! - **Receiver**: Receives delta tokens, reconstructs files from basis +
 //!   delta, verifies file-level checksums.
 
+pub mod batch;
 pub mod delete;
 pub mod file_decision;
 pub mod generator;
