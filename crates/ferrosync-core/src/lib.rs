@@ -35,19 +35,23 @@ pub mod acl;
 pub mod chmod;
 pub mod delta;
 pub mod engine;
-pub mod error;
 pub mod filelist;
 pub mod filter;
 pub mod fs;
-pub mod options;
 pub mod protocol;
 pub mod server;
-pub mod stats;
 pub mod transport;
-pub mod types;
 pub mod xattr;
 
-pub use error::FerrosyncError;
+// Re-export from ferrosync-types for backward compatibility.
+// All existing `use crate::{error,options,stats,types}::*` imports
+// continue to resolve through these module-level re-exports.
+pub use ferrosync_types::error;
+pub use ferrosync_types::options;
+pub use ferrosync_types::stats;
+pub use ferrosync_types::types;
+
+pub use ferrosync_types::FerrosyncError;
 pub type Result<T> = std::result::Result<T, FerrosyncError>;
 
 /// Convenience re-exports for common usage.

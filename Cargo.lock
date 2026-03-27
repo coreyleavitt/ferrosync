@@ -1049,6 +1049,7 @@ dependencies = [
  "criterion",
  "encoding_rs",
  "fastcdc",
+ "ferrosync-types",
  "filetime",
  "flate2",
  "lz4_flex",
@@ -1086,6 +1087,13 @@ dependencies = [
  "ferrosync-core",
  "pyo3",
  "tokio",
+]
+
+[[package]]
+name = "ferrosync-types"
+version = "0.3.0-beta.15"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]
