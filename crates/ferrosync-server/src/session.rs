@@ -260,15 +260,16 @@ impl ServerSession {
         let mut entries = build_module_entries(fs, module, opts.recursive())?;
 
         // Send file list. send_file_list sorts entries in canonical order
-        // internally, so build_ndx_map below sees the sorted order.
+        // internally and returns NDX assignments for build_ndx_map.
         let mut flist_buf = Vec::new();
-        exchange::send_file_list(&mut flist_buf, &mut entries, protocol, opts).await?;
+        let ndx_assignments =
+            exchange::send_file_list(&mut flist_buf, &mut entries, protocol, opts).await?;
 
         mux.write_data(&flist_buf).await?;
         mux.flush().await.map_err(SessionError::Io)?;
 
         // Sender loop via wire_transfer.
-        let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, opts.recursive());
+        let ndx_map = wire_transfer::build_ndx_map(&ndx_assignments);
         let file_reader = ModuleFileReader::new(fs, module_path);
         let mut stats = TransferStats::new();
         stats.start();

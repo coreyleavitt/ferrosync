@@ -171,10 +171,10 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     // Capability string MUST be last in the condensed options, since `e`
     // consumes the remainder of the argument as its value.
     //
-    // For push (am_sender=true), don't advertise incremental recursion ('i')
-    // because our sender doesn't implement per-directory sub-list generation.
-    // For pull, 'i' is fine since rsync's sender handles incremental sub-lists.
-    let use_inc_recurse = opts.recursive() && !am_sender;
+    // Advertise incremental recursion ('i') for both push and pull when
+    // recursive mode is active. The sender groups entries into per-directory
+    // sub-flists via send_file_list_incremental.
+    let use_inc_recurse = opts.recursive();
     let caps = build_capability_string(use_inc_recurse, true, false);
     condensed.push('e');
     condensed.push_str(&caps);
@@ -755,9 +755,10 @@ async fn run_push(
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
-    exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
-        .await
-        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
+    let ndx_assignments =
+        exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
+            .await
+            .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 
     tracing::debug!(
         entries = entries.len(),
@@ -792,7 +793,7 @@ async fn run_push(
     // In dry-run mode, the remote generator sends NDX + iflags per file
     // but skips sum_head and block signatures. sender_loop detects this
     // and counts files without reading signatures or sending delta tokens.
-    let ndx_map = wire_transfer::build_ndx_map(&entries, protocol, options.recursive());
+    let ndx_map = wire_transfer::build_ndx_map(&ndx_assignments);
     let file_reader = LocalFileReader::new(fs, options.source());
 
     wire_transfer::sender_loop(

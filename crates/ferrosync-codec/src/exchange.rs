@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use ferrosync_protocol::handshake::NegotiatedProtocol;
-use ferrosync_protocol::varint;
+use ferrosync_protocol::varint::{self, NdxState};
 use ferrosync_types::error::ProtocolError;
 use ferrosync_types::options::TransferConfig;
 
@@ -26,7 +26,10 @@ use crate::codec::{
     HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
 };
 use crate::entry::FileEntry;
-use crate::incremental::{IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF, NDX_FLIST_OFFSET};
+use crate::incremental::{
+    group_entries_by_directory, IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF,
+    NDX_FLIST_OFFSET,
+};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -39,12 +42,16 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 /// For protocol < 30: sends all entries as a single batch with end-of-list marker.
 /// For protocol >= 30 with incremental flist: sends entries as sub-lists per
 /// directory, with NDX markers.
+///
+/// Returns the NDX assignment for each entry (parallel to the sorted entries
+/// slice). For batch mode, these are contiguous starting at 0. For incremental
+/// mode, there are gaps between sub-flists matching rsync's `flist_new()`.
 pub async fn send_file_list<W: AsyncWrite + Unpin>(
     w: &mut W,
     entries: &mut [FileEntry],
     protocol: &NegotiatedProtocol,
     opts: &TransferConfig,
-) -> Result<()> {
+) -> Result<Vec<i32>> {
     // The codec owns the wire invariant: entries must be in canonical order
     // for correct NDX assignment. Sort here so callers can't forget.
     // TimSort on an already-sorted slice is O(n).
@@ -66,7 +73,8 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
         if !flist_opts.numeric_ids {
             send_id_list(w, entries, &flist_opts).await?;
         }
-        Ok(())
+        let ndx: Vec<i32> = (0..entries.len() as i32).collect();
+        Ok(ndx)
     }
 }
 
@@ -110,49 +118,99 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
 /// Send file list incrementally (protocol >= 30).
 ///
 /// Groups entries by directory and sends each group as a sub-flist with
-/// the appropriate NDX marker.
+/// the appropriate NDX marker. Returns NDX assignments for each entry
+/// (parallel to the input slice, with gaps between sub-flists).
 async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     w: &mut W,
     entries: &[FileEntry],
     opts: &FileListOptions,
-) -> Result<()> {
+) -> Result<Vec<i32>> {
     use crate::codec::{send_file_entry, write_end_of_flist, DeltaState, HardLinkEncoder};
 
-    let mut sender = IncrementalSender::default();
+    let groups = group_entries_by_directory(entries);
+
+    // Shared state across all sub-flists. rsync's encoder uses static
+    // delta state that carries across all sub-flists (exchange.rs receiver
+    // side documents this: "rsync's encoder uses static delta state").
+    let mut delta_state = DeltaState::default();
     let mut hlink_encoder = HardLinkEncoder::new();
     let mut acl_encoder = crate::acl::AclEncoder::new();
     let mut xattr_encoder = crate::xattr::XattrEncoder::new();
 
-    // C ref: flist.c -- inc_recurse NDX starts at 1 (flist_new() sets
-    // ndx_start = flist_cnt, and flist_cnt starts at 1). Entry indices
-    // used for hardlink back-references must be absolute NDX values,
-    // not 0-based array positions.
-    let ndx_start: i32 = 1; // inc_recurse first sub-flist always starts at 1
+    // NDX assignments: one per entry in input order.
+    let mut ndx_assignments = vec![0i32; entries.len()];
 
-    // First sub-flist (root directory): entries are sent directly without
-    // an NDX marker prefix, matching rsync's wire behavior.
-    let mut delta_state = DeltaState::default();
-    for (i, entry) in entries.iter().enumerate() {
-        send_file_entry(
-            w,
-            entry,
-            &mut delta_state,
-            opts,
-            &mut hlink_encoder,
-            entry.hard_link_info(),
-            ndx_start + i as i32,
-            None,
-            &mut acl_encoder,
-            &mut xattr_encoder,
-        )
-        .await?;
-        sender.next_ndx += 1;
+    // C ref: flist.c -- inc_recurse NDX starts at 1 (flist_new() sets
+    // ndx_start = flist_cnt, and flist_cnt starts at 1).
+    let mut next_ndx: i32 = 1;
+
+    for (group_idx, group) in groups.iter().enumerate() {
+        let ndx_start = next_ndx;
+        delta_state.ndx_start = ndx_start;
+
+        if group_idx == 0 {
+            // First sub-flist (root directory): entries are sent directly
+            // without an NDX marker prefix, matching rsync's wire behavior.
+            for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
+                let entry = &entries[entry_idx];
+                send_file_entry(
+                    w,
+                    entry,
+                    &mut delta_state,
+                    opts,
+                    &mut hlink_encoder,
+                    entry.hard_link_info(),
+                    ndx_start + pos as i32,
+                    None,
+                    &mut acl_encoder,
+                    &mut xattr_encoder,
+                )
+                .await?;
+                ndx_assignments[entry_idx] = ndx_start + pos as i32;
+            }
+            write_end_of_flist(w, 0, opts).await?;
+        } else {
+            // Subsequent sub-flists: write NDX marker then entries.
+            let mut sender = IncrementalSender {
+                ndx_state: NdxState::default(),
+                next_ndx: ndx_start,
+            };
+            // Write the sub-flist marker only (not via send_sub_flist_with_state
+            // because we need to control delta_state sharing).
+            sender
+                .write_sub_flist_marker(w, group.dir_ndx, opts.wire.int_codec)
+                .await?;
+            for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
+                let entry = &entries[entry_idx];
+                send_file_entry(
+                    w,
+                    entry,
+                    &mut delta_state,
+                    opts,
+                    &mut hlink_encoder,
+                    entry.hard_link_info(),
+                    ndx_start + pos as i32,
+                    None,
+                    &mut acl_encoder,
+                    &mut xattr_encoder,
+                )
+                .await?;
+                ndx_assignments[entry_idx] = ndx_start + pos as i32;
+            }
+            write_end_of_flist(w, 0, opts).await?;
+        }
+
+        // Advance past this sub-flist + 1 gap (flist_new behavior).
+        next_ndx += group.entry_indices.len() as i32 + 1;
     }
-    write_end_of_flist(w, 0, opts).await?;
 
     // Write NDX_FLIST_EOF to signal end of all file lists.
-    sender.write_flist_eof(w, opts.wire.int_codec).await?;
-    Ok(())
+    // Use a fresh NdxState for the EOF marker -- the sender-level NDX
+    // state is separate from per-sub-flist markers.
+    let mut eof_state = NdxState::default();
+    varint::write_ndx(w, NDX_FLIST_EOF, &mut eof_state, opts.wire.int_codec).await?;
+
+    Ok(ndx_assignments)
 }
 
 /// Result of receiving a file list, including per-entry NDX values.

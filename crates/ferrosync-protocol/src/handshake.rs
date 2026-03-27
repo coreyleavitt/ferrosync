@@ -247,14 +247,6 @@ where
         flags = varint::read_varint(r).await?;
     }
 
-    // Mask remote flags with what we actually advertised. For push
-    // (am_sender=true), we don't advertise incremental recursion ('i')
-    // since our sender doesn't implement per-directory sub-list
-    // generation. Strip INC_RECURSE so both sides agree on batch mode.
-    if am_sender {
-        flags &= !compat_flags::INC_RECURSE;
-    }
-
     let do_negotiated_strings = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
     let proper_seed_order = flags & compat_flags::CHKSUM_SEED_FIX != 0;
 

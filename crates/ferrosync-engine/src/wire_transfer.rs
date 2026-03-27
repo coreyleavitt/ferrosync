@@ -826,21 +826,16 @@ where
 // Shared protocol helpers
 // ---------------------------------------------------------------------------
 
-/// Build the NDX-to-entry-index mapping.
-pub fn build_ndx_map(
-    entries: &[FileEntry],
-    protocol: &NegotiatedProtocol,
-    is_recursive: bool,
-) -> HashMap<i32, usize> {
-    let ndx_start: i32 = if protocol.wire().supports_incremental_flist && is_recursive {
-        1
-    } else {
-        0
-    };
-    entries
+/// Build a map from NDX value to entry index.
+///
+/// Accepts the NDX assignments produced by `send_file_list` or computed
+/// from `recv_file_list`. For batch mode these are contiguous (0, 1, 2, ...);
+/// for incremental mode there are gaps between sub-flists.
+pub fn build_ndx_map(ndx_values: &[i32]) -> HashMap<i32, usize> {
+    ndx_values
         .iter()
         .enumerate()
-        .map(|(i, _)| (ndx_start + i as i32, i))
+        .map(|(i, &ndx)| (ndx, i))
         .collect()
 }
 

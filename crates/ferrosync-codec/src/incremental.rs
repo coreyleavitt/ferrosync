@@ -19,7 +19,7 @@ use crate::codec::{
     recv_file_entry, send_file_entry, write_end_of_flist, DeltaState, FileListOptions,
     HardLinkDecoder, HardLinkEncoder, ReadEntryResult,
 };
-use crate::entry::FileEntry;
+use crate::entry::{FileEntry, S_IFDIR, S_IFMT};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -168,15 +168,26 @@ impl IncrementalSender {
         varint::write_ndx(w, ndx_val, &mut self.ndx_state, codec).await
     }
 
-    /// Send a complete sub-file-list.
+    /// Send a complete sub-file-list with shared delta state.
+    #[allow(clippy::too_many_arguments)]
     ///
-    /// Writes all entries followed by the end-of-list marker.
-    pub async fn send_sub_flist<W: AsyncWrite + Unpin>(
+    /// rsync's encoder uses static delta state that carries across all
+    /// sub-flists. Callers must pass a single `DeltaState` shared across
+    /// all `send_sub_flist_with_state` calls to produce wire-compatible output.
+    ///
+    /// Writes the NDX marker, all entries, and the end-of-list marker.
+    /// After writing end-of-list, increments `next_ndx` by 1 to match
+    /// rsync's `flist_new()` gap between sub-flists.
+    pub async fn send_sub_flist_with_state<W: AsyncWrite + Unpin>(
         &mut self,
         w: &mut W,
         dir_ndx: i32,
         entries: &[FileEntry],
         opts: &FileListOptions,
+        delta_state: &mut DeltaState,
+        hlink_encoder: &mut HardLinkEncoder,
+        acl_encoder: &mut crate::acl::AclEncoder,
+        xattr_encoder: &mut crate::xattr::XattrEncoder,
     ) -> Result<()> {
         // Write the sub-flist marker.
         self.write_sub_flist_marker(w, dir_ndx, opts.wire.int_codec)
@@ -185,23 +196,20 @@ impl IncrementalSender {
         // Write entries. Entry indices must be absolute NDX values (not
         // 0-based) so hardlink back-references point to the correct entry
         // in rsync's receiver. self.next_ndx tracks the current absolute NDX.
-        let mut delta_state = DeltaState::default();
-        let mut hlink_encoder = HardLinkEncoder::new();
-        let mut acl_encoder = crate::acl::AclEncoder::new();
-        let mut xattr_encoder = crate::xattr::XattrEncoder::new();
         let ndx_start = self.next_ndx;
+        delta_state.ndx_start = ndx_start;
         for (i, entry) in entries.iter().enumerate() {
             send_file_entry(
                 w,
                 entry,
-                &mut delta_state,
+                delta_state,
                 opts,
-                &mut hlink_encoder,
+                hlink_encoder,
                 entry.hard_link_info(),
                 ndx_start + i as i32,
                 None,
-                &mut acl_encoder,
-                &mut xattr_encoder,
+                acl_encoder,
+                xattr_encoder,
             )
             .await?;
             self.next_ndx += 1;
@@ -209,7 +217,40 @@ impl IncrementalSender {
 
         // Write end-of-list.
         write_end_of_flist(w, 0, opts).await?;
+
+        // Add +1 gap to match rsync's flist_new():
+        // next flist ndx_start = prev.ndx_start + prev.used + 1
+        self.next_ndx += 1;
         Ok(())
+    }
+
+    /// Send a complete sub-file-list (convenience wrapper with fresh state).
+    ///
+    /// Creates fresh delta/hlink/acl/xattr state for this sub-flist.
+    /// For wire-compatible encoding with rsync, prefer `send_sub_flist_with_state`
+    /// with shared state across all sub-flists.
+    pub async fn send_sub_flist<W: AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        dir_ndx: i32,
+        entries: &[FileEntry],
+        opts: &FileListOptions,
+    ) -> Result<()> {
+        let mut delta_state = DeltaState::default();
+        let mut hlink_encoder = HardLinkEncoder::new();
+        let mut acl_encoder = crate::acl::AclEncoder::new();
+        let mut xattr_encoder = crate::xattr::XattrEncoder::new();
+        self.send_sub_flist_with_state(
+            w,
+            dir_ndx,
+            entries,
+            opts,
+            &mut delta_state,
+            &mut hlink_encoder,
+            &mut acl_encoder,
+            &mut xattr_encoder,
+        )
+        .await
     }
 
     /// Write the NDX_FLIST_EOF marker indicating all file lists are done.
@@ -220,6 +261,126 @@ impl IncrementalSender {
     ) -> Result<()> {
         varint::write_ndx(w, NDX_FLIST_EOF, &mut self.ndx_state, codec).await
     }
+}
+
+/// A group of entries belonging to a single directory in the incremental
+/// file list. Used by `group_entries_by_directory` to split a flat sorted
+/// entry list into per-directory sub-flists.
+#[derive(Debug)]
+pub struct DirGroup {
+    /// NDX of the parent directory entry. -1 for the root group (entries
+    /// with no dirname, i.e., top-level files and directories).
+    pub dir_ndx: i32,
+    /// Indices into the original entries slice for this group's members.
+    pub entry_indices: Vec<usize>,
+}
+
+/// Split a canonically-sorted entry list into per-directory groups for
+/// incremental file list encoding.
+///
+/// Returns groups in the order they should be sent: root first, then
+/// each subdirectory in the order its directory entry appears in the
+/// sorted list (depth-first).
+///
+/// The NDX assignment in each `DirGroup.dir_ndx` uses incremental NDX
+/// numbering with +1 gaps between sub-flists, matching rsync's
+/// `flist_new()` behavior.
+pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
+    if entries.is_empty() {
+        return vec![DirGroup {
+            dir_ndx: -1,
+            entry_indices: vec![],
+        }];
+    }
+
+    // Build root group: entries with no '/' in name (top-level).
+    let mut root_indices = Vec::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if !entry.name.contains(&b'/') {
+            root_indices.push(i);
+        }
+    }
+
+    let mut groups = vec![DirGroup {
+        dir_ndx: -1,
+        entry_indices: root_indices,
+    }];
+
+    // Simulate NDX assignment to determine dir_ndx values.
+    // Root sub-flist starts at NDX 1 (inc_recurse), entries get sequential
+    // NDX values, then +1 gap after end-of-list.
+    let mut next_ndx: i32 = 1; // inc_recurse starts at 1
+    let root_count = groups[0].entry_indices.len() as i32;
+    // After root sub-flist: next_ndx = 1 + count + 1 (gap)
+    next_ndx += root_count + 1;
+
+    // Build a map from entry index to its assigned NDX within the root group.
+    // Root entries get NDX 1, 2, 3, ... (1-based for inc_recurse).
+    let mut entry_to_ndx: Vec<i32> = vec![-1; entries.len()];
+    for (pos, &idx) in groups[0].entry_indices.iter().enumerate() {
+        entry_to_ndx[idx] = 1 + pos as i32; // root starts at NDX 1
+    }
+
+    // Process directories in the order they appear in the root group,
+    // then recursively process subdirectories.
+    let mut dir_queue: Vec<(usize, Vec<u8>)> = Vec::new(); // (entry_index, dirname_prefix)
+    for &idx in &groups[0].entry_indices {
+        if entries[idx].mode & S_IFMT == S_IFDIR && entries[idx].name != b"." {
+            dir_queue.push((idx, entries[idx].name.clone()));
+        }
+    }
+
+    let mut queue_pos = 0;
+    while queue_pos < dir_queue.len() {
+        let (dir_entry_idx, prefix) = dir_queue[queue_pos].clone();
+        queue_pos += 1;
+
+        let dir_ndx = entry_to_ndx[dir_entry_idx];
+
+        // Collect children: entries whose name starts with "prefix/"
+        let mut child_indices = Vec::new();
+        let prefix_slash = {
+            let mut p = prefix.clone();
+            p.push(b'/');
+            p
+        };
+        for (i, entry) in entries.iter().enumerate() {
+            if entry.name.starts_with(&prefix_slash) {
+                // Only direct children (no further '/' after prefix/)
+                let rest = &entry.name[prefix_slash.len()..];
+                if !rest.contains(&b'/') {
+                    child_indices.push(i);
+                }
+            }
+        }
+
+        // Assign NDX values to children.
+        for (pos, &idx) in child_indices.iter().enumerate() {
+            entry_to_ndx[idx] = next_ndx + pos as i32;
+        }
+
+        groups.push(DirGroup {
+            dir_ndx,
+            entry_indices: child_indices.clone(),
+        });
+
+        // Advance next_ndx past this sub-flist + gap.
+        next_ndx += child_indices.len() as i32 + 1;
+
+        // Queue subdirectories from this group.
+        for &idx in &child_indices {
+            if entries[idx].mode & S_IFMT == S_IFDIR {
+                // Build full path for this subdirectory
+                let child_basename = &entries[idx].name[prefix_slash.len()..];
+                let mut full_name = prefix.clone();
+                full_name.push(b'/');
+                full_name.extend_from_slice(child_basename);
+                dir_queue.push((idx, full_name));
+            }
+        }
+    }
+
+    groups
 }
 
 #[cfg(test)]
@@ -335,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ndx_tracking() {
+    async fn test_ndx_tracking_with_gap() {
         let opts = test_opts();
 
         let entries = vec![
@@ -363,6 +524,111 @@ mod tests {
             .send_sub_flist(&mut buf, 0, &entries, &opts)
             .await
             .unwrap();
-        assert_eq!(sender.next_ndx, 2);
+        // 2 entries + 1 gap = 3
+        assert_eq!(sender.next_ndx, 3);
+    }
+
+    #[test]
+    fn test_group_flat_files_only() {
+        let entries = vec![
+            FileEntry {
+                name: b"a.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"b.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+        ];
+        let groups = group_entries_by_directory(&entries);
+        assert_eq!(groups.len(), 1); // root only
+        assert_eq!(groups[0].dir_ndx, -1);
+        assert_eq!(groups[0].entry_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_group_mixed_files_and_dirs() {
+        let entries = vec![
+            FileEntry {
+                name: b"file.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"subdir".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"subdir/inner.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+        ];
+        let groups = group_entries_by_directory(&entries);
+        assert_eq!(groups.len(), 2); // root + subdir
+        assert_eq!(groups[0].entry_indices, vec![0, 1]); // file.txt, subdir
+        assert_eq!(groups[1].dir_ndx, 2); // subdir is at NDX 2 (1-based: file.txt=1, subdir=2)
+        assert_eq!(groups[1].entry_indices, vec![2]); // inner.txt
+    }
+
+    #[test]
+    fn test_group_nested_three_levels() {
+        let entries = vec![
+            FileEntry {
+                name: b".".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"a".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"a/b".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"a/b/c.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"top.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+        ];
+        let groups = group_entries_by_directory(&entries);
+        // root: [., a, top.txt], a: [b], a/b: [c.txt]
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].entry_indices, vec![0, 1, 4]); // ., a, top.txt
+        assert_eq!(groups[1].entry_indices, vec![2]); // a/b
+        assert_eq!(groups[2].entry_indices, vec![3]); // a/b/c.txt
+    }
+
+    #[test]
+    fn test_group_empty_directory() {
+        let entries = vec![
+            FileEntry {
+                name: b"empty_dir".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"file.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+        ];
+        let groups = group_entries_by_directory(&entries);
+        // root: [empty_dir, file.txt], empty_dir: [] (no children)
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].entry_indices, vec![0, 1]);
+        assert_eq!(groups[1].entry_indices.len(), 0); // empty subdir group
     }
 }
