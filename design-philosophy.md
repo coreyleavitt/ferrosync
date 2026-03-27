@@ -37,6 +37,55 @@ The SSH protocol (RFC 4254) defines exec channels as shell command strings. Even
 
 The `--daemon` mode listens on TCP with the rsync daemon text protocol (module listing, challenge-response auth). This is unencrypted, matching rsync's own `rsyncd`. It exists for rsync protocol compatibility, not as a recommended production deployment. For production use, SSH transport is the primary path.
 
+## Crate architecture
+
+Ferrosync is split into 13 crates in a layered DAG. Each crate has a single responsibility and clean dependency boundaries enforced by the compiler.
+
+```
+                      ferrosync-types (foundation)
+                           │
+            ┌──────┬───────┼───────┬──────────┐
+            │      │       │       │          │
+         delta    fs    filter  protocol  transport
+            │      │       │       │      (client only)
+            │      └───┬───┘       │          │
+            │          │           │          │
+            │     scanner       codec        │
+            │          │           │          │
+            └──────────┴─────┬─────┴──────────┘
+                             │
+                          engine
+                             │
+                    ┌────────┴────────┐
+                    │                 │
+              core (facade)      server
+```
+
+**Key boundary decisions:**
+
+- **types** contains traits (FileSystem) and data types (FileEntry), not implementations. The compiler enforces that implementations can't accidentally depend on each other.
+- **transport is client-only.** The server accepts connections (TCP/stdio), it doesn't initiate them. This keeps russh, rustls, quinn, and snow out of server deployments.
+- **scanner and codec are peers**, not parent-child. Scanner needs filesystem + filter (to discover files). Codec needs protocol + delta (to encode files). They share FileEntry via types but don't depend on each other.
+- **engine is the honest integration point.** Orchestration IS integration. It depends on most crates, and that's correct -- the key is that each dependency flows through a clean crate API.
+
+## Connection-driven concurrent I/O
+
+MuxConnection owns both halves of a multiplexed connection and drives them concurrently at the frame level. flush() uses `tokio::select!` to drain incoming reads while waiting for writes to complete, preventing deadlock without background tasks, channels, or unbounded buffers. This follows the HTTP/2 and QUIC model: concurrent I/O belongs in the connection layer, not bolted on via tasks.
+
+## Decision/I/O separation
+
+`dispatch_entry()` on ReceiverEngine makes ALL per-file decisions (directory creation, symlink handling, skip checks, link-dest, copy-dest, hardlink deferral, dry-run) and returns an `EntryAction` telling the caller what to do about data. The caller handles I/O differently per transfer path:
+
+- Local engine: computes delta inline from source files
+- Wire pipelined generator: sends signatures on wire, runs ahead
+- Wire pipelined receiver: reads deltas from wire, applies transfers
+
+One decision function, multiple I/O strategies. No feature gaps between paths.
+
+## Composable enrichment pipeline
+
+FileListScanner processes directory children through pluggable enrichers. Each enricher adds per-file metadata independently: SymlinkEnricher reads symlink targets, AclEnricher reads POSIX ACLs, XattrEnricher reads extended attributes, HardLinkGrouper detects hardlink groups. Adding a new metadata type means implementing one enricher, not modifying the scanner.
+
 ## Testing
 
 See [testing.md](testing.md) for the test architecture. The key principle: every test proves something specific. "Transfer completed without error" is not a test.

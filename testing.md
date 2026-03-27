@@ -226,8 +226,10 @@ TreeMatchOpts::archive()       // content + perms + mtime
 ## Running tests
 
 ```bash
-# Fast local tests (no Docker)
-cargo test -p ferrosync-core --lib
+# Fast local tests (no Docker) -- all crates
+cargo test --workspace --lib
+
+# Integration tests (Unix only)
 cargo test -p ferrosync-core --test engine
 cargo test -p ferrosync-core --test daemon
 
@@ -238,23 +240,25 @@ docker compose -f docker-compose.test.yml run --rm ferrosync-dev \
 docker compose -f docker-compose.test.yml run --rm ferrosync-dev \
     cargo test -p ferrosync-core --test interop
 
-# Everything
+# Everything (Docker)
 docker compose -f docker-compose.test.yml run --rm ferrosync-dev \
-    cargo test -p ferrosync-core
+    cargo test --workspace
 ```
+
+Unit tests are distributed across crates -- each crate owns its own unit tests. Integration tests (engine, daemon, wire, interop) remain in ferrosync-core since they test cross-crate behavior.
 
 ## CI
 
 The GitHub Actions CI runs tests in two jobs:
 
 **`test` job** (3-platform matrix: Linux, macOS, Windows):
-- `cargo test --lib` -- unit tests
-- `cargo test --test engine` -- engine tests (Unix only)
-- `cargo test --test daemon` -- daemon tests
+- `cargo test --workspace --lib` -- unit tests across all crates
+- `cargo test -p ferrosync-core --test engine` -- engine tests (Unix only)
+- `cargo test -p ferrosync-core --test daemon` -- daemon tests
 
 **`interop` job** (Linux only, Docker):
-- `cargo test --test wire` -- wire conformance
-- `cargo test --test interop` -- interop tests
+- `cargo test -p ferrosync-core --test wire` -- wire conformance
+- `cargo test -p ferrosync-core --test interop` -- interop tests
 
 ## Adding a new flag: checklist
 
