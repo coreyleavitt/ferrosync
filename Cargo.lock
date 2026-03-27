@@ -1056,11 +1056,7 @@ dependencies = [
 name = "ferrosync-core"
 version = "0.3.0-beta.15"
 dependencies = [
- "blake3",
- "bytes",
  "criterion",
- "encoding_rs",
- "fastcdc",
  "ferrosync-codec",
  "ferrosync-delta",
  "ferrosync-engine",
@@ -1068,27 +1064,18 @@ dependencies = [
  "ferrosync-fs",
  "ferrosync-protocol",
  "ferrosync-scanner",
+ "ferrosync-server",
  "ferrosync-transport",
  "ferrosync-types",
  "filetime",
- "flate2",
- "lz4_flex",
- "md-5",
- "md4",
- "memmap2",
  "proptest",
  "rand_core 0.6.4",
  "rcgen",
  "tempfile",
  "test-case",
- "thiserror 2.0.18",
  "tokio",
  "tokio-test",
- "tracing",
  "tracing-subscriber",
- "xattr",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -1176,6 +1163,24 @@ dependencies = [
  "ferrosync-fs",
  "ferrosync-types",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "ferrosync-server"
+version = "0.3.0-beta.15"
+dependencies = [
+ "ferrosync-codec",
+ "ferrosync-engine",
+ "ferrosync-filter",
+ "ferrosync-fs",
+ "ferrosync-protocol",
+ "ferrosync-scanner",
+ "ferrosync-types",
+ "md-5",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

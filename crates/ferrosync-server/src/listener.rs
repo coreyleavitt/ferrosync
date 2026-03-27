@@ -15,10 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
-use super::auth;
-use super::module::ModuleRegistry;
-use super::session::ServerSession;
-use crate::protocol::handshake::MAX_PROTOCOL_VERSION;
+use crate::auth;
+use crate::module::ModuleRegistry;
+use crate::session::ServerSession;
+use ferrosync_protocol::handshake::MAX_PROTOCOL_VERSION;
 
 /// Listener-specific error type.
 #[derive(Debug, thiserror::Error)]
@@ -423,7 +423,7 @@ fn parse_version(greeting: &str) -> Result<u8, Box<dyn std::error::Error + Send 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::module::Module;
+    use crate::module::Module;
     use std::path::PathBuf;
 
     fn make_test_registry() -> Arc<ModuleRegistry> {
@@ -434,11 +434,11 @@ mod tests {
             read_only: true,
             list: true,
             comment: "Daily backups".to_string(),
-            auth: super::super::module::ModuleAuth {
+            auth: crate::module::ModuleAuth {
                 auth_users: String::new(),
                 secrets_file: None,
             },
-            access: super::super::module::AccessControl::default(),
+            access: crate::module::AccessControl::default(),
             max_connections: 0,
             timeout: 0,
             exclude: Vec::new(),
@@ -451,11 +451,11 @@ mod tests {
             read_only: true,
             list: false,
             comment: "Hidden module".to_string(),
-            auth: super::super::module::ModuleAuth {
+            auth: crate::module::ModuleAuth {
                 auth_users: String::new(),
                 secrets_file: None,
             },
-            access: super::super::module::AccessControl::default(),
+            access: crate::module::AccessControl::default(),
             max_connections: 0,
             timeout: 0,
             exclude: Vec::new(),

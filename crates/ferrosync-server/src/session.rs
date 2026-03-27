@@ -11,20 +11,20 @@
 use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::module::Module;
-use crate::engine::progress::ProgressTracker;
-use crate::engine::receiver_engine::ReceiverEngine;
-use crate::engine::wire_transfer::{self, ModuleFileReader};
-use crate::error::{FsError, ProtocolError};
-use crate::filelist::entry::FileEntry;
-use crate::filelist::exchange;
-use crate::filelist::scanner::{FileListScanner, ScanOptions};
-use crate::filter::FilterRuleList;
-use crate::fs::FileSystem;
-use crate::options::TransferConfig;
-use crate::protocol::handshake::{self, NegotiatedProtocol};
-use crate::protocol::multiplex::MuxConnection;
-use crate::stats::TransferStats;
+use crate::module::Module;
+use ferrosync_codec::entry::FileEntry;
+use ferrosync_codec::exchange;
+use ferrosync_engine::progress::ProgressTracker;
+use ferrosync_engine::receiver_engine::ReceiverEngine;
+use ferrosync_engine::wire_transfer::{self, ModuleFileReader};
+use ferrosync_filter::FilterRuleList;
+use ferrosync_fs::FileSystem;
+use ferrosync_protocol::handshake::{self, NegotiatedProtocol};
+use ferrosync_protocol::multiplex::MuxConnection;
+use ferrosync_scanner::{FileListScanner, ScanOptions};
+use ferrosync_types::error::{FsError, ProtocolError};
+use ferrosync_types::options::TransferConfig;
+use ferrosync_types::stats::TransferStats;
 
 /// Server-side session error type.
 #[derive(Debug, thiserror::Error)]
@@ -42,19 +42,21 @@ pub enum SessionError {
     ModulePathNotFound { path: String },
 }
 
-impl From<crate::FerrosyncError> for SessionError {
-    fn from(e: crate::FerrosyncError) -> Self {
+impl From<ferrosync_types::FerrosyncError> for SessionError {
+    fn from(e: ferrosync_types::FerrosyncError) -> Self {
         match e {
-            crate::FerrosyncError::Protocol(p) => SessionError::Protocol(p),
-            crate::FerrosyncError::Fs(f) => SessionError::Fs(f),
-            crate::FerrosyncError::Transport(t) => {
+            ferrosync_types::FerrosyncError::Protocol(p) => SessionError::Protocol(p),
+            ferrosync_types::FerrosyncError::Fs(f) => SessionError::Fs(f),
+            ferrosync_types::FerrosyncError::Transport(t) => {
                 SessionError::Protocol(ProtocolError::Handshake {
                     message: t.to_string(),
                 })
             }
-            crate::FerrosyncError::Filter(f) => SessionError::Protocol(ProtocolError::Handshake {
-                message: f.to_string(),
-            }),
+            ferrosync_types::FerrosyncError::Filter(f) => {
+                SessionError::Protocol(ProtocolError::Handshake {
+                    message: f.to_string(),
+                })
+            }
         }
     }
 }
@@ -154,7 +156,7 @@ impl ServerSession {
 
         // Parse client args into TransferConfig.
         let am_sender = self.direction == TransferDirection::Send;
-        let opts = crate::engine::session::parse_server_args_config(
+        let opts = ferrosync_engine::session::parse_server_args_config(
             &self.args,
             self.module.path.clone(),
             am_sender,
@@ -183,11 +185,11 @@ impl ServerSession {
         );
 
         #[cfg(unix)]
-        let fs: std::sync::Arc<dyn crate::fs::FileSystem> =
-            std::sync::Arc::new(crate::fs::unix::UnixFileSystem::new());
+        let fs: std::sync::Arc<dyn ferrosync_fs::FileSystem> =
+            std::sync::Arc::new(ferrosync_fs::unix::UnixFileSystem::new());
         #[cfg(windows)]
-        let fs: std::sync::Arc<dyn crate::fs::FileSystem> =
-            std::sync::Arc::new(crate::fs::windows::WindowsFileSystem::new());
+        let fs: std::sync::Arc<dyn ferrosync_fs::FileSystem> =
+            std::sync::Arc::new(ferrosync_fs::windows::WindowsFileSystem::new());
 
         let mut progress = self.progress;
 
@@ -335,7 +337,7 @@ impl ServerSession {
         //   !local_server && (am_sender || receiver_wants_list)
         // For server receiver: am_sender=0, receiver_wants_list = delete || prune.
         // Client only sends filter list when delete_mode is active (see session.rs).
-        let expect_filter_list = opts.delete() != crate::options::DeleteMode::None;
+        let expect_filter_list = opts.delete() != ferrosync_types::options::DeleteMode::None;
         if expect_filter_list {
             read_and_discard_filter_list(&mut mux).await?;
         }
@@ -488,9 +490,9 @@ fn build_module_entries(
             })?;
 
     let dir_mode = if recursive {
-        crate::options::DirectoryMode::Recurse
+        ferrosync_types::options::DirectoryMode::Recurse
     } else {
-        crate::options::DirectoryMode::List
+        ferrosync_types::options::DirectoryMode::List
     };
     let scan_opts = ScanOptions {
         dir_mode,
@@ -509,7 +511,7 @@ fn build_module_entries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::module::{AccessControl, ModuleAuth};
+    use crate::module::{AccessControl, ModuleAuth};
     use std::path::PathBuf;
 
     fn make_test_module(name: &str, read_only: bool) -> Module {

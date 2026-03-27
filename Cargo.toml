@@ -83,4 +83,5 @@ ferrosync-types = { path = "crates/ferrosync-types" }
 ferrosync-codec = { path = "crates/ferrosync-codec" }
 ferrosync-scanner = { path = "crates/ferrosync-scanner" }
 ferrosync-engine = { path = "crates/ferrosync-engine" }
+ferrosync-server = { path = "crates/ferrosync-server" }
 

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
-use super::config::ModuleConfig;
+use crate::config::ModuleConfig;
 
 /// A loaded, ready-to-serve rsync module.
 #[derive(Debug, Clone)]

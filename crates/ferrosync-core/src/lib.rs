@@ -36,11 +36,11 @@ pub use ferrosync_codec::chmod;
 pub use ferrosync_delta as delta;
 pub use ferrosync_engine as engine;
 pub mod filelist;
+pub use ferrosync_codec::xattr;
 pub use ferrosync_filter as filter;
 pub use ferrosync_fs as fs;
 pub use ferrosync_protocol as protocol;
-pub mod server;
-pub use ferrosync_codec::xattr;
+pub use ferrosync_server as server;
 pub use ferrosync_transport as transport;
 
 // Re-export from ferrosync-types for backward compatibility.

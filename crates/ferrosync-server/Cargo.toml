@@ -1,0 +1,25 @@
+[package]
+name = "ferrosync-server"
+description = "rsync daemon server for ferrosync: listener, modules, authentication"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+ferrosync-protocol = { workspace = true }
+ferrosync-engine = { workspace = true }
+ferrosync-codec = { workspace = true }
+ferrosync-scanner = { workspace = true }
+ferrosync-fs = { workspace = true }
+ferrosync-filter = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+md-5 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }

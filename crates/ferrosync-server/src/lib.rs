@@ -1,6 +1,6 @@
 //! Rsync daemon server implementation.
 //!
-//! This module provides the server-side components for running an rsync daemon
+//! This crate provides the server-side components for running an rsync daemon
 //! that accepts connections on TCP port 873 (by default), serves configured
 //! modules, and performs the rsync protocol exchange.
 //!
