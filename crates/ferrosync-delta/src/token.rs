@@ -26,18 +26,18 @@
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::ops::DiffOp;
-use crate::error::ProtocolError;
-use crate::protocol::compress::{Compressor, CompressorType, Decompressor};
-use crate::protocol::constants::MAX_WIRE_ALLOC;
-use crate::protocol::varint;
+use ferrosync_protocol::compress::{Compressor, CompressorType, Decompressor};
+use ferrosync_protocol::varint;
+use ferrosync_types::constants::MAX_WIRE_ALLOC;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
 /// Re-export for backward compatibility.
-pub use crate::protocol::constants::DATA_CHUNK_SIZE;
+pub use ferrosync_types::constants::DATA_CHUNK_SIZE;
 
 /// Legacy alias -- prefer [`DATA_CHUNK_SIZE`].
-#[deprecated(note = "use protocol::constants::DATA_CHUNK_SIZE")]
+#[deprecated(note = "use ferrosync_types::constants::DATA_CHUNK_SIZE")]
 pub const CHUNK_SIZE: usize = DATA_CHUNK_SIZE;
 
 // ---------------------------------------------------------------------------
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn test_negotiate_zstd_selected() {
-        use crate::protocol::handshake::CompressType;
+        use ferrosync_types::protocol::CompressType;
         // ferrosync-to-ferrosync: both support zstd, should be first pick
         let our_list = "zstd lz4 zlibx zlib none";
         let their_list = "zstd lz4 zlibx zlib none";
@@ -1203,7 +1203,7 @@ mod tests {
 
     #[test]
     fn test_negotiate_lz4_fallback() {
-        use crate::protocol::handshake::CompressType;
+        use ferrosync_types::protocol::CompressType;
         // Remote only supports lz4 and zlib
         let our_list = "zstd lz4 zlibx zlib none";
         let their_list = "lz4 zlib none";
@@ -1219,7 +1219,7 @@ mod tests {
 
     #[test]
     fn test_negotiate_zlib_fallback_with_rsync() {
-        use crate::protocol::handshake::CompressType;
+        use ferrosync_types::protocol::CompressType;
         // Standard rsync 3.1.x only supports zlib/zlibx
         let our_list = "zstd lz4 zlibx zlib none";
         let their_list = "zlibx zlib none";
@@ -1332,7 +1332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_diffops_through_trait() {
-        use crate::delta::ops::BasisRef;
+        use crate::ops::BasisRef;
 
         let ops = vec![
             DiffOp::literal(b"hello"),

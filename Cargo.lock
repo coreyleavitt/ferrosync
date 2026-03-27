@@ -1049,6 +1049,7 @@ dependencies = [
  "criterion",
  "encoding_rs",
  "fastcdc",
+ "ferrosync-delta",
  "ferrosync-filter",
  "ferrosync-protocol",
  "ferrosync-types",
@@ -1080,6 +1081,21 @@ dependencies = [
  "xattr",
  "xxhash-rust",
  "zstd",
+]
+
+[[package]]
+name = "ferrosync-delta"
+version = "0.3.0-beta.15"
+dependencies = [
+ "blake3",
+ "fastcdc",
+ "ferrosync-protocol",
+ "ferrosync-types",
+ "md-5",
+ "md4",
+ "tokio",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]

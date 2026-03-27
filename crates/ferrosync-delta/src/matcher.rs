@@ -16,7 +16,7 @@ use std::io::Read;
 use super::checksum::{self, RollingChecksum};
 use super::ops::{BasisRef, DiffOp};
 use super::sum::SumStruct;
-use crate::delta::ProtocolContext;
+use crate::ProtocolContext;
 
 /// Compute the byte length of a matched block, accounting for a shorter
 /// last block when the basis size is not a multiple of the block length.
@@ -386,10 +386,10 @@ fn read_fill(reader: &mut dyn Read, buf: &mut [u8]) -> std::io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::ops::apply_diffops;
-    use crate::delta::sum::compute_signatures;
-    use crate::delta::ProtocolContext;
-    use crate::protocol::handshake::ChecksumType;
+    use crate::ops::apply_diffops;
+    use crate::sum::compute_signatures;
+    use crate::ProtocolContext;
+    use ferrosync_types::protocol::ChecksumType;
 
     fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {
         ProtocolContext::test_default(seed, ct)
@@ -537,7 +537,7 @@ mod tests {
 
     fn streaming_match_all(
         source: &[u8],
-        sums: &super::super::sum::SumStruct,
+        sums: &crate::sum::SumStruct,
         c: &ProtocolContext,
         chunk_size: usize,
     ) -> Vec<DiffOp<'static>> {

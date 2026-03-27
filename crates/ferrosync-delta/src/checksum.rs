@@ -6,8 +6,8 @@
 //! - **Strong checksum** (checksum2): MD4 (proto < 30) or MD5 (proto >= 30),
 //!   used to verify candidate matches and for whole-file verification.
 
-use crate::delta::ProtocolContext;
-use crate::protocol::handshake::ChecksumType;
+use crate::ProtocolContext;
+use ferrosync_types::protocol::ChecksumType;
 
 /// Maximum digest length for any supported checksum algorithm.
 ///
@@ -265,7 +265,7 @@ impl RollingChecksum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::ProtocolContext;
+    use crate::ProtocolContext;
 
     fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {
         ProtocolContext::test_default(seed, ct)

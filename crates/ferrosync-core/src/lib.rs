@@ -33,7 +33,7 @@
 
 pub mod acl;
 pub mod chmod;
-pub mod delta;
+pub use ferrosync_delta as delta;
 pub mod engine;
 pub mod filelist;
 pub use ferrosync_filter as filter;

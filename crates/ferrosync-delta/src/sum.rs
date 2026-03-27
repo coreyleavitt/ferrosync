@@ -12,10 +12,10 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::delta::ProtocolContext;
-use crate::error::ProtocolError;
-use crate::protocol::constants::{MAX_BLOCK_LEN, MIN_BLOCK_LEN};
-use crate::protocol::varint;
+use crate::ProtocolContext;
+use ferrosync_protocol::varint;
+use ferrosync_types::constants::{MAX_BLOCK_LEN, MIN_BLOCK_LEN};
+use ferrosync_types::error::ProtocolError;
 
 use super::checksum::{self, MAX_DIGEST_LEN};
 use super::chunker::{chunk_data, ChunkingStrategy};
@@ -370,10 +370,10 @@ pub async fn read_sums<R: AsyncRead + Unpin>(r: &mut R) -> Result<SumStruct> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::chunker::ChunkingStrategy;
     use super::*;
-    use crate::delta::ProtocolContext;
-    use crate::protocol::handshake::ChecksumType;
+    use crate::chunker::ChunkingStrategy;
+    use crate::ProtocolContext;
+    use ferrosync_types::protocol::ChecksumType;
     use std::io::Cursor;
 
     fn ctx(seed: i32, ct: ChecksumType) -> ProtocolContext {

@@ -1,0 +1,19 @@
+[package]
+name = "ferrosync-delta"
+description = "Delta transfer algorithm for ferrosync"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+ferrosync-protocol = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+md-5 = { workspace = true }
+md4 = { workspace = true }
+blake3 = { workspace = true }
+xxhash-rust = { workspace = true }
+fastcdc = { workspace = true }

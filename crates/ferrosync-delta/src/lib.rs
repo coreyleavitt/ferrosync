@@ -22,10 +22,10 @@ pub use ops::{BasisRef, DiffOp};
 
 use std::io::Read;
 
-use crate::protocol::handshake::{ChecksumType, NegotiatedProtocol};
-use crate::protocol::wire_format::IntCodec;
+use ferrosync_protocol::handshake::NegotiatedProtocol;
+use ferrosync_types::protocol::{ChecksumType, IntCodec};
 
-use self::sum::SumStruct;
+use crate::sum::SumStruct;
 
 /// Protocol parameters needed for delta computation.
 ///
@@ -59,7 +59,6 @@ impl ProtocolContext {
     }
 
     /// Convenience for tests using protocol >= 30 defaults.
-    #[cfg(test)]
     pub fn test_default(seed: i32, checksum_type: ChecksumType) -> Self {
         Self {
             seed,
