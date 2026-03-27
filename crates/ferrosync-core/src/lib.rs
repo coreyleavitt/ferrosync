@@ -31,6 +31,7 @@
 //! let result = session.run().await?;
 //! ```
 
+pub mod acl;
 pub mod chmod;
 pub mod delta;
 pub mod engine;

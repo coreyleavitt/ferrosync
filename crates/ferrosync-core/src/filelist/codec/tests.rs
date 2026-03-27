@@ -40,6 +40,7 @@ async fn test_roundtrip_simple_file() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -54,6 +55,7 @@ async fn test_roundtrip_simple_file() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap();
@@ -76,6 +78,7 @@ async fn test_roundtrip_simple_file() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap();
@@ -124,6 +127,7 @@ async fn test_roundtrip_multiple_entries_prefix_compression() {
             None,
             0,
             None,
+            &mut crate::acl::AclEncoder::new(),
         )
         .await
         .unwrap();
@@ -140,6 +144,7 @@ async fn test_roundtrip_multiple_entries_prefix_compression() {
             &mut HardLinkDecoder::new(),
             &[],
             None,
+            &mut crate::acl::AclDecoder::new(),
         )
         .await
         .unwrap()
@@ -178,6 +183,7 @@ async fn test_roundtrip_directory() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -192,6 +198,7 @@ async fn test_roundtrip_directory() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -237,6 +244,7 @@ async fn test_roundtrip_with_uid_gid() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -251,6 +259,7 @@ async fn test_roundtrip_with_uid_gid() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -292,6 +301,7 @@ async fn test_roundtrip_symlink() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -306,6 +316,7 @@ async fn test_roundtrip_symlink() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -347,6 +358,7 @@ async fn test_roundtrip_with_checksum() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -361,6 +373,7 @@ async fn test_roundtrip_with_checksum() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -402,6 +415,7 @@ async fn test_roundtrip_same_mode_time() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -415,6 +429,7 @@ async fn test_roundtrip_same_mode_time() {
         None,
         1,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -436,6 +451,7 @@ async fn test_roundtrip_same_mode_time() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -450,6 +466,7 @@ async fn test_roundtrip_same_mode_time() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -486,6 +503,7 @@ async fn test_roundtrip_mtime_nsec() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -500,6 +518,7 @@ async fn test_roundtrip_mtime_nsec() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -527,6 +546,7 @@ async fn test_end_of_list_with_error() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -556,6 +576,7 @@ async fn test_end_of_list_legacy() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -600,6 +621,7 @@ async fn test_roundtrip_proto27() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -614,6 +636,7 @@ async fn test_roundtrip_proto27() {
         &mut HardLinkDecoder::new(),
         &[],
         None,
+        &mut crate::acl::AclDecoder::new(),
     )
     .await
     .unwrap()
@@ -654,6 +677,7 @@ async fn test_diagnostic_roundtrip() {
         None,
         0,
         None,
+        &mut crate::acl::AclEncoder::new(),
     )
     .await
     .unwrap();
@@ -811,6 +835,7 @@ mod proptests {
                     None,
                     0,
                     None,
+                    &mut crate::acl::AclEncoder::new(),
                 )
                 .await
                 .unwrap();
@@ -825,6 +850,7 @@ mod proptests {
                     &mut HardLinkDecoder::new(),
                     &[],
                     None,
+                    &mut crate::acl::AclDecoder::new(),
                 )
                 .await
                 .unwrap()
@@ -865,6 +891,7 @@ mod proptests {
                         None,
                         i as i32,
                         None,
+                        &mut crate::acl::AclEncoder::new(),
                     )
                     .await
                     .unwrap();
@@ -881,6 +908,7 @@ mod proptests {
                         &mut HardLinkDecoder::new(),
                         &[],
                         None,
+                        &mut crate::acl::AclDecoder::new(),
                     )
                     .await
                     .unwrap()

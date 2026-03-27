@@ -258,6 +258,23 @@ pub fn set_file_metadata(
                 tracing::warn!(path = %dest_path.display(), error = %e, "failed to set owner");
             }
         }
+
+        if options.preserve_acls() {
+            if let Some(crate::acl::Acl::Posix(ref acl)) = entry.acl {
+                let access_bytes = crate::acl::serialize_posix_acl_binary(&acl.access);
+                if let Err(e) = fs.set_xattr(dest_path, b"system.posix_acl_access", &access_bytes) {
+                    tracing::warn!(path = %dest_path.display(), error = %e, "failed to set access ACL");
+                }
+                if let Some(ref default) = acl.default {
+                    let default_bytes = crate::acl::serialize_posix_acl_binary(default);
+                    if let Err(e) =
+                        fs.set_xattr(dest_path, b"system.posix_acl_default", &default_bytes)
+                    {
+                        tracing::warn!(path = %dest_path.display(), error = %e, "failed to set default ACL");
+                    }
+                }
+            }
+        }
     }
 }
 

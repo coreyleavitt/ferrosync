@@ -127,6 +127,74 @@ impl<'a> FileListEnricher for SymlinkEnricher<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// AclEnricher
+// ---------------------------------------------------------------------------
+
+/// Enricher that reads POSIX ACLs from filesystem xattrs.
+///
+/// Reads `system.posix_acl_access` (and `system.posix_acl_default` for
+/// directories) xattrs and populates `entry.acl`.
+#[cfg(unix)]
+pub struct AclEnricher<'a> {
+    fs: &'a dyn FileSystem,
+}
+
+#[cfg(unix)]
+impl<'a> AclEnricher<'a> {
+    pub fn new(fs: &'a dyn FileSystem) -> Self {
+        Self { fs }
+    }
+}
+
+#[cfg(unix)]
+impl<'a> FileListEnricher for AclEnricher<'a> {
+    fn enrich(&self, entry: &mut FileEntry, path: &Path) {
+        // Symlinks don't have ACLs.
+        if entry.is_symlink() {
+            return;
+        }
+
+        let access = match self.fs.get_xattr(path, b"system.posix_acl_access") {
+            Ok(Some(data)) => match crate::acl::parse_posix_acl_binary(&data) {
+                Ok(acl) => Some(acl),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "failed to parse access ACL");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(e) => {
+                tracing::trace!(path = %path.display(), error = %e, "no access ACL");
+                None
+            }
+        };
+
+        let default = if entry.is_dir() {
+            match self.fs.get_xattr(path, b"system.posix_acl_default") {
+                Ok(Some(data)) => match crate::acl::parse_posix_acl_binary(&data) {
+                    Ok(acl) => Some(acl),
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "failed to parse default ACL");
+                        None
+                    }
+                },
+                Ok(None) => None,
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(access_acl) = access {
+            entry.acl = Some(crate::acl::Acl::Posix(crate::acl::PosixAcl {
+                access: access_acl,
+                default,
+            }));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HardLinkGrouper
 // ---------------------------------------------------------------------------
 
@@ -416,9 +484,14 @@ impl<'a> FileListScanner<'a> {
             prefix.to_vec()
         };
 
+        let mut dir_entry = dir_meta.to_file_entry(dir_name);
+        // Run per-entry enrichers on the directory itself.
+        for enricher in &self.enrichers {
+            enricher.enrich(&mut dir_entry, dir_path);
+        }
         items.push(FileListItem {
             index: *index,
-            entry: dir_meta.to_file_entry(dir_name),
+            entry: dir_entry,
             source_path: dir_path.to_path_buf(),
         });
         *index += 1;
@@ -506,7 +579,12 @@ impl<'a> FileListScanner<'a> {
         } else {
             prefix.to_vec()
         };
-        entries.push(dir_meta.to_file_entry(dir_name));
+        let mut dir_entry = dir_meta.to_file_entry(dir_name);
+        // Run per-entry enrichers on the directory itself.
+        for enricher in &self.enrichers {
+            enricher.enrich(&mut dir_entry, dir_path);
+        }
+        entries.push(dir_entry);
 
         // Per-directory filter merge (-F).
         let merged = self.push_filter_scope(dir_path, filters);

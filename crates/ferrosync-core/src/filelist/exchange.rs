@@ -69,6 +69,7 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     let mut delta_state = DeltaState::default();
     let mut hlink_encoder = HardLinkEncoder::new();
+    let mut acl_encoder = crate::acl::AclEncoder::new();
     for (i, entry) in entries.iter().enumerate() {
         send_file_entry(
             w,
@@ -79,6 +80,7 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
             entry.hard_link_info(),
             i as i32,
             None,
+            &mut acl_encoder,
         )
         .await?;
     }
@@ -107,6 +109,7 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
 
     let mut sender = IncrementalSender::default();
     let mut hlink_encoder = HardLinkEncoder::new();
+    let mut acl_encoder = crate::acl::AclEncoder::new();
 
     // C ref: flist.c -- inc_recurse NDX starts at 1 (flist_new() sets
     // ndx_start = flist_cnt, and flist_cnt starts at 1). Entry indices
@@ -127,6 +130,7 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
             entry.hard_link_info(),
             ndx_start + i as i32,
             None,
+            &mut acl_encoder,
         )
         .await?;
         sender.next_ndx += 1;
@@ -206,6 +210,7 @@ async fn recv_file_list_batch<R: AsyncRead + Unpin>(
     let mut entries = Vec::new();
     let mut delta_state = DeltaState::default();
     let mut hlink_decoder = HardLinkDecoder::new();
+    let mut acl_decoder = crate::acl::AclDecoder::new();
 
     while let ReadEntryResult::Entry(entry) = recv_file_entry(
         r,
@@ -214,6 +219,7 @@ async fn recv_file_list_batch<R: AsyncRead + Unpin>(
         &mut hlink_decoder,
         &entries,
         None,
+        &mut acl_decoder,
     )
     .await?
     {
@@ -339,6 +345,7 @@ async fn recv_file_list_batch_streaming<R: AsyncRead + Unpin>(
 ) -> Result<()> {
     let mut delta_state = DeltaState::default();
     let mut hlink_decoder = HardLinkDecoder::new();
+    let mut acl_decoder = crate::acl::AclDecoder::new();
     let mut entries = Vec::new();
 
     #[allow(clippy::while_let_loop)]
@@ -350,6 +357,7 @@ async fn recv_file_list_batch_streaming<R: AsyncRead + Unpin>(
             &mut hlink_decoder,
             &entries,
             None,
+            &mut acl_decoder,
         )
         .await?
         {

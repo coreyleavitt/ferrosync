@@ -168,6 +168,7 @@ async fn capture_rsync_flist_bytes(
     let mut delta_state = DeltaState::default();
     let mut hlink_decoder = HardLinkDecoder::new();
 
+    let mut acl_decoder = ferrosync_core::acl::AclDecoder::new();
     while let ReadEntryResult::Entry(entry) = decode_entry(
         &mut spy,
         &mut delta_state,
@@ -175,6 +176,7 @@ async fn capture_rsync_flist_bytes(
         &mut hlink_decoder,
         &entries,
         None,
+        &mut acl_decoder,
     )
     .await
     .expect("decode_entry failed")
@@ -223,6 +225,7 @@ async fn encode_entries(entries: &[FileEntry], opts: &FileListOptions) -> Vec<u8
     let mut buf = Vec::new();
     let mut state = DeltaState::default();
     let mut hlink_encoder = HardLinkEncoder::new();
+    let mut acl_encoder = ferrosync_core::acl::AclEncoder::new();
 
     for (i, entry) in entries.iter().enumerate() {
         encode_entry(
@@ -234,6 +237,7 @@ async fn encode_entries(entries: &[FileEntry], opts: &FileListOptions) -> Vec<u8
             None,
             i as i32,
             None,
+            &mut acl_encoder,
         )
         .await
         .unwrap();

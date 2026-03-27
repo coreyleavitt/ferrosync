@@ -111,9 +111,20 @@ impl IncrementalReceiver {
         delta_state.ndx_start = ndx_start;
         let mut entries = Vec::new();
         let mut hlink_decoder = HardLinkDecoder::new();
+        let mut acl_decoder = crate::acl::AclDecoder::new();
 
         loop {
-            match recv_file_entry(r, delta_state, opts, &mut hlink_decoder, &entries, None).await? {
+            match recv_file_entry(
+                r,
+                delta_state,
+                opts,
+                &mut hlink_decoder,
+                &entries,
+                None,
+                &mut acl_decoder,
+            )
+            .await?
+            {
                 ReadEntryResult::Entry(entry) => {
                     self.next_ndx += 1;
                     entries.push(*entry);
@@ -174,6 +185,7 @@ impl IncrementalSender {
         // in rsync's receiver. self.next_ndx tracks the current absolute NDX.
         let mut delta_state = DeltaState::default();
         let mut hlink_encoder = HardLinkEncoder::new();
+        let mut acl_encoder = crate::acl::AclEncoder::new();
         let ndx_start = self.next_ndx;
         for (i, entry) in entries.iter().enumerate() {
             send_file_entry(
@@ -185,6 +197,7 @@ impl IncrementalSender {
                 entry.hard_link_info(),
                 ndx_start + i as i32,
                 None,
+                &mut acl_encoder,
             )
             .await?;
             self.next_ndx += 1;

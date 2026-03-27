@@ -1281,3 +1281,159 @@ async fn test_transfer_bwlimit_throttles() {
         elapsed
     );
 }
+
+// ---------------------------------------------------------------------------
+// ACL preservation tests
+// ---------------------------------------------------------------------------
+
+/// Check if `setfacl` / `getfacl` are available (needed for ACL tests).
+fn has_acl_tools() -> bool {
+    std::process::Command::new("setfacl")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+/// Check if the filesystem supports ACLs by trying to set one.
+fn fs_supports_acls(dir: &Path) -> bool {
+    let test_file = dir.join(".acl_test");
+    std::fs::write(&test_file, "").unwrap();
+    let result = std::process::Command::new("setfacl")
+        .args(["-m", "u:1000:rw", test_file.to_str().unwrap()])
+        .output();
+    let _ = std::fs::remove_file(&test_file);
+    matches!(result, Ok(output) if output.status.success())
+}
+
+#[tokio::test]
+async fn test_transfer_acl_preserved() {
+    if !has_acl_tools() {
+        eprintln!("SKIP: setfacl/getfacl not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("acl_file.txt", b"ACL test content\n", Some(1700000000))
+        .with_src_dir("acl_dir")
+        .build();
+
+    if !fs_supports_acls(&env.src()) {
+        eprintln!("SKIP: filesystem does not support POSIX ACLs");
+        return;
+    }
+
+    // Set ACLs on source files using setfacl.
+    let src_file = env.src().join("acl_file.txt");
+    let status = std::process::Command::new("setfacl")
+        .args(["-m", "u:1000:rw", src_file.to_str().unwrap()])
+        .status()
+        .expect("setfacl failed");
+    assert!(status.success(), "setfacl on file failed");
+
+    let src_dir = env.src().join("acl_dir");
+    let status = std::process::Command::new("setfacl")
+        .args(["-m", "g:100:rx", src_dir.to_str().unwrap()])
+        .status()
+        .expect("setfacl failed");
+    assert!(status.success(), "setfacl on dir failed");
+
+    // Set default ACL on directory.
+    let status = std::process::Command::new("setfacl")
+        .args(["-d", "-m", "u:1000:rwx", src_dir.to_str().unwrap()])
+        .status()
+        .expect("setfacl -d failed");
+    assert!(status.success(), "setfacl default on dir failed");
+
+    // Transfer with --acls.
+    let options = TransferOptions::builder()
+        .archive()
+        .preserve_acls(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+    run_transfer(&options).await.unwrap();
+
+    // Verify file content.
+    let dst_file = env.dst().join("acl_file.txt");
+    assert_eq!(
+        std::fs::read(&dst_file).unwrap(),
+        b"ACL test content\n",
+        "file content should match"
+    );
+
+    // Verify ACLs were preserved using getfacl.
+    let output = std::process::Command::new("getfacl")
+        .args(["--omit-header", dst_file.to_str().unwrap()])
+        .output()
+        .expect("getfacl failed");
+    let acl_output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        acl_output.contains("user:1000:rw-") || acl_output.contains("user:"),
+        "file ACL should contain user:1000:rw-, got: {acl_output}"
+    );
+
+    // Verify directory ACLs.
+    let dst_dir = env.dst().join("acl_dir");
+    let output = std::process::Command::new("getfacl")
+        .args(["--omit-header", dst_dir.to_str().unwrap()])
+        .output()
+        .expect("getfacl on dir failed");
+    let dir_acl = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        dir_acl.contains("group:100:r-x") || dir_acl.contains("group:"),
+        "dir ACL should contain group:100:r-x, got: {dir_acl}"
+    );
+    assert!(
+        dir_acl.contains("default:user:1000:rwx") || dir_acl.contains("default:"),
+        "dir should have default ACL, got: {dir_acl}"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_no_acl_when_flag_absent() {
+    // Without --acls, ACLs should not be preserved.
+    if !has_acl_tools() {
+        eprintln!("SKIP: setfacl/getfacl not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("no_acl.txt", b"no ACL content\n", Some(1700000000))
+        .build();
+
+    if !fs_supports_acls(&env.src()) {
+        eprintln!("SKIP: filesystem does not support POSIX ACLs");
+        return;
+    }
+
+    // Set ACL on source.
+    let src_file = env.src().join("no_acl.txt");
+    let status = std::process::Command::new("setfacl")
+        .args(["-m", "u:1000:rw", src_file.to_str().unwrap()])
+        .status()
+        .expect("setfacl failed");
+    assert!(status.success());
+
+    // Transfer WITHOUT --acls.
+    let options = TransferOptions::builder()
+        .archive()
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+    run_transfer(&options).await.unwrap();
+
+    // Verify file exists with content.
+    let dst_file = env.dst().join("no_acl.txt");
+    assert_eq!(std::fs::read(&dst_file).unwrap(), b"no ACL content\n");
+
+    // Verify the extended ACL entry was NOT copied.
+    let output = std::process::Command::new("getfacl")
+        .args(["--omit-header", dst_file.to_str().unwrap()])
+        .output()
+        .expect("getfacl failed");
+    let acl_output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !acl_output.contains("user:1000:rw-"),
+        "ACL should NOT be preserved without --acls flag, got: {acl_output}"
+    );
+}

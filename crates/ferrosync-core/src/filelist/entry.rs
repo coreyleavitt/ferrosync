@@ -59,6 +59,9 @@ pub struct FileEntry {
     /// Populated by the scanner when `-H` is active so the encoder can
     /// detect duplicate inodes and emit XMIT_HLINKED flags.
     pub hard_link_info: Option<super::codec::HardLinkInfo>,
+
+    /// ACL data (when --acls / -A is active). None when ACLs not preserved.
+    pub acl: Option<crate::acl::Acl>,
 }
 
 impl FileEntry {

@@ -11,6 +11,8 @@ use crate::delta::checksum;
 use crate::delta::ProtocolContext;
 use crate::error::FsError;
 use crate::filelist::entry::FileEntry;
+#[cfg(unix)]
+use crate::filelist::scanner::AclEnricher;
 use crate::filelist::scanner::{
     self, FileListScanner, HardLinkGrouper, ScanOptions, SymlinkEnricher,
 };
@@ -179,6 +181,10 @@ async fn execute_transfer_impl(
         }
         if options.preserve_hard_links() {
             scanner.add_enricher(Box::new(HardLinkGrouper));
+        }
+        #[cfg(unix)]
+        if options.preserve_acls() {
+            scanner.add_enricher(Box::new(AclEnricher::new(fs)));
         }
         scanner.scan(source_paths, &mut filters)?
     };

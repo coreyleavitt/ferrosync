@@ -1,5 +1,5 @@
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y rsync openssh-server attr && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y rsync openssh-server attr acl && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /run/sshd /root/.ssh
 COPY tests/fixtures/ssh/test_key.pub /root/.ssh/authorized_keys
 RUN chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys

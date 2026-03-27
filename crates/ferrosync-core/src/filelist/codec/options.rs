@@ -29,6 +29,8 @@ pub struct FileListOptions {
     /// True if `--numeric-ids` is active. When set, uid/gid name lists
     /// are not exchanged on the wire.
     pub numeric_ids: bool,
+    /// True if ACLs are preserved (-A / --acls).
+    pub preserve_acls: bool,
 }
 
 impl Default for FileListOptions {
@@ -49,6 +51,7 @@ impl Default for FileListOptions {
             checksum_len: 16,
             xmit_id0_names: true,
             numeric_ids: false,
+            preserve_acls: false,
         }
     }
 }
@@ -76,6 +79,7 @@ impl FileListOptions {
                 & crate::protocol::handshake::compat_flags::ID0_NAMES
                 != 0,
             numeric_ids: opts.numeric_ids(),
+            preserve_acls: opts.preserve_acls(),
         }
     }
 

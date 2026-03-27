@@ -91,6 +91,7 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     hlink_info: Option<&HardLinkInfo>,
     entry_index: i32,
     iconv: Option<&crate::filelist::iconv::FilenameConverter>,
+    acl_encoder: &mut crate::acl::AclEncoder,
 ) -> Result<()> {
     // --- Filename encoding conversion (--iconv) ---
     let wire_name = if let Some(conv) = iconv {
@@ -158,6 +159,11 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     // --- File checksum ---
     fields::encode_checksum(w, entry.mode, &entry.checksum, opts).await?;
 
+    // --- ACL (after checksum, before xattrs) ---
+    if opts.preserve_acls && !entry.is_symlink() {
+        crate::acl::encode_acl(w, &entry.acl, entry.mode, acl_encoder).await?;
+    }
+
     // --- Update delta state ---
     state::update_delta_state(state, entry);
     state.prev_name = wire_name;
@@ -183,6 +189,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     hlink_decoder: &mut HardLinkDecoder,
     prev_entries: &[FileEntry],
     iconv: Option<&crate::filelist::iconv::FilenameConverter>,
+    acl_decoder: &mut crate::acl::AclDecoder,
 ) -> Result<ReadEntryResult> {
     // --- Read XMIT flags ---
     let flags = match decode_xmit_flags(r, opts).await? {
@@ -240,6 +247,15 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     // --- File checksum ---
     let checksum = fields::decode_checksum(r, mode, opts).await?;
 
+    // --- ACL (after checksum, before xattrs) ---
+    let is_symlink =
+        (mode & crate::filelist::entry::S_IFMT) == crate::filelist::entry::WIRE_S_IFLNK;
+    let acl = if opts.preserve_acls && !is_symlink {
+        crate::acl::decode_acl(r, mode, acl_decoder).await?
+    } else {
+        None
+    };
+
     let entry = FileEntry {
         name,
         len: crate::types::FileSize(len),
@@ -256,6 +272,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
         group_name,
         hlink_source: None,
         hard_link_info: None,
+        acl,
     };
 
     // --- Update delta state ---
