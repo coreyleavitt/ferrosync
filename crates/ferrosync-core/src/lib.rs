@@ -40,7 +40,7 @@ pub use ferrosync_filter as filter;
 pub use ferrosync_fs as fs;
 pub use ferrosync_protocol as protocol;
 pub mod server;
-pub mod transport;
+pub use ferrosync_transport as transport;
 pub mod xattr;
 
 // Re-export from ferrosync-types for backward compatibility.

@@ -18,8 +18,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
-use super::{Transport, TransportStreams};
-use crate::error::TransportError;
+use crate::{Transport, TransportStreams};
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 

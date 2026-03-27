@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::error::TransportError;
-use crate::transport::{Transport, TransportStreams};
+use crate::{Transport, TransportStreams};
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 

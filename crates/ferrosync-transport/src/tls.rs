@@ -15,8 +15,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use super::{Transport, TransportStreams};
-use crate::error::TransportError;
+use crate::{Transport, TransportStreams};
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 
@@ -288,7 +288,7 @@ impl Transport for TlsDaemonTransport {
                         .trim_start_matches("@RSYNCD: AUTHREQD ")
                         .trim()
                         .to_string();
-                    let response = super::daemon::compute_auth_response_for_tls(
+                    let response = crate::daemon::compute_auth_response_for_tls(
                         &challenge,
                         self.config.user.as_deref().unwrap_or(""),
                         self.config.password.as_deref().unwrap_or(""),

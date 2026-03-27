@@ -24,9 +24,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-use super::{Transport, TransportStreams};
-use crate::error::TransportError;
-use crate::protocol::handshake::MAX_PROTOCOL_VERSION;
+use crate::{Transport, TransportStreams};
+use ferrosync_protocol::handshake::MAX_PROTOCOL_VERSION;
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 
@@ -465,7 +465,7 @@ async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result
 
 /// Auth digest algorithm for daemon authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthDigest {
+pub enum AuthDigest {
     Md4,
     Md5,
 }
@@ -493,7 +493,7 @@ fn negotiate_auth_digest(server_digests: &[String]) -> AuthDigest {
 }
 
 /// Compute the authentication response for a daemon challenge (for use by TLS transport).
-pub(crate) fn compute_auth_response_for_tls(challenge: &str, user: &str, password: &str) -> String {
+pub fn compute_auth_response_for_tls(challenge: &str, user: &str, password: &str) -> String {
     compute_auth_response(challenge, user, password, AuthDigest::Md4)
 }
 

@@ -13,10 +13,10 @@ use std::time::Duration;
 use russh::client;
 use russh::keys::{self, PrivateKeyWithHashAlg, PublicKey};
 
-use super::ssh_auth::AuthPrompter;
-use super::ssh_config::{default_identity_files, resolve_ssh_config};
-use super::{Transport, TransportStreams};
-use crate::error::TransportError;
+use crate::ssh_auth::AuthPrompter;
+use crate::ssh_config::{default_identity_files, resolve_ssh_config};
+use crate::{Transport, TransportStreams};
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 

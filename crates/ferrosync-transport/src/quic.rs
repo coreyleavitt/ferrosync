@@ -14,8 +14,8 @@ use std::time::Duration;
 use quinn::{ClientConfig, Endpoint};
 use rustls::pki_types::ServerName;
 
-use super::{Transport, TransportStreams};
-use crate::error::TransportError;
+use crate::{Transport, TransportStreams};
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 

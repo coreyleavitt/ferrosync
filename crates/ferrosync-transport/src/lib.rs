@@ -20,7 +20,7 @@ use std::pin::Pin;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::TransportError;
+use ferrosync_types::error::TransportError;
 
 type Result<T> = std::result::Result<T, TransportError>;
 
@@ -29,7 +29,7 @@ pub struct TransportStreams {
     pub reader: Box<dyn AsyncRead + Unpin + Send>,
     pub writer: Box<dyn AsyncWrite + Unpin + Send>,
     /// Background task handle (e.g., child process monitor). Aborted on drop.
-    pub(crate) background_task: Option<tokio::task::JoinHandle<()>>,
+    pub background_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl TransportStreams {
