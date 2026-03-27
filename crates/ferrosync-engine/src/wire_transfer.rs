@@ -11,21 +11,21 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::delta::ops::DiffOp;
-use crate::delta::token::TokenWriter;
-use crate::delta::{checksum, matcher, sum, token, ProtocolContext};
-use crate::engine::progress::{ProgressEvent, ProgressTracker};
-use crate::engine::receiver;
-use crate::error::ProtocolError;
-use crate::filelist::entry::{FileEntry, S_IFMT, S_IFREG};
-use crate::fs::{FileData, FileSystem};
-use crate::protocol::compress::{Compressor, Decompressor};
-use crate::protocol::handshake::{CompressType, NegotiatedProtocol};
-use crate::protocol::multiplex::{BufferedMplexReader, MplexWriter, MuxConnection};
-use crate::protocol::varint;
-use crate::stats::TransferStats;
+use crate::progress::{ProgressEvent, ProgressTracker};
+use crate::receiver;
+use ferrosync_codec::entry::{FileEntry, S_IFMT, S_IFREG};
+use ferrosync_delta::ops::DiffOp;
+use ferrosync_delta::token::TokenWriter;
+use ferrosync_delta::{checksum, matcher, sum, token, ProtocolContext};
+use ferrosync_fs::{FileData, FileSystem};
+use ferrosync_protocol::compress::{Compressor, Decompressor};
+use ferrosync_protocol::handshake::{CompressType, NegotiatedProtocol};
+use ferrosync_protocol::multiplex::{BufferedMplexReader, MplexWriter, MuxConnection};
+use ferrosync_protocol::varint;
+use ferrosync_types::error::ProtocolError;
+use ferrosync_types::stats::TransferStats;
 
-type Result<T> = std::result::Result<T, crate::FerrosyncError>;
+type Result<T> = std::result::Result<T, ferrosync_types::FerrosyncError>;
 
 // ---------------------------------------------------------------------------
 // FileReader trait (sender side)
@@ -37,7 +37,10 @@ type Result<T> = std::result::Result<T, crate::FerrosyncError>;
 /// Server send uses module path to locate files.
 pub trait FileReader: Send + Sync {
     /// Read the source data for a file entry.
-    fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError>;
+    fn read_file(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<FileData, ferrosync_types::error::FsError>;
 
     /// Open a streaming reader for a file entry.
     ///
@@ -46,7 +49,7 @@ pub trait FileReader: Send + Sync {
     fn open_stream(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn Read + Send>, crate::error::FsError> {
+    ) -> std::result::Result<Box<dyn Read + Send>, ferrosync_types::error::FsError> {
         // Default: fall back to read_file + Cursor.
         let data = self.read_file(entry)?;
         let vec: Vec<u8> = data.to_vec();
@@ -67,14 +70,17 @@ impl<'a> LocalFileReader<'a> {
 }
 
 impl FileReader for LocalFileReader<'_> {
-    fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError> {
+    fn read_file(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<FileData, ferrosync_types::error::FsError> {
         let name_str = String::from_utf8_lossy(&entry.name);
         for source in self.source_paths {
             let path = if self.source_paths.len() == 1
                 && self
                     .fs
                     .lstat(source)
-                    .is_ok_and(|m| m.mode & S_IFMT == crate::filelist::entry::S_IFDIR)
+                    .is_ok_and(|m| m.mode & S_IFMT == ferrosync_codec::entry::S_IFDIR)
             {
                 source.join(name_str.as_ref())
             } else {
@@ -90,14 +96,14 @@ impl FileReader for LocalFileReader<'_> {
     fn open_stream(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn Read + Send>, crate::error::FsError> {
+    ) -> std::result::Result<Box<dyn Read + Send>, ferrosync_types::error::FsError> {
         let name_str = String::from_utf8_lossy(&entry.name);
         for source in self.source_paths {
             let path = if self.source_paths.len() == 1
                 && self
                     .fs
                     .lstat(source)
-                    .is_ok_and(|m| m.mode & S_IFMT == crate::filelist::entry::S_IFDIR)
+                    .is_ok_and(|m| m.mode & S_IFMT == ferrosync_codec::entry::S_IFDIR)
             {
                 source.join(name_str.as_ref())
             } else {
@@ -125,7 +131,10 @@ impl<'a> ModuleFileReader<'a> {
 }
 
 impl FileReader for ModuleFileReader<'_> {
-    fn read_file(&self, entry: &FileEntry) -> std::result::Result<FileData, crate::error::FsError> {
+    fn read_file(
+        &self,
+        entry: &FileEntry,
+    ) -> std::result::Result<FileData, ferrosync_types::error::FsError> {
         let name_str = String::from_utf8_lossy(&entry.name);
         let path = self.module_path.join(name_str.as_ref());
         Ok(self.fs.map_file(&path).unwrap_or_default())
@@ -134,7 +143,7 @@ impl FileReader for ModuleFileReader<'_> {
     fn open_stream(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn Read + Send>, crate::error::FsError> {
+    ) -> std::result::Result<Box<dyn Read + Send>, ferrosync_types::error::FsError> {
         let name_str = String::from_utf8_lossy(&entry.name);
         let path = self.module_path.join(name_str.as_ref());
         match self.fs.read_file_stream(&path) {
@@ -293,7 +302,7 @@ where
             stats.total_size += entry.len.as_u64();
             progress.emit(ProgressEvent::FileComplete {
                 index: ndx,
-                name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                name: crate::progress::name_to_pathbuf(&entry.name),
                 literal_bytes: entry.len.as_u64(),
                 matched_bytes: 0,
             });
@@ -305,7 +314,7 @@ where
 
         progress.emit(ProgressEvent::FileStart {
             index: ndx,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+            name: crate::progress::name_to_pathbuf(&entry.name),
             size: entry.len.bytes(),
         });
 
@@ -348,7 +357,7 @@ where
             AnyTokenWriter::Plain(token::PlainTokenWriter::new())
         };
 
-        if entry.len.bytes() >= crate::fs::STREAMING_THRESHOLD {
+        if entry.len.bytes() >= ferrosync_fs::STREAMING_THRESHOLD {
             // Streaming path: process in chunks to avoid O(file_size) memory.
             let mut stream_reader = file_reader.open_stream(entry)?;
             let mut smatcher =
@@ -358,7 +367,7 @@ where
             loop {
                 let (ops, done) = smatcher
                     .process_chunk(&mut *stream_reader, &mut file_hash)
-                    .map_err(crate::FerrosyncError::from)?;
+                    .map_err(ferrosync_types::FerrosyncError::from)?;
                 for op in &ops {
                     match op {
                         DiffOp::Literal(ref data) => {
@@ -435,7 +444,7 @@ where
 
         progress.emit(ProgressEvent::FileComplete {
             index: ndx,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+            name: crate::progress::name_to_pathbuf(&entry.name),
             literal_bytes,
             matched_bytes,
         });
@@ -460,7 +469,7 @@ where
 // Pipelined receiver loop
 // ---------------------------------------------------------------------------
 
-use super::receiver_engine::{EntryAction, HandledKind, ReceiverEngine};
+use crate::receiver_engine::{EntryAction, HandledKind, ReceiverEngine};
 
 /// Message from the generator task to the receiver task.
 enum GeneratorItem {
@@ -638,7 +647,7 @@ where
         // Signal completion.
         let _ = gen_tx.send(GeneratorItem::Done).await;
 
-        Ok::<MplexWriter<W>, crate::FerrosyncError>(mplex_out)
+        Ok::<MplexWriter<W>, ferrosync_types::FerrosyncError>(mplex_out)
     });
 
     // --- Receiver task (runs on current task) ---
@@ -660,7 +669,7 @@ where
                         stats.symlinks += 1;
                         progress.emit(ProgressEvent::FileComplete {
                             index: entry_idx as i32,
-                            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                            name: crate::progress::name_to_pathbuf(&entry.name),
                             literal_bytes: 0,
                             matched_bytes: 0,
                         });
@@ -670,7 +679,7 @@ where
                         stats.matched_data += entry.len.as_u64();
                         progress.emit(ProgressEvent::FileComplete {
                             index: entry_idx as i32,
-                            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                            name: crate::progress::name_to_pathbuf(&entry.name),
                             literal_bytes: 0,
                             matched_bytes: entry.len.as_u64(),
                         });
@@ -680,7 +689,7 @@ where
                         stats.total_size += entry.len.as_u64();
                         progress.emit(ProgressEvent::FileComplete {
                             index: entry_idx as i32,
-                            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                            name: crate::progress::name_to_pathbuf(&entry.name),
                             literal_bytes: entry.len.as_u64(),
                             matched_bytes: 0,
                         });
@@ -702,7 +711,7 @@ where
 
                 progress.emit(ProgressEvent::FileStart {
                     index: entry_idx as i32,
-                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    name: crate::progress::name_to_pathbuf(&entry.name),
                     size: entry.len.bytes(),
                 });
 
@@ -769,7 +778,7 @@ where
 
                 progress.emit(ProgressEvent::FileComplete {
                     index: entry_idx as i32,
-                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    name: crate::progress::name_to_pathbuf(&entry.name),
                     literal_bytes,
                     matched_bytes: 0,
                 });
@@ -781,7 +790,7 @@ where
     // Wait for generator task to complete and recover mplex_out.
     // We need mplex_out back for the phase exchange that follows.
     let mplex_out = generator_handle.await.map_err(|e| {
-        crate::FerrosyncError::Protocol(ProtocolError::Handshake {
+        ferrosync_types::FerrosyncError::Protocol(ProtocolError::Handshake {
             message: format!("generator task panicked: {e}"),
         })
     })??;

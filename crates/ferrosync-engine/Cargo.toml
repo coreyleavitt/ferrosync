@@ -1,0 +1,27 @@
+[package]
+name = "ferrosync-engine"
+description = "Transfer engine for ferrosync: dispatch, sender/receiver loops, session orchestration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferrosync-types = { workspace = true }
+ferrosync-protocol = { workspace = true }
+ferrosync-delta = { workspace = true }
+ferrosync-fs = { workspace = true }
+ferrosync-filter = { workspace = true }
+ferrosync-codec = { workspace = true }
+ferrosync-scanner = { workspace = true }
+ferrosync-transport = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+filetime = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = { workspace = true }

@@ -6,11 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::filelist::entry::FileEntry;
-use crate::fs::FileSystem;
-use crate::options::TransferConfig;
+use ferrosync_codec::entry::FileEntry;
+use ferrosync_fs::FileSystem;
+use ferrosync_types::options::TransferConfig;
 
-use super::progress::ItemizedChanges;
+use crate::progress::ItemizedChanges;
 
 /// Check if a file should be skipped based on existence checks.
 ///
@@ -172,7 +172,7 @@ pub fn create_backup(
     path: &Path,
     suffix: &str,
     backup_dir: Option<&Path>,
-) -> std::result::Result<(), crate::error::FsError> {
+) -> std::result::Result<(), ferrosync_types::error::FsError> {
     let file_name = path.file_name().unwrap_or_default();
     let backup_name = format!("{}{}", file_name.to_string_lossy(), suffix);
 
@@ -193,8 +193,8 @@ pub fn write_file_with_options(
     data: &[u8],
     entry: &FileEntry,
     options: &TransferConfig,
-    chmod: Option<&crate::chmod::ChmodSpec>,
-) -> std::result::Result<(), crate::FerrosyncError> {
+    chmod: Option<&ferrosync_codec::chmod::ChmodSpec>,
+) -> std::result::Result<(), ferrosync_types::FerrosyncError> {
     let mode = if options.preserve_perms() {
         Some(entry.mode & 0o7777)
     } else {
@@ -212,17 +212,17 @@ pub fn write_file_with_options(
         fs.write_file_sparse(dest_path, data, mode)?;
     } else if options.inplace() {
         fs.write_file_inplace(dest_path, data, mode)?;
-    } else if data.len() as i64 >= crate::fs::STREAMING_THRESHOLD {
+    } else if data.len() as i64 >= ferrosync_fs::STREAMING_THRESHOLD {
         use std::io::Write;
         let mut writer = fs.write_file_stream(dest_path, mode)?;
         writer.write_all(data).map_err(|e| {
-            crate::FerrosyncError::Fs(crate::error::FsError::Io {
+            ferrosync_types::FerrosyncError::Fs(ferrosync_types::error::FsError::Io {
                 path: dest_path.to_path_buf(),
                 source: std::sync::Arc::new(e),
             })
         })?;
         writer.flush().map_err(|e| {
-            crate::FerrosyncError::Fs(crate::error::FsError::Io {
+            ferrosync_types::FerrosyncError::Fs(ferrosync_types::error::FsError::Io {
                 path: dest_path.to_path_buf(),
                 source: std::sync::Arc::new(e),
             })
@@ -260,13 +260,13 @@ pub fn set_file_metadata(
         }
 
         if options.preserve_acls() {
-            if let Some(crate::acl::Acl::Posix(ref acl)) = entry.acl {
-                let access_bytes = crate::acl::serialize_posix_acl_binary(&acl.access);
+            if let Some(ferrosync_codec::acl::Acl::Posix(ref acl)) = entry.acl {
+                let access_bytes = ferrosync_codec::acl::serialize_posix_acl_binary(&acl.access);
                 if let Err(e) = fs.set_xattr(dest_path, b"system.posix_acl_access", &access_bytes) {
                     tracing::warn!(path = %dest_path.display(), error = %e, "failed to set access ACL");
                 }
                 if let Some(ref default) = acl.default {
-                    let default_bytes = crate::acl::serialize_posix_acl_binary(default);
+                    let default_bytes = ferrosync_codec::acl::serialize_posix_acl_binary(default);
                     if let Err(e) =
                         fs.set_xattr(dest_path, b"system.posix_acl_default", &default_bytes)
                     {
@@ -392,7 +392,7 @@ fn longest_common_subsequence_len(a: &[u8], b: &[u8]) -> usize {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::types::{FileSize, UnixTimestamp};
+    use ferrosync_types::types::{FileSize, UnixTimestamp};
 
     fn make_entry(name: &str, len: i64, mtime: i64) -> FileEntry {
         FileEntry {
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn test_ignore_times_never_skips() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("file.txt");
         std::fs::write(&dest, "hello").unwrap();
         filetime::set_file_mtime(&dest, filetime::FileTime::from_unix_time(1_700_000_000, 0))
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn test_size_only_skips_matching_size() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("file.txt");
         std::fs::write(&dest, "hello").unwrap();
         filetime::set_file_mtime(&dest, filetime::FileTime::from_unix_time(1_600_000_000, 0))
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_existing_skips_when_dest_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("nope.txt");
         let opts = TransferConfig::builder().existing(true).build();
         assert!(check_existence_skip(&fs, &dest, &opts));
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn test_existing_allows_when_dest_present() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("yes.txt");
         std::fs::write(&dest, "data").unwrap();
         let opts = TransferConfig::builder().existing(true).build();
@@ -456,7 +456,7 @@ mod tests {
     #[test]
     fn test_ignore_existing_skips_when_dest_present() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("yes.txt");
         std::fs::write(&dest, "data").unwrap();
         let opts = TransferConfig::builder().ignore_existing(true).build();
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_ignore_existing_allows_when_dest_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
         let dest = tmp.path().join("nope.txt");
         let opts = TransferConfig::builder().ignore_existing(true).build();
         assert!(!check_existence_skip(&fs, &dest, &opts));

@@ -15,24 +15,24 @@ use std::sync::Arc;
 
 use tokio::io::AsyncRead;
 
-use crate::engine::delete;
-use crate::engine::progress::{ProgressEvent, ProgressTracker};
-use crate::engine::wire_transfer::{self, LocalFileReader};
-use crate::error::FsError;
-use crate::filelist::entry::FileEntry;
-use crate::filelist::exchange;
-use crate::filelist::scanner::{FileListScanner, ScanOptions, SymlinkEnricher};
-use crate::filter::FilterRuleList;
-use crate::fs::FileSystem;
-use crate::options::{DeleteMode, TransferConfig, TransferOptions};
-use crate::protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
-use crate::protocol::multiplex::MuxConnection;
-use crate::stats::TransferStats;
-use crate::transport::Transport;
+use crate::delete;
+use crate::progress::{ProgressEvent, ProgressTracker};
+use crate::wire_transfer::{self, LocalFileReader};
+use ferrosync_codec::entry::FileEntry;
+use ferrosync_codec::exchange;
+use ferrosync_filter::FilterRuleList;
+use ferrosync_fs::FileSystem;
+use ferrosync_protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
+use ferrosync_protocol::multiplex::MuxConnection;
+use ferrosync_scanner::{FileListScanner, ScanOptions, SymlinkEnricher};
+use ferrosync_transport::Transport;
+use ferrosync_types::error::FsError;
+use ferrosync_types::options::{DeleteMode, TransferConfig, TransferOptions};
+use ferrosync_types::stats::TransferStats;
 
-use super::transfer::TransferResult;
+use crate::transfer::TransferResult;
 
-type Result<T> = std::result::Result<T, crate::FerrosyncError>;
+type Result<T> = std::result::Result<T, ferrosync_types::FerrosyncError>;
 
 // ---------------------------------------------------------------------------
 // Sync direction
@@ -153,13 +153,13 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
         condensed.push('F');
     }
     match opts.verbosity() {
-        crate::options::Verbosity::Quiet => condensed.push('q'),
-        crate::options::Verbosity::Verbose => condensed.push('v'),
-        crate::options::Verbosity::VeryVerbose => {
+        ferrosync_types::options::Verbosity::Quiet => condensed.push('q'),
+        ferrosync_types::options::Verbosity::Verbose => condensed.push('v'),
+        ferrosync_types::options::Verbosity::VeryVerbose => {
             condensed.push('v');
             condensed.push('v');
         }
-        crate::options::Verbosity::Debug => {
+        ferrosync_types::options::Verbosity::Debug => {
             condensed.push('v');
             condensed.push('v');
             condensed.push('v');
@@ -406,7 +406,7 @@ pub fn parse_server_args_config(
                 // Verbosity is cumulative but we just set it once here.
                 // Multiple v's are handled by the Verbosity enum already
                 // being set.
-                builder = builder.verbosity(crate::options::Verbosity::Verbose);
+                builder = builder.verbosity(ferrosync_types::options::Verbosity::Verbose);
             }
             _ => {}
         }
@@ -620,7 +620,7 @@ impl<T: Transport> SyncSession<T> {
             config.compress_choice(),
         )
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 
         tracing::info!(
             version = protocol.version,
@@ -709,24 +709,24 @@ async fn run_push(
         tracing::debug!(len = filter_data.len(), "push: sending filter list");
         mux.write_data(&filter_data)
             .await
-            .map_err(crate::FerrosyncError::Protocol)?;
+            .map_err(ferrosync_types::FerrosyncError::Protocol)?;
         mux.flush()
             .await
-            .map_err(|e| crate::FerrosyncError::Transport(e.into()))?;
+            .map_err(|e| ferrosync_types::FerrosyncError::Transport(e.into()))?;
     }
 
     // Build and send file list (MUX-framed).
     // C ref: send_file_list (flist.c), called from main.c:1153
     let mut entries = build_source_entries(fs, options)?;
-    crate::filelist::sort::canonical_sort(&mut entries);
+    ferrosync_codec::sort::canonical_sort(&mut entries);
     stats.total_files = entries.len() as u64;
-    let total_bytes: crate::types::FileSize = entries.iter().map(|e| e.len).sum();
+    let total_bytes: ferrosync_types::types::FileSize = entries.iter().map(|e| e.len).sum();
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
     exchange::send_file_list(&mut flist_buf, &entries, protocol, options)
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 
     tracing::debug!(
         entries = entries.len(),
@@ -736,10 +736,10 @@ async fn run_push(
 
     mux.write_data(&flist_buf)
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
     mux.flush()
         .await
-        .map_err(|e| crate::FerrosyncError::Transport(e.into()))?;
+        .map_err(|e| ferrosync_types::FerrosyncError::Transport(e.into()))?;
 
     // --list-only: print file list and return without transferring.
     if options.list_only() {
@@ -833,21 +833,21 @@ async fn run_pull(
     tracing::debug!(len = filter_data.len(), "pull: sending filter list");
     mux.write_data(&filter_data)
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
     mux.flush()
         .await
-        .map_err(|e| crate::FerrosyncError::Transport(e.into()))?;
+        .map_err(|e| ferrosync_types::FerrosyncError::Transport(e.into()))?;
 
     // Receive file list from remote.
     // C ref: recv_file_list (flist.c), called from main.c:992
     let received_flist = exchange::recv_file_list(&mut mux, protocol, options)
         .await
-        .map_err(crate::FerrosyncError::Protocol)?;
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
     let entries = received_flist.entries;
     let entry_ndx = received_flist.entry_ndx;
     stats.total_files = entries.len() as u64;
 
-    let total_bytes: crate::types::FileSize = entries.iter().map(|e| e.len).sum();
+    let total_bytes: ferrosync_types::types::FileSize = entries.iter().map(|e| e.len).sum();
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     tracing::debug!(count = entries.len(), "received file list");
@@ -928,7 +928,7 @@ async fn run_pull(
                 stats.total_size += entry.len.as_u64();
                 progress.emit(ProgressEvent::FileComplete {
                     index: idx as i32,
-                    name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                    name: crate::progress::name_to_pathbuf(&entry.name),
                     literal_bytes: entry.len.as_u64(),
                     matched_bytes: 0,
                 });
@@ -1011,17 +1011,21 @@ fn sanitize_path(dest: &std::path::Path, name: &str) -> Result<PathBuf> {
 
     // Reject absolute paths.
     if path.is_absolute() {
-        return Err(crate::FerrosyncError::Fs(FsError::PermissionDenied {
-            path: path.to_path_buf(),
-        }));
+        return Err(ferrosync_types::FerrosyncError::Fs(
+            FsError::PermissionDenied {
+                path: path.to_path_buf(),
+            },
+        ));
     }
 
     // Reject any ".." components.
     for component in path.components() {
         if matches!(component, Component::ParentDir) {
-            return Err(crate::FerrosyncError::Fs(FsError::PermissionDenied {
-                path: path.to_path_buf(),
-            }));
+            return Err(ferrosync_types::FerrosyncError::Fs(
+                FsError::PermissionDenied {
+                    path: path.to_path_buf(),
+                },
+            ));
         }
     }
 
@@ -1090,9 +1094,9 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result
     }
 
     let dir_mode = if options.recursive() {
-        crate::options::DirectoryMode::Recurse
+        ferrosync_types::options::DirectoryMode::Recurse
     } else {
-        crate::options::DirectoryMode::List
+        ferrosync_types::options::DirectoryMode::List
     };
     let scan_opts = ScanOptions {
         dir_mode,
@@ -1118,7 +1122,7 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::{DeleteMode, Verbosity};
+    use ferrosync_types::options::{DeleteMode, Verbosity};
 
     /// The condensed flag string (first element of the args vector).
     fn condensed(args: &[String]) -> &str {

@@ -8,15 +8,15 @@ use std::io::Read;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
-use crate::delta::checksum;
-use crate::delta::matcher::{self, StreamingMatcher};
-use crate::delta::ops::DiffOp;
-use crate::delta::sum::{self, SumStruct};
-use crate::delta::token::{self, PlainTokenWriter, TokenWriter};
-use crate::delta::ProtocolContext;
-use crate::error::ProtocolError;
-use crate::protocol::compress::Compressor;
-use crate::protocol::varint;
+use ferrosync_delta::checksum;
+use ferrosync_delta::matcher::{self, StreamingMatcher};
+use ferrosync_delta::ops::DiffOp;
+use ferrosync_delta::sum::{self, SumStruct};
+use ferrosync_delta::token::{self, PlainTokenWriter, TokenWriter};
+use ferrosync_delta::ProtocolContext;
+use ferrosync_protocol::compress::Compressor;
+use ferrosync_protocol::varint;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -149,9 +149,9 @@ async fn write_tokens_and_checksum<T: TokenWriter, W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::sum;
-    use crate::delta::ProtocolContext;
-    use crate::protocol::handshake::ChecksumType;
+    use ferrosync_delta::sum;
+    use ferrosync_delta::ProtocolContext;
+    use ferrosync_protocol::handshake::ChecksumType;
     use std::io::Cursor;
 
     #[tokio::test]

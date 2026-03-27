@@ -5,14 +5,14 @@
 
 use tokio::io::AsyncWriteExt;
 
-use crate::delta::sum;
-use crate::delta::ProtocolContext;
-use crate::error::ProtocolError;
-use crate::protocol::compress::{Compressor, Decompressor};
+use ferrosync_delta::sum;
+use ferrosync_delta::ProtocolContext;
+use ferrosync_protocol::compress::{Compressor, Decompressor};
+use ferrosync_types::error::ProtocolError;
 
-use super::generator;
-use super::receiver;
-use super::sender;
+use crate::generator;
+use crate::receiver;
+use crate::sender;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -117,7 +117,7 @@ pub async fn transfer_file_compressed(
     basis_data: &[u8],
     ctx: &ProtocolContext,
     compress_level: u32,
-    compress_type: crate::protocol::handshake::CompressType,
+    compress_type: ferrosync_protocol::handshake::CompressType,
 ) -> Result<Vec<u8>> {
     let (gen_write, gen_read) = tokio::io::duplex(64 * 1024);
     let (send_write, send_read) = tokio::io::duplex(64 * 1024);
@@ -182,7 +182,7 @@ pub async fn transfer_file_compressed(
         };
 
         let decompressor = Decompressor::from_type(compress_type)?;
-        let mut reader = crate::delta::token::CompressedTokenReader::new(decompressor);
+        let mut reader = ferrosync_delta::token::CompressedTokenReader::new(decompressor);
         receiver::recv_file_delta_with(&mut r, &mut reader, &recv_basis, blength, &ctx).await
     });
 
@@ -198,7 +198,7 @@ pub async fn transfer_file_compressed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::handshake::{ChecksumType, CompressType};
+    use ferrosync_protocol::handshake::{ChecksumType, CompressType};
 
     #[tokio::test]
     async fn test_transfer_new_file() {

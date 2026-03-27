@@ -6,12 +6,12 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::delta::checksum;
-use crate::delta::token::{self, Token, TokenReaderT};
-use crate::delta::ProtocolContext;
-use crate::error::ProtocolError;
-use crate::protocol::compress::Decompressor;
-use crate::protocol::varint;
+use ferrosync_delta::checksum;
+use ferrosync_delta::token::{self, Token, TokenReaderT};
+use ferrosync_delta::ProtocolContext;
+use ferrosync_protocol::compress::Decompressor;
+use ferrosync_protocol::varint;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -280,9 +280,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::{sum, token, ProtocolContext};
-    use crate::engine::sender;
-    use crate::protocol::handshake::ChecksumType;
+    use crate::sender;
+    use ferrosync_delta::{sum, token, ProtocolContext};
+    use ferrosync_protocol::handshake::ChecksumType;
     use std::io::Cursor;
 
     #[tokio::test]
@@ -385,7 +385,7 @@ mod tests {
 
         // Build valid tokens but corrupt the checksum (no sum head in manual construction).
         let mut buf = Vec::new();
-        crate::protocol::varint::write_int(&mut buf, 0)
+        ferrosync_protocol::varint::write_int(&mut buf, 0)
             .await
             .unwrap();
         token::send_data(&mut buf, source).await.unwrap();
@@ -409,7 +409,7 @@ mod tests {
     #[tokio::test]
     async fn test_recv_done_signal() {
         let mut buf = Vec::new();
-        crate::protocol::varint::write_int(&mut buf, -1)
+        ferrosync_protocol::varint::write_int(&mut buf, -1)
             .await
             .unwrap();
 

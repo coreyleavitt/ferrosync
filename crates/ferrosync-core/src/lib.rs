@@ -34,7 +34,7 @@
 pub use ferrosync_codec::acl;
 pub use ferrosync_codec::chmod;
 pub use ferrosync_delta as delta;
-pub mod engine;
+pub use ferrosync_engine as engine;
 pub mod filelist;
 pub use ferrosync_filter as filter;
 pub use ferrosync_fs as fs;

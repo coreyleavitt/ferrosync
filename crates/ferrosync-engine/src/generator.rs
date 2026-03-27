@@ -5,10 +5,10 @@
 
 use tokio::io::AsyncWrite;
 
-use crate::delta::sum::{self, SumStruct};
-use crate::delta::ProtocolContext;
-use crate::error::ProtocolError;
-use crate::protocol::varint;
+use ferrosync_delta::sum::{self, SumStruct};
+use ferrosync_delta::ProtocolContext;
+use ferrosync_protocol::varint;
+use ferrosync_types::error::ProtocolError;
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
@@ -57,8 +57,8 @@ pub async fn recv_file_signatures<R: tokio::io::AsyncRead + Unpin>(r: &mut R) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta::ProtocolContext;
-    use crate::protocol::handshake::ChecksumType;
+    use ferrosync_delta::ProtocolContext;
+    use ferrosync_protocol::handshake::ChecksumType;
     use std::io::Cursor;
 
     #[tokio::test]

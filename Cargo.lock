@@ -1063,6 +1063,7 @@ dependencies = [
  "fastcdc",
  "ferrosync-codec",
  "ferrosync-delta",
+ "ferrosync-engine",
  "ferrosync-filter",
  "ferrosync-fs",
  "ferrosync-protocol",
@@ -1103,6 +1104,24 @@ dependencies = [
  "tokio",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "ferrosync-engine"
+version = "0.3.0-beta.15"
+dependencies = [
+ "ferrosync-codec",
+ "ferrosync-delta",
+ "ferrosync-filter",
+ "ferrosync-fs",
+ "ferrosync-protocol",
+ "ferrosync-scanner",
+ "ferrosync-transport",
+ "ferrosync-types",
+ "filetime",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

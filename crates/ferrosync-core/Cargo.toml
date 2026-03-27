@@ -20,6 +20,7 @@ ferrosync-transport = { workspace = true }
 ferrosync-types = { workspace = true }
 ferrosync-codec = { workspace = true }
 ferrosync-scanner = { workspace = true }
+ferrosync-engine = { workspace = true }
 tracing = { workspace = true }
 fastcdc = { workspace = true }
 md-5 = { workspace = true }

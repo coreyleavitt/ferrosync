@@ -7,27 +7,27 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::delta::checksum;
-use crate::delta::ProtocolContext;
-use crate::error::FsError;
-use crate::filelist::entry::FileEntry;
-use crate::filelist::scanner::{
-    self, FileListScanner, HardLinkGrouper, ScanOptions, SymlinkEnricher,
+use ferrosync_codec::entry::FileEntry;
+use ferrosync_delta::checksum;
+use ferrosync_delta::ProtocolContext;
+use ferrosync_filter::FilterRuleList;
+use ferrosync_fs::FileSystem;
+use ferrosync_protocol::handshake::NegotiatedProtocol;
+use ferrosync_scanner::{
+    self as scanner, FileListScanner, HardLinkGrouper, ScanOptions, SymlinkEnricher,
 };
 #[cfg(unix)]
-use crate::filelist::scanner::{AclEnricher, XattrEnricher};
-use crate::filter::FilterRuleList;
-use crate::fs::FileSystem;
-use crate::options::{DeleteMode, TransferConfig, TransferOptions};
-use crate::protocol::handshake::NegotiatedProtocol;
-use crate::stats::TransferStats;
+use ferrosync_scanner::{AclEnricher, XattrEnricher};
+use ferrosync_types::error::FsError;
+use ferrosync_types::options::{DeleteMode, TransferConfig, TransferOptions};
+use ferrosync_types::stats::TransferStats;
 
-use super::delete;
-use super::file_decision;
-use super::pipeline;
-use super::progress::{ProgressEvent, ProgressTracker};
+use crate::delete;
+use crate::file_decision;
+use crate::pipeline;
+use crate::progress::{ProgressEvent, ProgressTracker};
 
-type Result<T> = std::result::Result<T, crate::FerrosyncError>;
+type Result<T> = std::result::Result<T, ferrosync_types::FerrosyncError>;
 
 /// Result of a complete transfer operation.
 #[derive(Debug)]
@@ -67,7 +67,7 @@ pub async fn execute_transfer_config(
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(crate::FerrosyncError::Fs(FsError::Io {
+            Err(_) => Err(ferrosync_types::FerrosyncError::Fs(FsError::Io {
                 path: PathBuf::from("<timeout>"),
                 source: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -123,7 +123,7 @@ pub async fn execute_transfer_streaming(
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(crate::FerrosyncError::Fs(FsError::Io {
+            Err(_) => Err(ferrosync_types::FerrosyncError::Fs(FsError::Io {
                 path: PathBuf::from("<timeout>"),
                 source: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -435,14 +435,14 @@ async fn execute_transfer_impl(
                         &basis_data,
                         ctx,
                         options.compress_level(),
-                        crate::protocol::handshake::CompressType::Zlib,
+                        ferrosync_protocol::handshake::CompressType::Zlib,
                     )
                     .await
-                    .map_err(crate::FerrosyncError::Protocol)?
+                    .map_err(ferrosync_types::FerrosyncError::Protocol)?
                 } else {
                     pipeline::transfer_file(&source_data, &basis_data, ctx)
                         .await
-                        .map_err(crate::FerrosyncError::Protocol)?
+                        .map_err(ferrosync_types::FerrosyncError::Protocol)?
                 };
                 let literal_bytes = data.len() as u64;
 
@@ -552,7 +552,7 @@ async fn execute_transfer_streaming_impl(
             stats.symlinks += 1;
             progress.emit(ProgressEvent::FileComplete {
                 index,
-                name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                name: crate::progress::name_to_pathbuf(&entry.name),
                 literal_bytes: 0,
                 matched_bytes: 0,
             });
@@ -570,7 +570,7 @@ async fn execute_transfer_streaming_impl(
             stats.files_skipped += 1;
             progress.emit(ProgressEvent::FileSkipped {
                 index,
-                name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                name: crate::progress::name_to_pathbuf(&entry.name),
             });
             index += 1;
             continue;
@@ -583,7 +583,7 @@ async fn execute_transfer_streaming_impl(
         // pipeline to the transport streams) is deferred to the CLI phase.
         progress.emit(ProgressEvent::FileStart {
             index,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+            name: crate::progress::name_to_pathbuf(&entry.name),
             size: entry.len.bytes(),
         });
 
@@ -592,7 +592,7 @@ async fn execute_transfer_streaming_impl(
             stats.total_size += entry.len.as_u64();
             progress.emit(ProgressEvent::FileComplete {
                 index,
-                name: crate::engine::progress::name_to_pathbuf(&entry.name),
+                name: crate::progress::name_to_pathbuf(&entry.name),
                 literal_bytes: entry.len.as_u64(),
                 matched_bytes: 0,
             });
@@ -610,7 +610,7 @@ async fn execute_transfer_streaming_impl(
 
         progress.emit(ProgressEvent::FileComplete {
             index,
-            name: crate::engine::progress::name_to_pathbuf(&entry.name),
+            name: crate::progress::name_to_pathbuf(&entry.name),
             literal_bytes: entry.len.as_u64(),
             matched_bytes: 0,
         });
@@ -625,9 +625,9 @@ async fn execute_transfer_streaming_impl(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::delta::chunker::ChunkingStrategy;
-    use crate::fs::unix::UnixFileSystem;
-    use crate::types::{FileSize, UnixTimestamp};
+    use ferrosync_delta::chunker::ChunkingStrategy;
+    use ferrosync_fs::unix::UnixFileSystem;
+    use ferrosync_types::types::{FileSize, UnixTimestamp};
     use tempfile::TempDir;
 
     async fn do_transfer(
@@ -639,7 +639,7 @@ mod tests {
         let mut progress = ProgressTracker::new();
         let ctx = ProtocolContext {
             seed: 42,
-            checksum_type: crate::protocol::handshake::ChecksumType::Md5,
+            checksum_type: ferrosync_protocol::handshake::ChecksumType::Md5,
             char_offset: 0,
             proper_seed_order: true,
             block_size_override: None,
@@ -1294,7 +1294,7 @@ mod tests {
         let fs = UnixFileSystem::new();
         let ctx = ProtocolContext {
             seed: 42,
-            checksum_type: crate::protocol::handshake::ChecksumType::Md5,
+            checksum_type: ferrosync_protocol::handshake::ChecksumType::Md5,
             char_offset: 0,
             proper_seed_order: true,
             block_size_override: None,
@@ -1311,10 +1311,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_transfer_protocol() {
-        use crate::protocol::handshake::{
+        use ferrosync_protocol::handshake::{
             compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
         };
-        use crate::protocol::wire_format::WireFormat;
+        use ferrosync_protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src");
@@ -1354,11 +1354,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_streaming_transfer_dry_run() {
-        use crate::filelist::entry::S_IFREG;
-        use crate::protocol::handshake::{
+        use ferrosync_codec::entry::S_IFREG;
+        use ferrosync_protocol::handshake::{
             compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
         };
-        use crate::protocol::wire_format::WireFormat;
+        use ferrosync_protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("dst");
@@ -1417,11 +1417,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_streaming_transfer_directories() {
-        use crate::filelist::entry::{S_IFDIR, S_IFREG};
-        use crate::protocol::handshake::{
+        use ferrosync_codec::entry::{S_IFDIR, S_IFREG};
+        use ferrosync_protocol::handshake::{
             compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
         };
-        use crate::protocol::wire_format::WireFormat;
+        use ferrosync_protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("dst");
@@ -1477,11 +1477,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_streaming_transfer_with_size_filter() {
-        use crate::filelist::entry::S_IFREG;
-        use crate::protocol::handshake::{
+        use ferrosync_codec::entry::S_IFREG;
+        use ferrosync_protocol::handshake::{
             compat_flags, ChecksumType, CompressType, NegotiatedProtocol,
         };
-        use crate::protocol::wire_format::WireFormat;
+        use ferrosync_protocol::wire_format::WireFormat;
 
         let tmp = TempDir::new().unwrap();
         let dst = tmp.path().join("dst");

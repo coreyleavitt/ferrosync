@@ -196,7 +196,7 @@ impl ProgressTracker {
 /// On Unix, uses `OsStr::from_encoded_bytes_unchecked` to preserve
 /// arbitrary byte sequences. On other platforms, uses lossy UTF-8 conversion.
 pub fn name_to_pathbuf(bytes: &[u8]) -> PathBuf {
-    crate::filelist::entry::FileEntry::name_to_pathbuf(bytes)
+    ferrosync_codec::entry::FileEntry::name_to_pathbuf(bytes)
 }
 
 #[cfg(test)]

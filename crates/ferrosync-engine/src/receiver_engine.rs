@@ -24,12 +24,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::chmod::ChmodSpec;
-use crate::engine::file_decision;
-use crate::error::FsError;
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFLNK, S_IFMT};
-use crate::fs::{FileData, FileSystem};
-use crate::options::TransferConfig;
+use crate::file_decision;
+use ferrosync_codec::chmod::ChmodSpec;
+use ferrosync_codec::entry::{FileEntry, S_IFDIR, S_IFLNK, S_IFMT};
+use ferrosync_fs::{FileData, FileSystem};
+use ferrosync_types::error::FsError;
+use ferrosync_types::options::TransferConfig;
 
 // ---------------------------------------------------------------------------
 // dispatch_entry types
@@ -178,7 +178,7 @@ impl ReceiverEngine {
         entry: &FileEntry,
         data: &[u8],
         source_path: Option<&Path>,
-    ) -> std::result::Result<(), crate::FerrosyncError> {
+    ) -> std::result::Result<(), ferrosync_types::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
         // --backup: create backup before overwriting.
@@ -240,7 +240,7 @@ impl ReceiverEngine {
     pub fn create_writer(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<Box<dyn std::io::Write + Send>, crate::FerrosyncError> {
+    ) -> std::result::Result<Box<dyn std::io::Write + Send>, ferrosync_types::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
         // --append: open file in append mode, preserving existing content.
@@ -258,7 +258,7 @@ impl ReceiverEngine {
                 .create(true)
                 .open(&dest_path)
                 .map_err(|e| {
-                    crate::FerrosyncError::Fs(crate::error::FsError::Io {
+                    ferrosync_types::FerrosyncError::Fs(ferrosync_types::error::FsError::Io {
                         path: dest_path.clone(),
                         source: std::sync::Arc::new(e),
                     })
@@ -318,7 +318,7 @@ impl ReceiverEngine {
         &self,
         entry: &FileEntry,
         source_path: Option<&Path>,
-    ) -> std::result::Result<(), crate::FerrosyncError> {
+    ) -> std::result::Result<(), ferrosync_types::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
         // Backup was already created in create_writer() (before the write).
@@ -391,7 +391,7 @@ impl ReceiverEngine {
     pub fn create_symlink(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<bool, crate::FerrosyncError> {
+    ) -> std::result::Result<bool, ferrosync_types::FerrosyncError> {
         if self.options.safe_links() && file_decision::is_unsafe_symlink(&entry.link_target) {
             tracing::warn!(
                 path = %self.dest_path(entry).display(),
@@ -449,7 +449,7 @@ impl ReceiverEngine {
     pub fn dispatch_entry(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<EntryAction, crate::FerrosyncError> {
+    ) -> std::result::Result<EntryAction, ferrosync_types::FerrosyncError> {
         dispatch_entry_impl(
             &*self.fs,
             &self.dest,
@@ -468,7 +468,7 @@ impl ReceiverEngine {
         entry: &FileEntry,
         data: &[u8],
         source_path: Option<&Path>,
-    ) -> std::result::Result<(), crate::FerrosyncError> {
+    ) -> std::result::Result<(), ferrosync_types::FerrosyncError> {
         self.receive_file(entry, data, source_path)
     }
 
@@ -477,7 +477,7 @@ impl ReceiverEngine {
         &self,
         deferred: &[(&FileEntry, Vec<u8>)],
         all_entries: &[FileEntry],
-    ) -> std::result::Result<u64, crate::FerrosyncError> {
+    ) -> std::result::Result<u64, ferrosync_types::FerrosyncError> {
         create_deferred_hardlinks_impl(&*self.fs, &self.dest, &self.options, deferred, all_entries)
     }
 
@@ -623,7 +623,7 @@ impl<'a> ReceiverRef<'a> {
         entry: &FileEntry,
         data: &[u8],
         source_path: Option<&Path>,
-    ) -> std::result::Result<(), crate::FerrosyncError> {
+    ) -> std::result::Result<(), ferrosync_types::FerrosyncError> {
         let dest_path = self.dest_path(entry);
 
         if self.options.backup() && self.fs.lexists(&dest_path) {
@@ -709,7 +709,7 @@ impl<'a> ReceiverRef<'a> {
     pub fn create_symlink(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<bool, crate::FerrosyncError> {
+    ) -> std::result::Result<bool, ferrosync_types::FerrosyncError> {
         if self.options.safe_links() && file_decision::is_unsafe_symlink(&entry.link_target) {
             tracing::warn!(
                 path = %self.dest_path(entry).display(),
@@ -741,7 +741,7 @@ impl<'a> ReceiverRef<'a> {
     pub fn dispatch_entry(
         &self,
         entry: &FileEntry,
-    ) -> std::result::Result<EntryAction, crate::FerrosyncError> {
+    ) -> std::result::Result<EntryAction, ferrosync_types::FerrosyncError> {
         dispatch_entry_impl(
             self.fs,
             self.dest,
@@ -758,7 +758,7 @@ impl<'a> ReceiverRef<'a> {
         entry: &FileEntry,
         data: &[u8],
         source_path: Option<&Path>,
-    ) -> std::result::Result<(), crate::FerrosyncError> {
+    ) -> std::result::Result<(), ferrosync_types::FerrosyncError> {
         self.receive_file(entry, data, source_path)
     }
 
@@ -767,7 +767,7 @@ impl<'a> ReceiverRef<'a> {
         &self,
         deferred: &[(&FileEntry, Vec<u8>)],
         all_entries: &[FileEntry],
-    ) -> std::result::Result<u64, crate::FerrosyncError> {
+    ) -> std::result::Result<u64, ferrosync_types::FerrosyncError> {
         create_deferred_hardlinks_impl(self.fs, self.dest, self.options, deferred, all_entries)
     }
 }
@@ -809,13 +809,13 @@ fn create_directory_impl(
         // Apply ACLs to the directory.
         #[cfg(unix)]
         if options.preserve_acls() {
-            if let Some(crate::acl::Acl::Posix(ref acl)) = entry.acl {
-                let access_bytes = crate::acl::serialize_posix_acl_binary(&acl.access);
+            if let Some(ferrosync_codec::acl::Acl::Posix(ref acl)) = entry.acl {
+                let access_bytes = ferrosync_codec::acl::serialize_posix_acl_binary(&acl.access);
                 if let Err(e) = fs.set_xattr(dest_path, b"system.posix_acl_access", &access_bytes) {
                     tracing::warn!(path = %dest_path.display(), error = %e, "failed to set dir access ACL");
                 }
                 if let Some(ref default) = acl.default {
-                    let default_bytes = crate::acl::serialize_posix_acl_binary(default);
+                    let default_bytes = ferrosync_codec::acl::serialize_posix_acl_binary(default);
                     if let Err(e) =
                         fs.set_xattr(dest_path, b"system.posix_acl_default", &default_bytes)
                     {
@@ -835,7 +835,7 @@ fn create_symlink_impl(
     dest: &Path,
     entry: &FileEntry,
     options: &TransferConfig,
-) -> std::result::Result<bool, crate::FerrosyncError> {
+) -> std::result::Result<bool, ferrosync_types::FerrosyncError> {
     if options.safe_links() && file_decision::is_unsafe_symlink(&entry.link_target) {
         tracing::warn!(
             path = %dest.join(entry.path()).display(),
@@ -918,7 +918,7 @@ fn dispatch_entry_impl(
     options: &TransferConfig,
     chmod_spec: Option<&ChmodSpec>,
     resolved_link_dests: &[PathBuf],
-) -> std::result::Result<EntryAction, crate::FerrosyncError> {
+) -> std::result::Result<EntryAction, ferrosync_types::FerrosyncError> {
     let dest_path = dest.join(entry.path());
 
     // 1. Directory
@@ -993,7 +993,7 @@ fn create_deferred_hardlinks_impl(
     options: &TransferConfig,
     deferred: &[(&FileEntry, Vec<u8>)],
     all_entries: &[FileEntry],
-) -> std::result::Result<u64, crate::FerrosyncError> {
+) -> std::result::Result<u64, ferrosync_types::FerrosyncError> {
     let mut count = 0;
     for (dup_entry, source_name) in deferred {
         if let Some(source) = all_entries.iter().find(|e| e.name == *source_name) {

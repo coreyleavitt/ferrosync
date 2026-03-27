@@ -8,10 +8,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::FsError;
-use crate::filelist::entry::{FileEntry, S_IFDIR, S_IFMT};
-use crate::filter::FilterRuleList;
-use crate::fs::FileSystem;
+use ferrosync_codec::entry::{FileEntry, S_IFDIR, S_IFMT};
+use ferrosync_filter::FilterRuleList;
+use ferrosync_fs::FileSystem;
+use ferrosync_types::error::FsError;
 
 // ---------------------------------------------------------------------------
 // DeleteBudget
@@ -280,7 +280,7 @@ mod tests {
     fn test_prune_empty_dirs_removes_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
 
         std::fs::create_dir_all(root.join("empty_a")).unwrap();
         std::fs::create_dir_all(root.join("has_file")).unwrap();
@@ -302,7 +302,7 @@ mod tests {
     fn test_prune_empty_dirs_dry_run() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let fs = crate::fs::unix::UnixFileSystem::new();
+        let fs = ferrosync_fs::unix::UnixFileSystem::new();
 
         std::fs::create_dir_all(root.join("empty")).unwrap();
 
