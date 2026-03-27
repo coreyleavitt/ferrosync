@@ -18,16 +18,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::mpsc;
 
 use crate::error::ProtocolError;
-use crate::protocol::constants::{DATA_CHUNK_SIZE, MPLEX_BUF_SIZE};
+use crate::protocol::constants::{DATA_CHUNK_SIZE, MPLEX_BASE, MPLEX_BUF_SIZE};
 
 type Result<T> = std::result::Result<T, ProtocolError>;
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Offset added to message codes in the tag byte.
-const MPLEX_BASE: u8 = 7;
 
 /// Maximum payload size per multiplexed frame (24 bits).
 const MAX_PAYLOAD: u32 = 0x00FF_FFFF;

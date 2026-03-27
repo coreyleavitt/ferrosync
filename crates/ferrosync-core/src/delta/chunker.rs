@@ -10,41 +10,7 @@
 
 use fastcdc::v2020::FastCDC;
 
-/// Strategy for splitting data into blocks.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChunkingStrategy {
-    /// Traditional fixed-size blocks (rsync-compatible default).
-    Fixed {
-        /// Block size in bytes.
-        block_size: usize,
-    },
-    /// FastCDC content-defined chunking with variable-size blocks.
-    FastCDC {
-        /// Minimum chunk size in bytes.
-        min: usize,
-        /// Average (target) chunk size in bytes.
-        avg: usize,
-        /// Maximum chunk size in bytes.
-        max: usize,
-    },
-}
-
-impl Default for ChunkingStrategy {
-    fn default() -> Self {
-        Self::Fixed { block_size: 700 }
-    }
-}
-
-impl ChunkingStrategy {
-    /// Default CDC parameters: min=2KB, avg=8KB, max=64KB.
-    pub fn default_cdc() -> Self {
-        Self::FastCDC {
-            min: 2 * 1024,
-            avg: 8 * 1024,
-            max: 64 * 1024,
-        }
-    }
-}
+pub use ferrosync_types::protocol::ChunkingStrategy;
 
 /// Information about a single chunk produced by the chunker.
 #[derive(Debug, Clone, PartialEq, Eq)]

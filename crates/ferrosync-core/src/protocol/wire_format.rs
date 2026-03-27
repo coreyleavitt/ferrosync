@@ -6,40 +6,13 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub use ferrosync_types::protocol::{DeviceCodec, FlagsCodec, IntCodec};
+
 use super::handshake::compat_flags;
 use super::multiplex::MplexWriter;
 use super::varint;
 use crate::error::ProtocolError;
 use crate::stats::TransferStats;
-
-/// Integer encoding strategy on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntCodec {
-    /// Proto < 30: 4-byte LE, sentinel longint, fixed NDX.
-    Fixed,
-    /// Proto >= 30: varint, varlong, delta-encoded NDX.
-    Compact,
-}
-
-/// XMIT flag encoding in file list entries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlagsCodec {
-    /// Proto < 28: single byte.
-    Byte,
-    /// Proto 28-29: byte + optional extended byte.
-    ByteExtended,
-    /// Proto >= 30 with CF_VARINT_FLIST_FLAGS.
-    Varint,
-}
-
-/// Device number encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceCodec {
-    /// Proto < 28: single integer.
-    SingleInt,
-    /// Proto >= 28: separate major/minor (varint_minor when proto >= 30).
-    MajorMinor { varint_minor: bool },
-}
 
 /// All version-dependent wire format decisions, resolved at handshake time.
 ///
