@@ -1437,3 +1437,186 @@ async fn test_transfer_no_acl_when_flag_absent() {
         "ACL should NOT be preserved without --acls flag, got: {acl_output}"
     );
 }
+
+/// Check if the filesystem supports user xattrs.
+fn fs_supports_xattrs(dir: &Path) -> bool {
+    let test_file = dir.join(".xattr_test");
+    std::fs::write(&test_file, "").unwrap();
+    let result = std::process::Command::new("setfattr")
+        .args([
+            "-n",
+            "user.test",
+            "-v",
+            "hello",
+            test_file.to_str().unwrap(),
+        ])
+        .output();
+    let _ = std::fs::remove_file(&test_file);
+    matches!(result, Ok(output) if output.status.success())
+}
+
+/// Check if setfattr/getfattr commands are available.
+fn has_xattr_tools() -> bool {
+    std::process::Command::new("setfattr")
+        .arg("--help")
+        .output()
+        .is_ok()
+        && std::process::Command::new("getfattr")
+            .arg("--help")
+            .output()
+            .is_ok()
+}
+
+#[tokio::test]
+async fn test_transfer_xattr_preserved() {
+    if !has_xattr_tools() {
+        eprintln!("SKIP: setfattr/getfattr not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("xattr_file.txt", b"xattr test content\n", Some(1700000000))
+        .build();
+
+    if !fs_supports_xattrs(&env.src()) {
+        eprintln!("SKIP: filesystem does not support user xattrs");
+        return;
+    }
+
+    // Set xattrs on source file.
+    let src_file = env.src().join("xattr_file.txt");
+    let status = std::process::Command::new("setfattr")
+        .args(["-n", "user.color", "-v", "blue", src_file.to_str().unwrap()])
+        .status()
+        .expect("setfattr failed");
+    assert!(status.success(), "setfattr on file failed");
+
+    let status = std::process::Command::new("setfattr")
+        .args([
+            "-n",
+            "user.priority",
+            "-v",
+            "high",
+            src_file.to_str().unwrap(),
+        ])
+        .status()
+        .expect("setfattr failed");
+    assert!(status.success(), "setfattr second attr failed");
+
+    // Transfer with --xattrs.
+    let options = TransferOptions::builder()
+        .archive()
+        .preserve_xattrs(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+    run_transfer(&options).await.unwrap();
+
+    // Verify file content.
+    let dst_file = env.dst().join("xattr_file.txt");
+    assert_eq!(
+        std::fs::read(&dst_file).unwrap(),
+        b"xattr test content\n",
+        "file content should match"
+    );
+
+    // Verify xattrs were preserved using getfattr.
+    let output = std::process::Command::new("getfattr")
+        .args(["-d", dst_file.to_str().unwrap()])
+        .output()
+        .expect("getfattr failed");
+    let xattr_output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        xattr_output.contains("user.color"),
+        "xattr user.color should be preserved, got: {xattr_output}"
+    );
+    assert!(
+        xattr_output.contains("user.priority"),
+        "xattr user.priority should be preserved, got: {xattr_output}"
+    );
+
+    // Verify actual values.
+    let output = std::process::Command::new("getfattr")
+        .args([
+            "-n",
+            "user.color",
+            "--only-values",
+            dst_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("getfattr --only-values failed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "blue",
+        "user.color value should be 'blue'"
+    );
+
+    let output = std::process::Command::new("getfattr")
+        .args([
+            "-n",
+            "user.priority",
+            "--only-values",
+            dst_file.to_str().unwrap(),
+        ])
+        .output()
+        .expect("getfattr --only-values failed");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "high",
+        "user.priority value should be 'high'"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_no_xattr_when_flag_absent() {
+    if !has_xattr_tools() {
+        eprintln!("SKIP: setfattr/getfattr not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("no_xattr.txt", b"no xattr content\n", Some(1700000000))
+        .build();
+
+    if !fs_supports_xattrs(&env.src()) {
+        eprintln!("SKIP: filesystem does not support user xattrs");
+        return;
+    }
+
+    // Set xattr on source.
+    let src_file = env.src().join("no_xattr.txt");
+    let status = std::process::Command::new("setfattr")
+        .args([
+            "-n",
+            "user.tag",
+            "-v",
+            "important",
+            src_file.to_str().unwrap(),
+        ])
+        .status()
+        .expect("setfattr failed");
+    assert!(status.success());
+
+    // Transfer WITHOUT --xattrs.
+    let options = TransferOptions::builder()
+        .archive()
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+    run_transfer(&options).await.unwrap();
+
+    // Verify file exists with content.
+    let dst_file = env.dst().join("no_xattr.txt");
+    assert_eq!(std::fs::read(&dst_file).unwrap(), b"no xattr content\n");
+
+    // Verify xattr was NOT copied.
+    let output = std::process::Command::new("getfattr")
+        .args(["-d", dst_file.to_str().unwrap()])
+        .output()
+        .expect("getfattr failed");
+    let xattr_output = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !xattr_output.contains("user.tag"),
+        "xattr should NOT be preserved without --xattrs flag, got: {xattr_output}"
+    );
+}

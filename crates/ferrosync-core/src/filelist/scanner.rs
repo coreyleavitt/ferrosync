@@ -195,6 +195,102 @@ impl<'a> FileListEnricher for AclEnricher<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// XattrEnricher
+// ---------------------------------------------------------------------------
+
+/// Enricher that reads extended attributes from the filesystem.
+///
+/// Reads all xattrs via `fs.list_xattrs()` + `fs.get_xattr()`, filtering out:
+/// - `system.posix_acl_access` and `system.posix_acl_default` (handled by --acls)
+/// - `system.*` namespace (requires root on Linux)
+/// - `user.rsync.%*` internal attributes
+///
+/// Entries are sorted by name for deterministic dedup.
+#[cfg(unix)]
+pub struct XattrEnricher<'a> {
+    fs: &'a dyn FileSystem,
+}
+
+#[cfg(unix)]
+impl<'a> XattrEnricher<'a> {
+    pub fn new(fs: &'a dyn FileSystem) -> Self {
+        Self { fs }
+    }
+
+    /// Check if an xattr name should be skipped.
+    fn should_skip(name: &[u8]) -> bool {
+        // Skip POSIX ACL xattrs (handled by --acls).
+        if name == b"system.posix_acl_access" || name == b"system.posix_acl_default" {
+            return true;
+        }
+        // Skip system.* namespace (requires root on Linux).
+        if name.starts_with(b"system.") {
+            return true;
+        }
+        // Skip rsync internal attributes.
+        if name.starts_with(b"user.rsync.%") {
+            return true;
+        }
+        false
+    }
+}
+
+#[cfg(unix)]
+impl<'a> FileListEnricher for XattrEnricher<'a> {
+    fn enrich(&self, entry: &mut FileEntry, path: &Path) {
+        // Symlinks don't have xattrs (lgetxattr is used but most
+        // filesystems don't support xattrs on symlinks).
+        if entry.is_symlink() {
+            return;
+        }
+
+        let names = match self.fs.list_xattrs(path) {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::trace!(path = %path.display(), error = %e, "no xattrs");
+                return;
+            }
+        };
+
+        let mut xattr_entries = Vec::new();
+        for name in names {
+            if Self::should_skip(&name) {
+                continue;
+            }
+
+            match self.fs.get_xattr(path, &name) {
+                Ok(Some(value)) => {
+                    // Add null terminator to name for wire format.
+                    let mut wire_name = name;
+                    wire_name.push(0);
+                    xattr_entries.push(crate::xattr::XattrEntry {
+                        name: wire_name,
+                        value,
+                    });
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to read xattr value"
+                    );
+                }
+            }
+        }
+
+        // Sort by name for deterministic dedup.
+        xattr_entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        if !xattr_entries.is_empty() {
+            entry.xattrs = Some(crate::xattr::ExtendedAttributes {
+                entries: xattr_entries,
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HardLinkGrouper
 // ---------------------------------------------------------------------------
 

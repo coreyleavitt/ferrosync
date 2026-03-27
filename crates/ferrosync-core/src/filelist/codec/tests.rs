@@ -41,6 +41,7 @@ async fn test_roundtrip_simple_file() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -56,6 +57,7 @@ async fn test_roundtrip_simple_file() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap();
@@ -79,6 +81,7 @@ async fn test_roundtrip_simple_file() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap();
@@ -128,6 +131,7 @@ async fn test_roundtrip_multiple_entries_prefix_compression() {
             0,
             None,
             &mut crate::acl::AclEncoder::new(),
+            &mut crate::xattr::XattrEncoder::new(),
         )
         .await
         .unwrap();
@@ -145,6 +149,7 @@ async fn test_roundtrip_multiple_entries_prefix_compression() {
             &[],
             None,
             &mut crate::acl::AclDecoder::new(),
+            &mut crate::xattr::XattrDecoder::new(),
         )
         .await
         .unwrap()
@@ -184,6 +189,7 @@ async fn test_roundtrip_directory() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -199,6 +205,7 @@ async fn test_roundtrip_directory() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -245,6 +252,7 @@ async fn test_roundtrip_with_uid_gid() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -260,6 +268,7 @@ async fn test_roundtrip_with_uid_gid() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -302,6 +311,7 @@ async fn test_roundtrip_symlink() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -317,6 +327,7 @@ async fn test_roundtrip_symlink() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -359,6 +370,7 @@ async fn test_roundtrip_with_checksum() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -374,6 +386,7 @@ async fn test_roundtrip_with_checksum() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -416,6 +429,7 @@ async fn test_roundtrip_same_mode_time() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -430,6 +444,7 @@ async fn test_roundtrip_same_mode_time() {
         1,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -452,6 +467,7 @@ async fn test_roundtrip_same_mode_time() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -467,6 +483,7 @@ async fn test_roundtrip_same_mode_time() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -504,6 +521,7 @@ async fn test_roundtrip_mtime_nsec() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -519,6 +537,7 @@ async fn test_roundtrip_mtime_nsec() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -547,6 +566,7 @@ async fn test_end_of_list_with_error() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -577,6 +597,7 @@ async fn test_end_of_list_legacy() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -622,6 +643,7 @@ async fn test_roundtrip_proto27() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -637,6 +659,7 @@ async fn test_roundtrip_proto27() {
         &[],
         None,
         &mut crate::acl::AclDecoder::new(),
+        &mut crate::xattr::XattrDecoder::new(),
     )
     .await
     .unwrap()
@@ -678,6 +701,7 @@ async fn test_diagnostic_roundtrip() {
         0,
         None,
         &mut crate::acl::AclEncoder::new(),
+        &mut crate::xattr::XattrEncoder::new(),
     )
     .await
     .unwrap();
@@ -836,6 +860,7 @@ mod proptests {
                     0,
                     None,
                     &mut crate::acl::AclEncoder::new(),
+                    &mut crate::xattr::XattrEncoder::new(),
                 )
                 .await
                 .unwrap();
@@ -851,6 +876,7 @@ mod proptests {
                     &[],
                     None,
                     &mut crate::acl::AclDecoder::new(),
+                    &mut crate::xattr::XattrDecoder::new(),
                 )
                 .await
                 .unwrap()
@@ -892,6 +918,7 @@ mod proptests {
                         i as i32,
                         None,
                         &mut crate::acl::AclEncoder::new(),
+                        &mut crate::xattr::XattrEncoder::new(),
                     )
                     .await
                     .unwrap();
@@ -909,6 +936,7 @@ mod proptests {
                         &[],
                         None,
                         &mut crate::acl::AclDecoder::new(),
+                        &mut crate::xattr::XattrDecoder::new(),
                     )
                     .await
                     .unwrap()

@@ -31,6 +31,8 @@ pub struct FileListOptions {
     pub numeric_ids: bool,
     /// True if ACLs are preserved (-A / --acls).
     pub preserve_acls: bool,
+    /// True if extended attributes are preserved (-X / --xattrs).
+    pub preserve_xattrs: bool,
 }
 
 impl Default for FileListOptions {
@@ -52,6 +54,7 @@ impl Default for FileListOptions {
             xmit_id0_names: true,
             numeric_ids: false,
             preserve_acls: false,
+            preserve_xattrs: false,
         }
     }
 }
@@ -80,6 +83,7 @@ impl FileListOptions {
                 != 0,
             numeric_ids: opts.numeric_ids(),
             preserve_acls: opts.preserve_acls(),
+            preserve_xattrs: opts.preserve_xattrs(),
         }
     }
 

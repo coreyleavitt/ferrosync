@@ -275,6 +275,27 @@ pub fn set_file_metadata(
                 }
             }
         }
+
+        if options.preserve_xattrs() {
+            if let Some(ref xattrs) = entry.xattrs {
+                for xa in &xattrs.entries {
+                    // Strip null terminator from name for the OS API.
+                    let name = if xa.name.last() == Some(&0) {
+                        &xa.name[..xa.name.len() - 1]
+                    } else {
+                        &xa.name
+                    };
+                    if let Err(e) = fs.set_xattr(dest_path, name, &xa.value) {
+                        tracing::warn!(
+                            path = %dest_path.display(),
+                            name = %String::from_utf8_lossy(name),
+                            error = %e,
+                            "failed to set xattr"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -11,11 +11,11 @@ use crate::delta::checksum;
 use crate::delta::ProtocolContext;
 use crate::error::FsError;
 use crate::filelist::entry::FileEntry;
-#[cfg(unix)]
-use crate::filelist::scanner::AclEnricher;
 use crate::filelist::scanner::{
     self, FileListScanner, HardLinkGrouper, ScanOptions, SymlinkEnricher,
 };
+#[cfg(unix)]
+use crate::filelist::scanner::{AclEnricher, XattrEnricher};
 use crate::filter::FilterRuleList;
 use crate::fs::FileSystem;
 use crate::options::{DeleteMode, TransferConfig, TransferOptions};
@@ -185,6 +185,10 @@ async fn execute_transfer_impl(
         #[cfg(unix)]
         if options.preserve_acls() {
             scanner.add_enricher(Box::new(AclEnricher::new(fs)));
+        }
+        #[cfg(unix)]
+        if options.preserve_xattrs() {
+            scanner.add_enricher(Box::new(XattrEnricher::new(fs)));
         }
         scanner.scan(source_paths, &mut filters)?
     };

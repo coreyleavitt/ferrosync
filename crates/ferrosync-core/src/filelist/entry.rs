@@ -62,6 +62,10 @@ pub struct FileEntry {
 
     /// ACL data (when --acls / -A is active). None when ACLs not preserved.
     pub acl: Option<crate::acl::Acl>,
+
+    /// Extended attribute data (when --xattrs / -X is active).
+    /// None when xattrs not preserved.
+    pub xattrs: Option<crate::xattr::ExtendedAttributes>,
 }
 
 impl FileEntry {

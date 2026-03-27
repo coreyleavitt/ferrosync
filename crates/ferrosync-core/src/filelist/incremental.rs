@@ -112,6 +112,7 @@ impl IncrementalReceiver {
         let mut entries = Vec::new();
         let mut hlink_decoder = HardLinkDecoder::new();
         let mut acl_decoder = crate::acl::AclDecoder::new();
+        let mut xattr_decoder = crate::xattr::XattrDecoder::new();
 
         loop {
             match recv_file_entry(
@@ -122,6 +123,7 @@ impl IncrementalReceiver {
                 &entries,
                 None,
                 &mut acl_decoder,
+                &mut xattr_decoder,
             )
             .await?
             {
@@ -186,6 +188,7 @@ impl IncrementalSender {
         let mut delta_state = DeltaState::default();
         let mut hlink_encoder = HardLinkEncoder::new();
         let mut acl_encoder = crate::acl::AclEncoder::new();
+        let mut xattr_encoder = crate::xattr::XattrEncoder::new();
         let ndx_start = self.next_ndx;
         for (i, entry) in entries.iter().enumerate() {
             send_file_entry(
@@ -198,6 +201,7 @@ impl IncrementalSender {
                 ndx_start + i as i32,
                 None,
                 &mut acl_encoder,
+                &mut xattr_encoder,
             )
             .await?;
             self.next_ndx += 1;

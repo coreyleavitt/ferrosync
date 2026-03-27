@@ -92,6 +92,7 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
     entry_index: i32,
     iconv: Option<&crate::filelist::iconv::FilenameConverter>,
     acl_encoder: &mut crate::acl::AclEncoder,
+    xattr_encoder: &mut crate::xattr::XattrEncoder,
 ) -> Result<()> {
     // --- Filename encoding conversion (--iconv) ---
     let wire_name = if let Some(conv) = iconv {
@@ -164,6 +165,11 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
         crate::acl::encode_acl(w, &entry.acl, entry.mode, acl_encoder).await?;
     }
 
+    // --- Xattrs (after ACLs) ---
+    if opts.preserve_xattrs {
+        crate::xattr::encode_xattrs(w, &entry.xattrs, xattr_encoder).await?;
+    }
+
     // --- Update delta state ---
     state::update_delta_state(state, entry);
     state.prev_name = wire_name;
@@ -182,6 +188,7 @@ pub async fn encode_entry<W: AsyncWrite + Unpin>(
 ///
 /// The decoder orchestrator calls per-field functions in the same order as
 /// the encoder, ensuring symmetric encode/decode.
+#[allow(clippy::too_many_arguments)]
 pub async fn decode_entry<R: AsyncRead + Unpin>(
     r: &mut R,
     state: &mut DeltaState,
@@ -190,6 +197,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
     prev_entries: &[FileEntry],
     iconv: Option<&crate::filelist::iconv::FilenameConverter>,
     acl_decoder: &mut crate::acl::AclDecoder,
+    xattr_decoder: &mut crate::xattr::XattrDecoder,
 ) -> Result<ReadEntryResult> {
     // --- Read XMIT flags ---
     let flags = match decode_xmit_flags(r, opts).await? {
@@ -256,6 +264,13 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
         None
     };
 
+    // --- Xattrs (after ACLs) ---
+    let xattrs = if opts.preserve_xattrs {
+        crate::xattr::decode_xattrs(r, xattr_decoder).await?
+    } else {
+        None
+    };
+
     let entry = FileEntry {
         name,
         len: crate::types::FileSize(len),
@@ -273,6 +288,7 @@ pub async fn decode_entry<R: AsyncRead + Unpin>(
         hlink_source: None,
         hard_link_info: None,
         acl,
+        xattrs,
     };
 
     // --- Update delta state ---
