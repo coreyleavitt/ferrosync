@@ -352,8 +352,7 @@ pub async fn assert_remote_not_hard_linked(a: &str, b: &str) {
 
 /// Assert a remote path is a directory.
 pub async fn assert_remote_is_dir(path: &str) {
-    let output =
-        crate::common::ssh::ssh_cmd(&["test", "-d", path, "&&", "echo", "yes"]).await;
+    let output = crate::common::ssh::ssh_cmd(&["test", "-d", path, "&&", "echo", "yes"]).await;
     assert_eq!(
         output.trim(),
         "yes",
@@ -372,8 +371,7 @@ pub async fn remote_blocks(path: &str) -> u64 {
 
 /// Assert a remote path is a regular file (not a symlink, directory, etc.).
 pub async fn assert_remote_is_regular_file(path: &str) {
-    let output =
-        crate::common::ssh::ssh_cmd(&["stat", "-c", "%F", path]).await;
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%F", path]).await;
     assert_eq!(
         output.trim(),
         "regular file",
@@ -384,8 +382,7 @@ pub async fn assert_remote_is_regular_file(path: &str) {
 
 /// Assert a remote path is a symlink.
 pub async fn assert_remote_is_symlink(path: &str) {
-    let output =
-        crate::common::ssh::ssh_cmd(&["test", "-L", path, "&&", "echo", "yes"]).await;
+    let output = crate::common::ssh::ssh_cmd(&["test", "-L", path, "&&", "echo", "yes"]).await;
     assert_eq!(
         output.trim(),
         "yes",

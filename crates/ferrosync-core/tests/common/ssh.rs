@@ -338,11 +338,7 @@ impl SshTestContext {
 
     /// Push to remote with custom options.
     /// Auto-injects `.source(env.src())` if source is empty.
-    pub async fn push_opts(
-        &self,
-        opts: TransferOptions,
-        timeout_secs: u64,
-    ) -> TransferResult {
+    pub async fn push_opts(&self, opts: TransferOptions, timeout_secs: u64) -> TransferResult {
         let opts = if opts.paths.source.is_empty() {
             TransferOptions::builder()
                 .from(opts)
@@ -361,11 +357,7 @@ impl SshTestContext {
 
     /// Pull from remote with custom options.
     /// Auto-injects `.dest(env.dst())` if dest is None.
-    pub async fn pull_opts(
-        &self,
-        opts: TransferOptions,
-        timeout_secs: u64,
-    ) -> TransferResult {
+    pub async fn pull_opts(&self, opts: TransferOptions, timeout_secs: u64) -> TransferResult {
         let opts = if opts.paths.dest.is_none() {
             TransferOptions::builder()
                 .from(opts)

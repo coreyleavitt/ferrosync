@@ -68,10 +68,7 @@ async fn test_native_pull() {
 
     let env = TestEnv::builder().build();
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .dest(env.dst())
-        .build();
+    let opts = TransferOptions::builder().archive().dest(env.dst()).build();
 
     let mut ssh_config = crate::common::ssh::test_ssh_config();
     ssh_config.rsync_path = "ferrosync".to_string();

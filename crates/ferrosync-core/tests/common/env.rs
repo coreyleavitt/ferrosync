@@ -238,7 +238,7 @@ pub fn test_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
 /// Create a filesystem wrapped with FakeSuperFs for --fake-super tests.
 #[cfg(unix)]
 pub fn test_filesystem_fake_super() -> Box<dyn ferrosync_core::fs::FileSystem> {
-    Box::new(ferrosync_core::fs::fake_super::FakeSuperFs::new(
-        Box::new(ferrosync_core::fs::unix::UnixFileSystem::new()),
-    ))
+    Box::new(ferrosync_core::fs::fake_super::FakeSuperFs::new(Box::new(
+        ferrosync_core::fs::unix::UnixFileSystem::new(),
+    )))
 }

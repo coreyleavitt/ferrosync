@@ -622,10 +622,7 @@ async fn test_interop_pull_size_only() {
     set_mtime(&ctx.env.dst().join("file.txt"), 1_600_000_000);
 
     // Pull with --size-only: should skip because sizes match (9 bytes both).
-    let opts = TransferOptions::builder()
-        .archive()
-        .size_only(true)
-        .build();
+    let opts = TransferOptions::builder().archive().size_only(true).build();
     ctx.pull_opts(opts, 30).await;
 
     let content = std::fs::read(ctx.env.dst().join("file.txt")).unwrap();
@@ -652,10 +649,7 @@ async fn test_interop_pull_existing() {
     // Pre-create only present.txt on local dest.
     std::fs::write(ctx.env.dst().join("present.txt"), "old\n").unwrap();
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .existing(true)
-        .build();
+    let opts = TransferOptions::builder().archive().existing(true).build();
     ctx.pull_opts(opts, 30).await;
 
     assert_eq!(
@@ -854,10 +848,7 @@ async fn test_interop_pull_compress() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .compress(true)
-        .build();
+    let opts = TransferOptions::builder().archive().compress(true).build();
     ctx.push_then_pull_opts(opts, 30).await;
 
     let content = std::fs::read(ctx.env.dst().join("repeated.dat")).unwrap();
@@ -889,10 +880,7 @@ async fn test_interop_pull_update() {
     std::fs::write(ctx.env.dst().join("file.txt"), b"local newer\n").unwrap();
     set_mtime(&ctx.env.dst().join("file.txt"), 1_800_000_000);
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .update(true)
-        .build();
+    let opts = TransferOptions::builder().archive().update(true).build();
     ctx.pull_opts(opts, 30).await;
 
     let content = std::fs::read(ctx.env.dst().join("file.txt")).unwrap();
@@ -919,10 +907,7 @@ async fn test_interop_pull_inplace() {
     std::fs::write(ctx.env.dst().join("file.txt"), b"original text\n").unwrap();
     let inode_before = crate::common::env::inode_of(&ctx.env.dst().join("file.txt"));
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .inplace(true)
-        .build();
+    let opts = TransferOptions::builder().archive().inplace(true).build();
     ctx.pull_opts(opts, 30).await;
 
     let content = std::fs::read(ctx.env.dst().join("file.txt")).unwrap();
@@ -953,10 +938,7 @@ async fn test_interop_pull_sparse() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .sparse(true)
-        .build();
+    let opts = TransferOptions::builder().archive().sparse(true).build();
     ctx.push_then_pull_opts(opts, 60).await;
 
     let content = std::fs::read(ctx.env.dst().join("sparse.dat")).unwrap();
@@ -1057,7 +1039,10 @@ async fn test_interop_pull_filter() {
         .build();
     ctx.push_then_pull_opts(opts, 30).await;
 
-    assert!(ctx.env.dst().join("main.c").exists(), "main.c should be pulled");
+    assert!(
+        ctx.env.dst().join("main.c").exists(),
+        "main.c should be pulled"
+    );
     assert!(
         !ctx.env.dst().join("main.o").exists(),
         "main.o should be filtered out"
@@ -1187,10 +1172,7 @@ async fn test_interop_pull_dry_run() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .dry_run(true)
-        .build();
+    let opts = TransferOptions::builder().archive().dry_run(true).build();
     ctx.push_then_pull_opts(opts, 30).await;
 
     assert!(
@@ -1215,10 +1197,7 @@ async fn test_interop_pull_append() {
     // Pre-populate local dest with first 4 bytes.
     std::fs::write(ctx.env.dst().join("file.txt"), b"abcd").unwrap();
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .append(true)
-        .build();
+    let opts = TransferOptions::builder().archive().append(true).build();
     ctx.pull_opts(opts, 30).await;
 
     let content = std::fs::read(ctx.env.dst().join("file.txt")).unwrap();
@@ -1306,10 +1285,7 @@ async fn test_interop_pull_stats() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .stats(true)
-        .build();
+    let opts = TransferOptions::builder().archive().stats(true).build();
     let result = ctx.push_then_pull_opts(opts, 30).await;
 
     // Verify exact expected stats for a known 3-file, 12-byte input.
@@ -1361,10 +1337,7 @@ async fn test_interop_pull_bwlimit() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .bwlimit(102400)
-        .build();
+    let opts = TransferOptions::builder().archive().bwlimit(102400).build();
     let result = ctx.push_then_pull_opts(opts, 60).await;
 
     let content = std::fs::read(ctx.env.dst().join("large.dat")).unwrap();
@@ -1523,9 +1496,18 @@ async fn test_interop_pull_write_read_batch() {
         .build();
     pull_with_opts(opts, &ctx.remote.path_slash(), 30).await;
 
-    assert_eq!(std::fs::read(dest_1.join("alpha.txt")).unwrap(), b"alpha content\n");
-    assert_eq!(std::fs::read(dest_1.join("beta.txt")).unwrap(), b"beta content\n");
-    assert!(batch_path.exists(), "write-batch should create a batch file");
+    assert_eq!(
+        std::fs::read(dest_1.join("alpha.txt")).unwrap(),
+        b"alpha content\n"
+    );
+    assert_eq!(
+        std::fs::read(dest_1.join("beta.txt")).unwrap(),
+        b"beta content\n"
+    );
+    assert!(
+        batch_path.exists(),
+        "write-batch should create a batch file"
+    );
 
     let dest_2 = ctx.env.dir().join("dest_2");
     std::fs::create_dir_all(&dest_2).unwrap();
@@ -1537,8 +1519,14 @@ async fn test_interop_pull_write_read_batch() {
         .build();
     pull_with_opts(opts, &ctx.remote.path_slash(), 30).await;
 
-    assert_eq!(std::fs::read(dest_2.join("alpha.txt")).unwrap(), b"alpha content\n");
-    assert_eq!(std::fs::read(dest_2.join("beta.txt")).unwrap(), b"beta content\n");
+    assert_eq!(
+        std::fs::read(dest_2.join("alpha.txt")).unwrap(),
+        b"alpha content\n"
+    );
+    assert_eq!(
+        std::fs::read(dest_2.join("beta.txt")).unwrap(),
+        b"beta content\n"
+    );
 }
 
 /// Interrupted pull should leave partial file in --partial-dir.
@@ -1581,7 +1569,10 @@ async fn test_interop_pull_partial_dir() {
 
     let partial_file = partial_dir.join("bigfile.dat");
     assert!(partial_dir.exists(), "--partial-dir should be created");
-    assert!(partial_file.exists(), "partial file should exist in --partial-dir");
+    assert!(
+        partial_file.exists(),
+        "partial file should exist in --partial-dir"
+    );
 
     let partial_size = std::fs::metadata(&partial_file).unwrap().len();
     assert!(
@@ -1610,10 +1601,18 @@ async fn test_interop_pull_xattr() {
         .build();
     ctx.pull_opts(opts, 30).await;
 
-    assert_eq!(std::fs::read(ctx.env.dst().join("xfile.txt")).unwrap(), b"xattr pull test");
+    assert_eq!(
+        std::fs::read(ctx.env.dst().join("xfile.txt")).unwrap(),
+        b"xattr pull test"
+    );
 
     let output = std::process::Command::new("getfattr")
-        .args(["--only-values", "-n", "user.color", ctx.env.dst().join("xfile.txt").to_str().unwrap()])
+        .args([
+            "--only-values",
+            "-n",
+            "user.color",
+            ctx.env.dst().join("xfile.txt").to_str().unwrap(),
+        ])
         .output()
         .expect("getfattr failed");
     let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1640,14 +1639,23 @@ async fn test_interop_pull_acl() {
         .build();
     ctx.pull_opts(opts, 30).await;
 
-    assert_eq!(std::fs::read(ctx.env.dst().join("afile.txt")).unwrap(), b"acl pull test");
+    assert_eq!(
+        std::fs::read(ctx.env.dst().join("afile.txt")).unwrap(),
+        b"acl pull test"
+    );
 
     let output = std::process::Command::new("getfacl")
-        .args(["--omit-header", ctx.env.dst().join("afile.txt").to_str().unwrap()])
+        .args([
+            "--omit-header",
+            ctx.env.dst().join("afile.txt").to_str().unwrap(),
+        ])
         .output()
         .expect("getfacl failed");
     let acl = String::from_utf8_lossy(&output.stdout);
-    assert!(acl.contains("user:1000:rw-"), "ACL should contain user:1000:rw- after pull, got: {acl}");
+    assert!(
+        acl.contains("user:1000:rw-"),
+        "ACL should contain user:1000:rw- after pull, got: {acl}"
+    );
 }
 
 /// Proves -A actually matters: without the flag, ACLs should NOT be preserved.
@@ -1668,10 +1676,16 @@ async fn test_interop_pull_acl_absent_without_flag() {
     let opts = TransferOptions::builder().archive().build();
     ctx.pull_opts(opts, 30).await;
 
-    assert_eq!(std::fs::read(ctx.env.dst().join("noflg.txt")).unwrap(), b"no acl flag");
+    assert_eq!(
+        std::fs::read(ctx.env.dst().join("noflg.txt")).unwrap(),
+        b"no acl flag"
+    );
 
     let output = std::process::Command::new("getfacl")
-        .args(["--omit-header", ctx.env.dst().join("noflg.txt").to_str().unwrap()])
+        .args([
+            "--omit-header",
+            ctx.env.dst().join("noflg.txt").to_str().unwrap(),
+        ])
         .output()
         .expect("getfacl failed");
     let acl = String::from_utf8_lossy(&output.stdout);
@@ -1775,15 +1789,19 @@ async fn test_interop_pull_fake_super() {
 
     // Read back through FakeSuperFs -- should see the intended mode from xattr.
     let reader_fs = crate::common::env::test_filesystem_fake_super();
-    let meta = reader_fs
-        .lstat(&ctx.env.dst().join("fsfile.txt"))
-        .unwrap();
+    let meta = reader_fs.lstat(&ctx.env.dst().join("fsfile.txt")).unwrap();
     assert_eq!(
         meta.mode & 0o777,
         0o755,
         "FakeSuperFs::lstat should report mode 0755 from xattr, got {:04o}",
         meta.mode & 0o777
     );
-    assert_eq!(meta.uid, 1000, "FakeSuperFs::lstat should report uid 1000 from xattr");
-    assert_eq!(meta.gid, 1000, "FakeSuperFs::lstat should report gid 1000 from xattr");
+    assert_eq!(
+        meta.uid, 1000,
+        "FakeSuperFs::lstat should report uid 1000 from xattr"
+    );
+    assert_eq!(
+        meta.gid, 1000,
+        "FakeSuperFs::lstat should report gid 1000 from xattr"
+    );
 }

@@ -36,14 +36,8 @@ async fn test_reverse_push_directory() {
     assert!(result.success, "rsync failed: {}", result.stderr);
 
     assert_eq!(remote_cat(&remote.join("top.txt")).await, "top\n");
-    assert_eq!(
-        remote_cat(&remote.join("a/mid.txt")).await,
-        "mid\n"
-    );
-    assert_eq!(
-        remote_cat(&remote.join("a/b/deep.txt")).await,
-        "deep\n"
-    );
+    assert_eq!(remote_cat(&remote.join("a/mid.txt")).await, "mid\n");
+    assert_eq!(remote_cat(&remote.join("a/b/deep.txt")).await, "deep\n");
 }
 
 #[tokio::test]
@@ -88,7 +82,12 @@ async fn test_reverse_pull_directory() {
 
     let remote = RemoteDir::new().await;
     ssh_cmd(&["mkdir", "-p", &remote.join("sub/deep")]).await;
-    ssh_cmd(&["sh", "-c", &format!("echo -n 'top' > {}/top.txt", remote.path())]).await;
+    ssh_cmd(&[
+        "sh",
+        "-c",
+        &format!("echo -n 'top' > {}/top.txt", remote.path()),
+    ])
+    .await;
     ssh_cmd(&[
         "sh",
         "-c",
@@ -213,13 +212,7 @@ async fn test_reverse_push_checksum() {
     std::fs::write(env.src().join("check.txt"), b"version2").unwrap();
     set_mtime(&env.src().join("check.txt"), 1700000000);
     // Also set mtime on the remote copy to match
-    ssh_cmd(&[
-        "touch",
-        "-d",
-        "@1700000000",
-        &remote.join("check.txt"),
-    ])
-    .await;
+    ssh_cmd(&["touch", "-d", "@1700000000", &remote.join("check.txt")]).await;
 
     // Push v2 with checksum -- should detect the difference
     let result = rsync_push(&env.src(), remote.path(), &["-c"], 30).await;
@@ -351,13 +344,7 @@ async fn test_reverse_pull_update() {
         &format!("echo -n 'old remote' > {}/file.txt", remote.path()),
     ])
     .await;
-    ssh_cmd(&[
-        "touch",
-        "-d",
-        "@1700000000",
-        &remote.join("file.txt"),
-    ])
-    .await;
+    ssh_cmd(&["touch", "-d", "@1700000000", &remote.join("file.txt")]).await;
 
     let env = TestEnv::builder().build();
     // Create local file with newer mtime -- -u should skip overwriting it

@@ -41,14 +41,8 @@ async fn test_interop_push_directory_recursive() {
     ctx.push(30).await;
 
     assert_eq!(remote_cat(&ctx.remote.join("top.txt")).await, "top\n");
-    assert_eq!(
-        remote_cat(&ctx.remote.join("a/mid.txt")).await,
-        "mid\n"
-    );
-    assert_eq!(
-        remote_cat(&ctx.remote.join("a/b/deep.txt")).await,
-        "deep\n"
-    );
+    assert_eq!(remote_cat(&ctx.remote.join("a/mid.txt")).await, "mid\n");
+    assert_eq!(remote_cat(&ctx.remote.join("a/b/deep.txt")).await, "deep\n");
 
     // Verify subdirectories exist as directories on remote.
     assert_remote_is_dir(&ctx.remote.join("a")).await;
@@ -392,10 +386,7 @@ async fn test_interop_push_compress() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .compress(true)
-        .build();
+    let opts = TransferOptions::builder().archive().compress(true).build();
     ctx.push_opts(opts, 30).await;
 
     assert_remote_size(&ctx.remote.join("repeated.dat"), 65536).await;
@@ -477,10 +468,7 @@ async fn test_interop_push_dry_run() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .dry_run(true)
-        .build();
+    let opts = TransferOptions::builder().archive().dry_run(true).build();
     let result = ctx.push_opts(opts, 30).await;
 
     assert_remote_absent(&ctx.remote.join("file.txt")).await;
@@ -560,10 +548,7 @@ async fn test_interop_push_max_size() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .max_size(5000)
-        .build();
+    let opts = TransferOptions::builder().archive().max_size(5000).build();
     ctx.push_opts(opts, 30).await;
 
     assert_remote_exists(&ctx.remote.join("small.txt")).await;
@@ -584,10 +569,7 @@ async fn test_interop_push_min_size() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .min_size(100)
-        .build();
+    let opts = TransferOptions::builder().archive().min_size(100).build();
     ctx.push_opts(opts, 30).await;
 
     assert_remote_exists(&ctx.remote.join("normal.txt")).await;
@@ -842,7 +824,13 @@ async fn test_interop_push_xattr() {
 
     let src_file = env.src().join("xattr_file.txt");
     let status = std::process::Command::new("setfattr")
-        .args(["-n", "user.test", "-v", "hello_xattr", src_file.to_str().unwrap()])
+        .args([
+            "-n",
+            "user.test",
+            "-v",
+            "hello_xattr",
+            src_file.to_str().unwrap(),
+        ])
         .status();
     match status {
         Ok(s) if s.success() => {}
@@ -1068,7 +1056,11 @@ async fn test_interop_push_ignore_existing() {
     .await;
 
     // Seed remote with original content.
-    ssh_cmd(&[&format!("echo -n original > {}/file.txt", ctx.remote.path())]).await;
+    ssh_cmd(&[&format!(
+        "echo -n original > {}/file.txt",
+        ctx.remote.path()
+    )])
+    .await;
 
     let opts = TransferOptions::builder()
         .archive()
@@ -1099,10 +1091,7 @@ async fn test_interop_push_update() {
     )])
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .update(true)
-        .build();
+    let opts = TransferOptions::builder().archive().update(true).build();
     ctx.push_opts(opts, 30).await;
 
     // Remote should retain newer content -- update skips files newer on receiver.
@@ -1128,10 +1117,7 @@ async fn test_interop_push_inplace() {
     .await;
     let inode_before = remote_inode(&ctx.remote.join("file.txt")).await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .inplace(true)
-        .build();
+    let opts = TransferOptions::builder().archive().inplace(true).build();
     ctx.push_opts(opts, 30).await;
 
     assert_remote_content(&ctx.remote.join("file.txt"), "updated content\n").await;
@@ -1160,10 +1146,7 @@ async fn test_interop_push_sparse() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .sparse(true)
-        .build();
+    let opts = TransferOptions::builder().archive().sparse(true).build();
     ctx.push_opts(opts, 60).await;
 
     assert_remote_size(&ctx.remote.join("sparse.dat"), 1_048_576).await;
@@ -1210,10 +1193,7 @@ async fn test_interop_push_chmod() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .chmod("a+x")
-        .build();
+    let opts = TransferOptions::builder().archive().chmod("a+x").build();
     ctx.push_opts(opts, 30).await;
 
     // Verify remote file has execute bits set. Check that at least user execute is set.
@@ -1356,10 +1336,7 @@ async fn test_interop_push_list_only() {
     )
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .list_only(true)
-        .build();
+    let opts = TransferOptions::builder().archive().list_only(true).build();
     ctx.push_opts(opts, 30).await;
 
     // --list-only should not create any files on remote.
@@ -1377,10 +1354,7 @@ async fn test_interop_push_relative() {
     let ctx = SshTestContext::new(env).await;
 
     // Push with --relative: the full source path structure should be preserved.
-    let opts = TransferOptions::builder()
-        .archive()
-        .relative(true)
-        .build();
+    let opts = TransferOptions::builder().archive().relative(true).build();
     ctx.push_opts(opts, 30).await;
 
     // With -R, the directory structure a/b/ should be preserved on remote.
@@ -1469,16 +1443,15 @@ async fn test_interop_push_timeout() {
     let fs = crate::common::env::test_filesystem();
     let session = ferrosync_core::engine::session::SyncSession::new(
         transport,
-        TransferOptions::builder().from(opts).source(ctx.env.src()).build(),
+        TransferOptions::builder()
+            .from(opts)
+            .source(ctx.env.src())
+            .build(),
         fs,
         ferrosync_core::engine::session::SyncDirection::Push,
     );
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        session.run(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
 
     match result {
         Ok(Ok(_)) => panic!("transfer should have timed out, not completed"),
@@ -1505,14 +1478,15 @@ async fn test_interop_push_fuzzy() {
     )])
     .await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .fuzzy(true)
-        .build();
+    let opts = TransferOptions::builder().archive().fuzzy(true).build();
     let result = ctx.push_opts(opts, 30).await;
 
     // The file should arrive with correct content.
-    assert_remote_content(&ctx.remote.join("report_2024.txt"), "annual report data here\n").await;
+    assert_remote_content(
+        &ctx.remote.join("report_2024.txt"),
+        "annual report data here\n",
+    )
+    .await;
 
     // With --fuzzy, rsync should find report_2023.txt as a basis file
     // and use delta transfer. matched_data should be > 0.

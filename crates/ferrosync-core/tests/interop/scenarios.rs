@@ -119,15 +119,9 @@ async fn test_combo_exact_mirror() {
         "extra_remote.txt should be deleted by --delete"
     );
     // file_a unchanged.
-    assert_eq!(
-        remote_cat(&ctx.remote.join("file_a.txt")).await,
-        "aaa\n"
-    );
+    assert_eq!(remote_cat(&ctx.remote.join("file_a.txt")).await, "aaa\n");
     // file_b updated.
-    assert_eq!(
-        remote_cat(&ctx.remote.join("file_b.txt")).await,
-        "bbb_v2\n"
-    );
+    assert_eq!(remote_cat(&ctx.remote.join("file_b.txt")).await, "bbb_v2\n");
 }
 
 /// --delete-excluded removes both extraneous AND excluded files.
@@ -248,10 +242,7 @@ async fn test_combo_compressed_archive() {
 
     let ctx = SshTestContext::new(env).await;
 
-    let opts = TransferOptions::builder()
-        .archive()
-        .compress(true)
-        .build();
+    let opts = TransferOptions::builder().archive().compress(true).build();
     ctx.push_opts(opts, 60).await;
 
     // Verify content integrity: both files present and byte-for-byte correct.
@@ -303,10 +294,7 @@ async fn test_combo_inplace_large_file() {
     std::fs::write(ctx.env.src().join("large.dat"), &data_v2).unwrap();
 
     // Push with --inplace.
-    let opts = TransferOptions::builder()
-        .archive()
-        .inplace(true)
-        .build();
+    let opts = TransferOptions::builder().archive().inplace(true).build();
     ctx.push_opts(opts, 60).await;
 
     // Verify content updated.
@@ -401,10 +389,7 @@ async fn test_combo_delete_exclude_safety() {
     ctx.push_opts(opts, 30).await;
 
     // keep.txt still present.
-    assert_eq!(
-        remote_cat(&ctx.remote.join("keep.txt")).await,
-        "keep\n"
-    );
+    assert_eq!(remote_cat(&ctx.remote.join("keep.txt")).await, "keep\n");
     // extra.txt deleted (not in source, not excluded).
     assert!(
         !remote_exists(&ctx.remote.join("extra.txt")).await,
@@ -432,10 +417,7 @@ async fn test_combo_checksum_archive() {
     ctx.push(30).await;
 
     // Verify initial state.
-    assert_eq!(
-        remote_cat(&ctx.remote.join("file_a.txt")).await,
-        "v1\n"
-    );
+    assert_eq!(remote_cat(&ctx.remote.join("file_a.txt")).await, "v1\n");
 
     // Overwrite with different content but SAME mtime (same size: 3 bytes).
     std::fs::write(ctx.env.src().join("file_a.txt"), b"v2\n").unwrap();
@@ -487,10 +469,7 @@ async fn test_combo_update_merge() {
     assert_remote_mtime(&ctx.remote.join("file_b.txt"), 1_800_000_000, 0).await;
 
     // Push with -u (update): should skip file_b because remote is newer.
-    let opts = TransferOptions::builder()
-        .archive()
-        .update(true)
-        .build();
+    let opts = TransferOptions::builder().archive().update(true).build();
     let result = ctx.push_opts(opts, 30).await;
 
     // Both files should be skipped: file_a has same size+mtime (quick check),
@@ -501,10 +480,7 @@ async fn test_combo_update_merge() {
     );
 
     // file_a should have source content (remote was older or same).
-    assert_eq!(
-        remote_cat(&ctx.remote.join("file_a.txt")).await,
-        "src_a\n",
-    );
+    assert_eq!(remote_cat(&ctx.remote.join("file_a.txt")).await, "src_a\n",);
     // file_b should retain remote content (remote was newer, -u skips).
     assert_eq!(
         remote_cat(&ctx.remote.join("file_b.txt")).await,
@@ -564,10 +540,7 @@ async fn test_combo_update_merge_rsync_control() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(
-        remote_cat(&remote.join("file_a.txt")).await,
-        "src_a\n",
-    );
+    assert_eq!(remote_cat(&remote.join("file_a.txt")).await, "src_a\n",);
     assert_eq!(
         remote_cat(&remote.join("file_b.txt")).await,
         "remote_newer\n",
