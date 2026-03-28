@@ -247,9 +247,9 @@ where
         flags = varint::read_varint(r).await?;
     }
 
-    // Mask INC_RECURSE for push (am_sender=true). Push incremental encoding
-    // is implemented (#129) but has wire-level issues with NDX marker state
-    // that cause interop failures. Re-enable after debugging against real rsync.
+    // Mask INC_RECURSE for push. Push incremental sub-flist encoding causes
+    // early EOF against real rsync -- wire format needs byte-level debugging.
+    // Infrastructure (PendingSubFlists, sender_loop injection) is in place.
     if am_sender {
         flags &= !compat_flags::INC_RECURSE;
     }

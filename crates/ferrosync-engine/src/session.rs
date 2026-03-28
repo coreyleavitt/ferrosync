@@ -172,9 +172,9 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     // consumes the remainder of the argument as its value.
     //
     // Advertise incremental recursion ('i') for pull only. Push incremental
-    // encoding is implemented (#129) but has wire-level issues with NDX marker
-    // state that need debugging against real rsync. Re-enable after interop
-    // tests pass.
+    // sub-flist encoding causes early EOF against real rsync -- the wire
+    // format needs byte-level debugging via wire.rs conformance tests.
+    // Infrastructure (PendingSubFlists, sender_loop injection) is in place.
     let use_inc_recurse = opts.recursive() && !am_sender;
     let caps = build_capability_string(use_inc_recurse, true, false);
     condensed.push('e');
@@ -756,9 +756,10 @@ async fn run_push(
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
-    let ndx_assignments = exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
-        .await
-        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
+    let (ndx_assignments, pending_flists) =
+        exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
+            .await
+            .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 
     tracing::debug!(
         entries = entries.len(),
@@ -806,6 +807,7 @@ async fn run_push(
         progress,
         options.block_size(),
         options.dry_run(),
+        pending_flists,
     )
     .await?;
 

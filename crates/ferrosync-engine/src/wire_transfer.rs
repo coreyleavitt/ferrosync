@@ -219,6 +219,7 @@ pub async fn sender_loop<R, W>(
     progress: &mut ProgressTracker,
     block_size_override: Option<i32>,
     dry_run: bool,
+    mut pending_flists: Option<ferrosync_codec::incremental::PendingSubFlists>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,
@@ -235,6 +236,20 @@ where
     let mut phase: u32 = 0;
 
     loop {
+        // Inject pending sub-flists before reading the next generator request.
+        // rsync's sender loop calls send_extra_file_list() at this point to
+        // keep the receiver fed with directory entries during the transfer.
+        if let Some(ref mut pending) = pending_flists {
+            if !pending.is_done() {
+                let mut flist_buf = Vec::new();
+                pending.send_pending(&mut flist_buf, 1).await?;
+                if !flist_buf.is_empty() {
+                    mux.write_data(&flist_buf).await?;
+                    mux.flush().await?;
+                }
+            }
+        }
+
         let ndx = varint::read_ndx(mux, &mut gen_ndx_state, int_codec).await?;
 
         if ndx == varint::NDX_DONE {

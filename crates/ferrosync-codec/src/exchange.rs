@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use ferrosync_protocol::handshake::NegotiatedProtocol;
-use ferrosync_protocol::varint::{self, NdxState};
+use ferrosync_protocol::varint;
 use ferrosync_types::error::ProtocolError;
 use ferrosync_types::options::TransferConfig;
 
@@ -27,8 +27,8 @@ use crate::codec::{
 };
 use crate::entry::FileEntry;
 use crate::incremental::{
-    group_entries_by_directory, IncrementalReceiver, IncrementalSender, NDX_FLIST_EOF,
-    NDX_FLIST_OFFSET,
+    group_entries_by_directory, IncrementalReceiver, IncrementalSender, PendingSubFlists,
+    NDX_FLIST_EOF, NDX_FLIST_OFFSET,
 };
 
 type Result<T> = std::result::Result<T, ProtocolError>;
@@ -51,7 +51,7 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
     entries: &mut [FileEntry],
     protocol: &NegotiatedProtocol,
     opts: &TransferConfig,
-) -> Result<Vec<i32>> {
+) -> Result<(Vec<i32>, Option<PendingSubFlists>)> {
     // The codec owns the wire invariant: entries must be in canonical order
     // for correct NDX assignment. Sort here so callers can't forget.
     // TimSort on an already-sorted slice is O(n).
@@ -74,7 +74,7 @@ pub async fn send_file_list<W: AsyncWrite + Unpin>(
             send_id_list(w, entries, &flist_opts).await?;
         }
         let ndx: Vec<i32> = (0..entries.len() as i32).collect();
-        Ok(ndx)
+        Ok((ndx, None))
     }
 }
 
@@ -115,102 +115,91 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Send file list incrementally (protocol >= 30).
+/// Send the initial file list incrementally (protocol >= 30).
 ///
-/// Groups entries by directory and sends each group as a sub-flist with
-/// the appropriate NDX marker. Returns NDX assignments for each entry
-/// (parallel to the input slice, with gaps between sub-flists).
+/// Sends ONLY the root sub-flist (top-level files and directory stubs).
+/// Returns NDX assignments for ALL entries and optionally a `PendingSubFlists`
+/// containing the remaining directory groups to be sent during the sender loop.
+///
+/// rsync sends sub-flists interleaved with file data transfer, not all
+/// upfront. If there are no subdirectories, `NDX_FLIST_EOF` is sent
+/// immediately and `None` is returned. Otherwise the caller must drain
+/// the pending sub-flists from the sender loop.
 async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     w: &mut W,
     entries: &[FileEntry],
     opts: &FileListOptions,
-) -> Result<Vec<i32>> {
+) -> Result<(Vec<i32>, Option<PendingSubFlists>)> {
     use crate::codec::{send_file_entry, write_end_of_flist, DeltaState, HardLinkEncoder};
 
     let groups = group_entries_by_directory(entries);
 
     // Shared state across all sub-flists. rsync's encoder uses static
-    // delta state that carries across all sub-flists (exchange.rs receiver
-    // side documents this: "rsync's encoder uses static delta state").
+    // delta state that carries across all sub-flists.
     let mut delta_state = DeltaState::default();
     let mut hlink_encoder = HardLinkEncoder::new();
     let mut acl_encoder = crate::acl::AclEncoder::new();
     let mut xattr_encoder = crate::xattr::XattrEncoder::new();
 
-    // NDX assignments: one per entry in input order.
+    // Compute NDX assignments eagerly for ALL entries (root + pending).
+    // NDX values are positional within each sub-flist with +1 gaps.
     let mut ndx_assignments = vec![0i32; entries.len()];
-
-    // C ref: flist.c -- inc_recurse NDX starts at 1 (flist_new() sets
-    // ndx_start = flist_cnt, and flist_cnt starts at 1).
-    let mut next_ndx: i32 = 1;
-
-    for (group_idx, group) in groups.iter().enumerate() {
-        let ndx_start = next_ndx;
-        delta_state.ndx_start = ndx_start;
-
-        if group_idx == 0 {
-            // First sub-flist (root directory): entries are sent directly
-            // without an NDX marker prefix, matching rsync's wire behavior.
-            for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
-                let entry = &entries[entry_idx];
-                send_file_entry(
-                    w,
-                    entry,
-                    &mut delta_state,
-                    opts,
-                    &mut hlink_encoder,
-                    entry.hard_link_info(),
-                    ndx_start + pos as i32,
-                    None,
-                    &mut acl_encoder,
-                    &mut xattr_encoder,
-                )
-                .await?;
-                ndx_assignments[entry_idx] = ndx_start + pos as i32;
-            }
-            write_end_of_flist(w, 0, opts).await?;
-        } else {
-            // Subsequent sub-flists: write NDX marker then entries.
-            let mut sender = IncrementalSender {
-                ndx_state: NdxState::default(),
-                next_ndx: ndx_start,
-            };
-            // Write the sub-flist marker only (not via send_sub_flist_with_state
-            // because we need to control delta_state sharing).
-            sender
-                .write_sub_flist_marker(w, group.dir_ndx, opts.wire.int_codec)
-                .await?;
-            for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
-                let entry = &entries[entry_idx];
-                send_file_entry(
-                    w,
-                    entry,
-                    &mut delta_state,
-                    opts,
-                    &mut hlink_encoder,
-                    entry.hard_link_info(),
-                    ndx_start + pos as i32,
-                    None,
-                    &mut acl_encoder,
-                    &mut xattr_encoder,
-                )
-                .await?;
-                ndx_assignments[entry_idx] = ndx_start + pos as i32;
-            }
-            write_end_of_flist(w, 0, opts).await?;
+    let mut ndx_cursor: i32 = 1; // inc_recurse first sub-flist starts at 1
+    for group in &groups {
+        for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
+            ndx_assignments[entry_idx] = ndx_cursor + pos as i32;
         }
-
-        // Advance past this sub-flist + 1 gap (flist_new behavior).
-        next_ndx += group.entry_indices.len() as i32 + 1;
+        ndx_cursor += group.entry_indices.len() as i32 + 1; // +1 gap
     }
 
-    // Write NDX_FLIST_EOF to signal end of all file lists.
-    // Use a fresh NdxState for the EOF marker -- the sender-level NDX
-    // state is separate from per-sub-flist markers.
-    let mut eof_state = NdxState::default();
-    varint::write_ndx(w, NDX_FLIST_EOF, &mut eof_state, opts.wire.int_codec).await?;
+    // Send ONLY the root sub-flist (group[0]).
+    let root = &groups[0];
+    let root_ndx_start: i32 = 1;
+    delta_state.ndx_start = root_ndx_start;
+    for (pos, &entry_idx) in root.entry_indices.iter().enumerate() {
+        let entry = &entries[entry_idx];
+        send_file_entry(
+            w,
+            entry,
+            &mut delta_state,
+            opts,
+            &mut hlink_encoder,
+            entry.hard_link_info(),
+            root_ndx_start + pos as i32,
+            None,
+            &mut acl_encoder,
+            &mut xattr_encoder,
+        )
+        .await?;
+    }
+    write_end_of_flist(w, 0, opts).await?;
 
-    Ok(ndx_assignments)
+    // Build IncrementalSender for remaining groups, starting past root + gap.
+    let mut inc_sender = IncrementalSender {
+        next_ndx: root_ndx_start + root.entry_indices.len() as i32 + 1,
+        ..Default::default()
+    };
+
+    // If no subdirectories, send EOF immediately.
+    if groups.len() <= 1 {
+        inc_sender.write_flist_eof(w, opts.wire.int_codec).await?;
+        return Ok((ndx_assignments, None));
+    }
+
+    // Build PendingSubFlists for remaining groups. These will be sent
+    // during the sender loop, interleaved with file data transfer.
+    let pending = PendingSubFlists::new(
+        groups.into_iter().skip(1).collect(),
+        entries.to_vec(),
+        delta_state,
+        hlink_encoder,
+        acl_encoder,
+        xattr_encoder,
+        inc_sender,
+        opts.clone(),
+    );
+
+    Ok((ndx_assignments, Some(pending)))
 }
 
 /// Result of receiving a file list, including per-entry NDX values.

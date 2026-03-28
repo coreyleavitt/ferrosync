@@ -383,6 +383,143 @@ pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
     groups
 }
 
+// ---------------------------------------------------------------------------
+// PendingSubFlists -- deferred sub-flist state for sender loop injection
+// ---------------------------------------------------------------------------
+
+/// Holds deferred sub-flist groups for injection during the sender loop.
+///
+/// rsync sends sub-flists interleaved with file data transfer, not all
+/// upfront. This struct captures the pending groups (everything after the
+/// root sub-flist) and the shared encoder state needed to send them on
+/// demand from the sender loop.
+pub struct PendingSubFlists {
+    /// Groups to send (excludes root group which was already sent).
+    groups: Vec<DirGroup>,
+    /// Next group index to send.
+    cursor: usize,
+    /// All entries (for indexing by DirGroup.entry_indices).
+    entries: Vec<FileEntry>,
+    /// Shared delta state across all sub-flists.
+    delta_state: DeltaState,
+    /// Shared hard-link encoder.
+    hlink_encoder: HardLinkEncoder,
+    /// Shared ACL encoder.
+    acl_encoder: crate::acl::AclEncoder,
+    /// Shared xattr encoder.
+    xattr_encoder: crate::xattr::XattrEncoder,
+    /// Incremental sender with shared NdxState for markers.
+    inc_sender: IncrementalSender,
+    /// Wire format options.
+    flist_opts: FileListOptions,
+    /// Whether NDX_FLIST_EOF has been written.
+    eof_sent: bool,
+}
+
+impl PendingSubFlists {
+    /// Create from remaining groups (everything after root).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        groups: Vec<DirGroup>,
+        entries: Vec<FileEntry>,
+        delta_state: DeltaState,
+        hlink_encoder: HardLinkEncoder,
+        acl_encoder: crate::acl::AclEncoder,
+        xattr_encoder: crate::xattr::XattrEncoder,
+        inc_sender: IncrementalSender,
+        flist_opts: FileListOptions,
+    ) -> Self {
+        Self {
+            groups,
+            cursor: 0,
+            entries,
+            delta_state,
+            hlink_encoder,
+            acl_encoder,
+            xattr_encoder,
+            inc_sender,
+            flist_opts,
+            eof_sent: false,
+        }
+    }
+
+    /// Send pending sub-flists to the writer.
+    ///
+    /// Sends up to `count` sub-flists. When all groups are exhausted,
+    /// writes `NDX_FLIST_EOF`. Matches rsync's `send_extra_file_list()`
+    /// pattern where sub-flists are injected during the sender loop.
+    pub async fn send_pending<W: AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        count: usize,
+    ) -> Result<()> {
+        if self.eof_sent {
+            return Ok(());
+        }
+
+        let mut sent = 0;
+        while sent < count && self.cursor < self.groups.len() {
+            let group = &self.groups[self.cursor];
+            let dir_ndx = group.dir_ndx;
+
+            // Write NDX marker for this sub-flist.
+            self.inc_sender
+                .write_sub_flist_marker(w, dir_ndx, self.flist_opts.wire.int_codec)
+                .await?;
+
+            // Write entries.
+            let ndx_start = self.inc_sender.next_ndx;
+            self.delta_state.ndx_start = ndx_start;
+            for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
+                let entry = &self.entries[entry_idx];
+                send_file_entry(
+                    w,
+                    entry,
+                    &mut self.delta_state,
+                    &self.flist_opts,
+                    &mut self.hlink_encoder,
+                    entry.hard_link_info(),
+                    ndx_start + pos as i32,
+                    None,
+                    &mut self.acl_encoder,
+                    &mut self.xattr_encoder,
+                )
+                .await?;
+                self.inc_sender.next_ndx += 1;
+            }
+
+            // Write end-of-list.
+            write_end_of_flist(w, 0, &self.flist_opts).await?;
+
+            // +1 gap matching rsync's flist_new() behavior.
+            self.inc_sender.next_ndx += 1;
+
+            self.cursor += 1;
+            sent += 1;
+        }
+
+        // All groups exhausted -- write EOF.
+        if self.cursor >= self.groups.len() && !self.eof_sent {
+            self.inc_sender
+                .write_flist_eof(w, self.flist_opts.wire.int_codec)
+                .await?;
+            self.eof_sent = true;
+        }
+
+        Ok(())
+    }
+
+    /// Whether all sub-flists and EOF have been sent.
+    pub fn is_done(&self) -> bool {
+        self.eof_sent
+    }
+
+    /// Number of sub-flists remaining to send.
+    pub fn remaining(&self) -> usize {
+        self.groups.len() - self.cursor
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
