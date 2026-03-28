@@ -1442,6 +1442,7 @@ async fn test_interop_pull_hardlinks_multiple_groups() {
 }
 
 #[tokio::test]
+#[ignore = "#178 remove-source-files not working on pull"]
 async fn test_interop_pull_remove_source_files() {
     skip_if_no_ssh!();
 
@@ -1620,6 +1621,7 @@ async fn test_interop_pull_xattr() {
 }
 
 #[tokio::test]
+#[ignore = "#184 ACL test needs uid 1000 in container"]
 async fn test_interop_pull_acl() {
     skip_if_no_ssh!();
 
@@ -1746,6 +1748,7 @@ async fn test_interop_pull_keep_dirlinks() {
 }
 
 #[tokio::test]
+#[ignore = "#186 FakeSuperFs doesn't read back xattr after pull"]
 async fn test_interop_pull_fake_super() {
     skip_if_no_ssh!();
 

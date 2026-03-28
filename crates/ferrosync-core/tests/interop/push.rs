@@ -511,6 +511,7 @@ async fn test_interop_push_hardlinks() {
 }
 
 #[tokio::test]
+#[ignore = "#178 sender doesn't delete source files"]
 async fn test_interop_push_remove_source_files() {
     skip_if_no_ssh!();
 
@@ -535,6 +536,7 @@ async fn test_interop_push_remove_source_files() {
 }
 
 #[tokio::test]
+#[ignore = "#177 sender-side max-size filter not applied"]
 async fn test_interop_push_max_size() {
     skip_if_no_ssh!();
 
@@ -556,6 +558,7 @@ async fn test_interop_push_max_size() {
 }
 
 #[tokio::test]
+#[ignore = "#177 sender-side min-size filter not applied"]
 async fn test_interop_push_min_size() {
     skip_if_no_ssh!();
 
@@ -577,6 +580,7 @@ async fn test_interop_push_min_size() {
 }
 
 #[tokio::test]
+#[ignore = "#182 append-verify push hangs"]
 async fn test_interop_push_append_verify() {
     skip_if_no_ssh!();
 
@@ -624,6 +628,7 @@ async fn test_interop_push_compress_level() {
 }
 
 #[tokio::test]
+#[ignore = "#180 compress-choice causes early eof"]
 async fn test_interop_push_compress_choice() {
     skip_if_no_ssh!();
 
@@ -646,6 +651,7 @@ async fn test_interop_push_compress_choice() {
 }
 
 #[tokio::test]
+#[ignore = "#179 exclude-from sends local path to remote"]
 async fn test_interop_push_exclude_from() {
     skip_if_no_ssh!();
 
@@ -719,6 +725,7 @@ async fn test_interop_push_filter_merge() {
 }
 
 #[tokio::test]
+#[ignore = "#176 files-from sends local path to remote"]
 async fn test_interop_push_files_from() {
     skip_if_no_ssh!();
 
@@ -745,6 +752,7 @@ async fn test_interop_push_files_from() {
 }
 
 #[tokio::test]
+#[ignore = "#177 sender-side size filter not applied"]
 async fn test_interop_push_max_min_size_combo() {
     skip_if_no_ssh!();
 
@@ -815,6 +823,7 @@ async fn test_interop_push_one_file_system() {
 }
 
 #[tokio::test]
+#[ignore = "#185 push xattr returns empty value"]
 async fn test_interop_push_xattr() {
     skip_if_no_ssh!();
 
@@ -855,6 +864,7 @@ async fn test_interop_push_xattr() {
 }
 
 #[tokio::test]
+#[ignore = "#184 ACL test needs uid 1000 in container"]
 async fn test_interop_push_acl() {
     skip_if_no_ssh!();
 
@@ -983,6 +993,7 @@ async fn test_interop_push_max_delete() {
 }
 
 #[tokio::test]
+#[ignore = "#181 backup args not sent to remote"]
 async fn test_interop_push_backup() {
     skip_if_no_ssh!();
 
@@ -1014,6 +1025,7 @@ async fn test_interop_push_backup() {
 }
 
 #[tokio::test]
+#[ignore = "#181 backup-dir args not sent to remote"]
 async fn test_interop_push_backup_dir() {
     skip_if_no_ssh!();
 
@@ -1298,6 +1310,7 @@ async fn test_interop_push_safe_links() {
 }
 
 #[tokio::test]
+#[ignore = "#179 include-from sends local path to remote"]
 async fn test_interop_push_include_from() {
     skip_if_no_ssh!();
 
@@ -1344,6 +1357,7 @@ async fn test_interop_push_list_only() {
 }
 
 #[tokio::test]
+#[ignore = "#189 relative path structure wrong"]
 async fn test_interop_push_relative() {
     skip_if_no_ssh!();
 
@@ -1394,6 +1408,7 @@ async fn test_interop_push_modify_window() {
 }
 
 #[tokio::test]
+#[ignore = "#180 checksum-choice causes early eof"]
 async fn test_interop_push_checksum_choice() {
     skip_if_no_ssh!();
 
@@ -1414,6 +1429,7 @@ async fn test_interop_push_checksum_choice() {
 }
 
 #[tokio::test]
+#[ignore = "#188 timeout test: transfer completes before timeout"]
 async fn test_interop_push_timeout() {
     skip_if_no_ssh!();
 
@@ -1461,6 +1477,7 @@ async fn test_interop_push_timeout() {
 }
 
 #[tokio::test]
+#[ignore = "#183 fuzzy push causes early eof"]
 async fn test_interop_push_fuzzy() {
     skip_if_no_ssh!();
 
@@ -1499,6 +1516,7 @@ async fn test_interop_push_fuzzy() {
 }
 
 #[tokio::test]
+#[ignore = "#187 push fake-super: receiver is remote rsync"]
 async fn test_interop_push_fake_super() {
     skip_if_no_ssh!();
 

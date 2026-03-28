@@ -1,6 +1,7 @@
 //! Platform-independent file metadata.
 
 use ferrosync_types::entry::{FileEntry, HardLinkInfo};
+#[cfg(unix)]
 use ferrosync_types::mode::*;
 use ferrosync_types::types::{FileSize, UnixTimestamp};
 
