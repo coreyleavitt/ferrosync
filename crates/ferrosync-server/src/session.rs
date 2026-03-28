@@ -262,8 +262,9 @@ impl ServerSession {
         // Send file list. send_file_list sorts entries in canonical order
         // internally and returns NDX assignments for build_ndx_map.
         let mut flist_buf = Vec::new();
+        exchange::sort_file_list(&mut entries);
         let (ndx_assignments, pending_flists) =
-            exchange::send_file_list(&mut flist_buf, &mut entries, protocol, opts).await?;
+            exchange::send_file_list(&mut flist_buf, &entries, protocol, opts).await?;
 
         mux.write_data(&flist_buf).await?;
         mux.flush().await.map_err(SessionError::Io)?;

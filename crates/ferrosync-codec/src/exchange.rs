@@ -46,17 +46,23 @@ type Result<T> = std::result::Result<T, ProtocolError>;
 /// Returns the NDX assignment for each entry (parallel to the sorted entries
 /// slice). For batch mode, these are contiguous starting at 0. For incremental
 /// mode, there are gaps between sub-flists matching rsync's `flist_new()`.
-pub async fn send_file_list<W: AsyncWrite + Unpin>(
+/// Sort entries in canonical order before sending. Call this before
+/// `send_file_list_sorted` to satisfy the wire invariant.
+pub fn sort_file_list(entries: &mut [FileEntry]) {
+    crate::sort::canonical_sort(entries);
+}
+
+/// Send a pre-sorted file list over the wire.
+///
+/// Entries MUST be in canonical sort order (call `sort_file_list` first).
+/// Takes an immutable borrow so `PendingSubFlists` can reference the
+/// same entries without conflicting with the mutable sort borrow.
+pub async fn send_file_list<'a, W: AsyncWrite + Unpin>(
     w: &mut W,
-    entries: &mut [FileEntry],
+    entries: &'a [FileEntry],
     protocol: &NegotiatedProtocol,
     opts: &TransferConfig,
-) -> Result<(Vec<i32>, Option<PendingSubFlists>)> {
-    // The codec owns the wire invariant: entries must be in canonical order
-    // for correct NDX assignment. Sort here so callers can't forget.
-    // TimSort on an already-sorted slice is O(n).
-    crate::sort::canonical_sort(entries);
-
+) -> Result<(Vec<i32>, Option<PendingSubFlists<'a>>)> {
     let flist_opts = FileListOptions::from_protocol(protocol, opts);
 
     // inc_recurse requires BOTH the capability flag AND recursive mode.
@@ -125,11 +131,11 @@ async fn send_file_list_batch<W: AsyncWrite + Unpin>(
 /// upfront. If there are no subdirectories, `NDX_FLIST_EOF` is sent
 /// immediately and `None` is returned. Otherwise the caller must drain
 /// the pending sub-flists from the sender loop.
-async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
+async fn send_file_list_incremental<'a, W: AsyncWrite + Unpin>(
     w: &mut W,
-    entries: &[FileEntry],
+    entries: &'a [FileEntry],
     opts: &FileListOptions,
-) -> Result<(Vec<i32>, Option<PendingSubFlists>)> {
+) -> Result<(Vec<i32>, Option<PendingSubFlists<'a>>)> {
     use crate::codec::{DeltaState, HardLinkEncoder};
 
     let tree = DirectoryTree::from_sorted_entries(entries);
@@ -179,11 +185,9 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
 
     // Build PendingSubFlists for remaining groups. These will be sent
     // during the sender loop, interleaved with file data transfer.
-    // TODO(#167): entries.to_vec() clones all entries. True zero-copy
-    // requires lifetime threading through sender_loop or Arc.
     let pending = PendingSubFlists::new(
         tree.into_pending_groups(),
-        entries.to_vec(),
+        entries,
         delta_state,
         hlink_encoder,
         acl_encoder,
@@ -714,7 +718,8 @@ mod tests {
         let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -737,7 +742,8 @@ mod tests {
         let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -758,7 +764,8 @@ mod tests {
         let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -778,7 +785,8 @@ mod tests {
         let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -805,7 +813,8 @@ mod tests {
         let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -832,7 +841,8 @@ mod tests {
         let mut entries = test_entries();
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 
@@ -858,7 +868,8 @@ mod tests {
         let mut entries: Vec<FileEntry> = vec![];
 
         let mut buf = Vec::new();
-        send_file_list(&mut buf, &mut entries, &proto, &opts)
+        sort_file_list(&mut entries);
+        let _ndx = send_file_list(&mut buf, &entries, &proto, &opts)
             .await
             .unwrap();
 

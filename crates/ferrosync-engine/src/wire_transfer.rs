@@ -219,7 +219,7 @@ pub async fn sender_loop<R, W>(
     progress: &mut ProgressTracker,
     block_size_override: Option<i32>,
     dry_run: bool,
-    mut pending_flists: Option<ferrosync_codec::incremental::PendingSubFlists>,
+    mut pending_flists: Option<ferrosync_codec::incremental::PendingSubFlists<'_>>,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + Send,

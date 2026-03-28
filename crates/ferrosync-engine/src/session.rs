@@ -752,8 +752,9 @@ async fn run_push(
     progress.set_totals(stats.total_files, total_bytes.as_u64());
 
     let mut flist_buf = Vec::new();
+    exchange::sort_file_list(&mut entries);
     let (ndx_assignments, pending_flists) =
-        exchange::send_file_list(&mut flist_buf, &mut entries, protocol, options)
+        exchange::send_file_list(&mut flist_buf, &entries, protocol, options)
             .await
             .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 

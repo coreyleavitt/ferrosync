@@ -445,13 +445,13 @@ pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
 /// upfront. This struct captures the pending groups (everything after the
 /// root sub-flist) and the shared encoder state needed to send them on
 /// demand from the sender loop.
-pub struct PendingSubFlists {
+pub struct PendingSubFlists<'a> {
     /// Groups to send (excludes root group which was already sent).
     groups: Vec<DirGroup>,
     /// Next group index to send.
     cursor: usize,
-    /// All entries (for indexing by DirGroup.entry_indices).
-    entries: Vec<FileEntry>,
+    /// All entries (borrowed from caller, for indexing by DirGroup.entry_indices).
+    entries: &'a [FileEntry],
     /// Shared delta state across all sub-flists.
     delta_state: DeltaState,
     /// Shared hard-link encoder.
@@ -468,12 +468,12 @@ pub struct PendingSubFlists {
     eof_sent: bool,
 }
 
-impl PendingSubFlists {
+impl<'a> PendingSubFlists<'a> {
     /// Create from remaining groups (everything after root).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         groups: Vec<DirGroup>,
-        entries: Vec<FileEntry>,
+        entries: &'a [FileEntry],
         delta_state: DeltaState,
         hlink_encoder: HardLinkEncoder,
         acl_encoder: crate::acl::AclEncoder,
@@ -524,7 +524,7 @@ impl PendingSubFlists {
             self.inc_sender
                 .encode_sub_flist_entries(
                     w,
-                    &self.entries,
+                    self.entries,
                     &group.entry_indices,
                     &mut self.delta_state,
                     &self.flist_opts,
