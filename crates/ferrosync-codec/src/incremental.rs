@@ -253,6 +253,50 @@ impl IncrementalSender {
         .await
     }
 
+    /// Encode a sub-flist's entries to the writer.
+    ///
+    /// Writes all entries followed by end-of-list marker. Advances
+    /// `next_ndx` by entry count + 1 gap (matching rsync's `flist_new()`).
+    ///
+    /// Used by both root sub-flist sending (`send_file_list_incremental`)
+    /// and deferred sub-flist sending (`PendingSubFlists::send_pending`).
+    /// Single encoding loop eliminates duplication.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn encode_sub_flist_entries<W: AsyncWrite + Unpin>(
+        &mut self,
+        w: &mut W,
+        entries: &[FileEntry],
+        entry_indices: &[usize],
+        delta_state: &mut DeltaState,
+        opts: &FileListOptions,
+        hlink_encoder: &mut HardLinkEncoder,
+        acl_encoder: &mut crate::acl::AclEncoder,
+        xattr_encoder: &mut crate::xattr::XattrEncoder,
+    ) -> Result<()> {
+        let ndx_start = self.next_ndx;
+        delta_state.ndx_start = ndx_start;
+        for (pos, &entry_idx) in entry_indices.iter().enumerate() {
+            let entry = &entries[entry_idx];
+            send_file_entry(
+                w,
+                entry,
+                delta_state,
+                opts,
+                hlink_encoder,
+                entry.hard_link_info(),
+                ndx_start + pos as i32,
+                None,
+                acl_encoder,
+                xattr_encoder,
+            )
+            .await?;
+            self.next_ndx += 1;
+        }
+        write_end_of_flist(w, 0, opts).await?;
+        self.next_ndx += 1; // +1 gap matching rsync's flist_new()
+        Ok(())
+    }
+
     /// Write the NDX_FLIST_EOF marker indicating all file lists are done.
     pub async fn write_flist_eof<W: AsyncWrite + Unpin>(
         &mut self,
@@ -264,138 +308,131 @@ impl IncrementalSender {
 }
 
 /// A group of entries belonging to a single directory in the incremental
-/// file list. Used by `group_entries_by_directory` to split a flat sorted
-/// entry list into per-directory sub-flists.
+/// file list.
 #[derive(Debug)]
 pub struct DirGroup {
-    /// NDX of the parent directory entry. -1 for the root group (entries
-    /// with no dirname, i.e., top-level files and directories).
+    /// dir_flist index of the parent directory. -1 for the root group.
+    ///
+    /// In inc_recurse mode, rsync separates directories into `dir_flist`
+    /// with their own numbering (0, 1, 2, ...). Sub-flist NDX markers
+    /// reference these dir_flist indices, NOT positions in the full
+    /// entry list.
     pub dir_ndx: i32,
     /// Indices into the original entries slice for this group's members.
     pub entry_indices: Vec<usize>,
 }
 
-/// Split a canonically-sorted entry list into per-directory groups for
-/// incremental file list encoding.
+/// Tree structure extracted from a sorted entry list for incremental
+/// file list encoding.
 ///
-/// Returns groups in the order they should be sent: root first, then
-/// each subdirectory in the order its directory entry appears in the
-/// sorted list (depth-first).
+/// Separates the flat sorted entries into per-directory groups. The root
+/// group contains top-level entries. Each subdirectory gets its own group
+/// with a `dir_ndx` referencing the dir_flist index (directory-only
+/// numbering, matching rsync's `dir_flist` separation).
 ///
-/// The NDX assignment in each `DirGroup.dir_ndx` uses incremental NDX
-/// numbering with +1 gaps between sub-flists, matching rsync's
-/// `flist_new()` behavior.
-pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
-    if entries.is_empty() {
-        return vec![DirGroup {
+/// Groups are ordered root-first, then depth-first matching rsync's
+/// traversal in `send_extra_file_list()`.
+pub struct DirectoryTree {
+    /// Groups in send order: root at [0], then depth-first subdirectories.
+    pub groups: Vec<DirGroup>,
+}
+
+impl DirectoryTree {
+    /// Build from canonically-sorted entries.
+    ///
+    /// Uses `FileEntry::dirname()` for parent-child relationships.
+    pub fn from_sorted_entries(entries: &[FileEntry]) -> Self {
+        if entries.is_empty() {
+            return Self {
+                groups: vec![DirGroup {
+                    dir_ndx: -1,
+                    entry_indices: vec![],
+                }],
+            };
+        }
+
+        // Root group: entries with no dirname (top-level).
+        let root_indices: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.dirname().is_none())
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut groups = vec![DirGroup {
             dir_ndx: -1,
-            entry_indices: vec![],
+            entry_indices: root_indices,
         }];
-    }
 
-    // Build root group: entries with no '/' in name (top-level).
-    let mut root_indices = Vec::new();
-    for (i, entry) in entries.iter().enumerate() {
-        if !entry.name.contains(&b'/') {
-            root_indices.push(i);
+        // Assign dir_flist indices to directories. rsync numbers directories
+        // separately from regular files in its dir_flist.
+        let mut dir_flist_ndx: Vec<i32> = vec![-1; entries.len()];
+        let mut dir_counter: i32 = 0;
+        for &idx in &groups[0].entry_indices {
+            if entries[idx].mode & S_IFMT == S_IFDIR {
+                dir_flist_ndx[idx] = dir_counter;
+                dir_counter += 1;
+            }
         }
-    }
 
-    let mut groups = vec![DirGroup {
-        dir_ndx: -1,
-        entry_indices: root_indices,
-    }];
+        // BFS queue: (entry_index, directory_name_bytes) for directories to descend.
+        let mut queue: Vec<(usize, Vec<u8>)> = groups[0]
+            .entry_indices
+            .iter()
+            .filter(|&&idx| entries[idx].mode & S_IFMT == S_IFDIR && entries[idx].name != b".")
+            .map(|&idx| (idx, entries[idx].name.clone()))
+            .collect();
 
-    // Simulate NDX assignment to determine dir_ndx values.
-    // Root sub-flist starts at NDX 1 (inc_recurse), entries get sequential
-    // NDX values, then +1 gap after end-of-list.
-    let mut next_ndx: i32 = 1; // inc_recurse starts at 1
-    let root_count = groups[0].entry_indices.len() as i32;
-    // After root sub-flist: next_ndx = 1 + count + 1 (gap)
-    next_ndx += root_count + 1;
+        let mut pos = 0;
+        while pos < queue.len() {
+            let (dir_entry_idx, dir_name) = queue[pos].clone();
+            pos += 1;
 
-    // Build a map from entry index to its assigned NDX within the root group.
-    // Root entries get NDX 1, 2, 3, ... (1-based for inc_recurse).
-    let mut entry_to_ndx: Vec<i32> = vec![-1; entries.len()];
-    for (pos, &idx) in groups[0].entry_indices.iter().enumerate() {
-        entry_to_ndx[idx] = 1 + pos as i32; // root starts at NDX 1
-    }
+            // Collect direct children using FileEntry::dirname().
+            let child_indices: Vec<usize> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.dirname() == Some(dir_name.as_slice()))
+                .map(|(i, _)| i)
+                .collect();
 
-    // Build a map from entry index to dir_flist index. In inc_recurse mode,
-    // rsync separates directories into dir_flist with their own numbering.
-    // The NDX markers in sub-flist headers reference dir_flist indices, NOT
-    // positions in the full entry list.
-    let mut entry_to_dir_ndx: Vec<i32> = vec![-1; entries.len()];
-    let mut dir_flist_counter: i32 = 0;
-    for &idx in &groups[0].entry_indices {
-        if entries[idx].mode & S_IFMT == S_IFDIR {
-            entry_to_dir_ndx[idx] = dir_flist_counter;
-            dir_flist_counter += 1;
-        }
-    }
+            groups.push(DirGroup {
+                dir_ndx: dir_flist_ndx[dir_entry_idx],
+                entry_indices: child_indices.clone(),
+            });
 
-    // Process directories in the order they appear in the root group,
-    // then recursively process subdirectories.
-    let mut dir_queue: Vec<(usize, Vec<u8>)> = Vec::new(); // (entry_index, dirname_prefix)
-    for &idx in &groups[0].entry_indices {
-        if entries[idx].mode & S_IFMT == S_IFDIR && entries[idx].name != b"." {
-            dir_queue.push((idx, entries[idx].name.clone()));
-        }
-    }
-
-    let mut queue_pos = 0;
-    while queue_pos < dir_queue.len() {
-        let (dir_entry_idx, prefix) = dir_queue[queue_pos].clone();
-        queue_pos += 1;
-
-        let dir_ndx = entry_to_dir_ndx[dir_entry_idx];
-
-        // Collect children: entries whose name starts with "prefix/"
-        let mut child_indices = Vec::new();
-        let prefix_slash = {
-            let mut p = prefix.clone();
-            p.push(b'/');
-            p
-        };
-        for (i, entry) in entries.iter().enumerate() {
-            if entry.name.starts_with(&prefix_slash) {
-                // Only direct children (no further '/' after prefix/)
-                let rest = &entry.name[prefix_slash.len()..];
-                if !rest.contains(&b'/') {
-                    child_indices.push(i);
+            // Queue child directories and assign their dir_flist indices.
+            for &idx in &child_indices {
+                if entries[idx].mode & S_IFMT == S_IFDIR {
+                    dir_flist_ndx[idx] = dir_counter;
+                    dir_counter += 1;
+                    queue.push((idx, entries[idx].name.clone()));
                 }
             }
         }
 
-        // Assign NDX values to children.
-        for (pos, &idx) in child_indices.iter().enumerate() {
-            entry_to_ndx[idx] = next_ndx + pos as i32;
-        }
-
-        groups.push(DirGroup {
-            dir_ndx,
-            entry_indices: child_indices.clone(),
-        });
-
-        // Advance next_ndx past this sub-flist + gap.
-        next_ndx += child_indices.len() as i32 + 1;
-
-        // Queue subdirectories from this group and assign dir_flist indices.
-        for &idx in &child_indices {
-            if entries[idx].mode & S_IFMT == S_IFDIR {
-                entry_to_dir_ndx[idx] = dir_flist_counter;
-                dir_flist_counter += 1;
-                // Build full path for this subdirectory
-                let child_basename = &entries[idx].name[prefix_slash.len()..];
-                let mut full_name = prefix.clone();
-                full_name.push(b'/');
-                full_name.extend_from_slice(child_basename);
-                dir_queue.push((idx, full_name));
-            }
-        }
+        Self { groups }
     }
 
-    groups
+    /// The root group (top-level entries).
+    pub fn root(&self) -> &DirGroup {
+        &self.groups[0]
+    }
+
+    /// Whether there are subdirectory groups beyond the root.
+    pub fn has_subdirs(&self) -> bool {
+        self.groups.len() > 1
+    }
+
+    /// Consume the tree and return only the non-root groups (for deferred sending).
+    pub fn into_pending_groups(self) -> Vec<DirGroup> {
+        self.groups.into_iter().skip(1).collect()
+    }
+}
+
+// Backward-compatible alias for callers that used the old function name.
+pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
+    DirectoryTree::from_sorted_entries(entries).groups
 }
 
 // ---------------------------------------------------------------------------
@@ -482,32 +519,20 @@ impl PendingSubFlists {
                 .write_sub_flist_marker(w, dir_ndx, self.flist_opts.wire.int_codec)
                 .await?;
 
-            // Write entries.
-            let ndx_start = self.inc_sender.next_ndx;
-            self.delta_state.ndx_start = ndx_start;
-            for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
-                let entry = &self.entries[entry_idx];
-                send_file_entry(
+            // Encode entries via the shared helper (eliminates duplication
+            // with send_file_list_incremental's root encoding).
+            self.inc_sender
+                .encode_sub_flist_entries(
                     w,
-                    entry,
+                    &self.entries,
+                    &group.entry_indices,
                     &mut self.delta_state,
                     &self.flist_opts,
                     &mut self.hlink_encoder,
-                    entry.hard_link_info(),
-                    ndx_start + pos as i32,
-                    None,
                     &mut self.acl_encoder,
                     &mut self.xattr_encoder,
                 )
                 .await?;
-                self.inc_sender.next_ndx += 1;
-            }
-
-            // Write end-of-list.
-            write_end_of_flist(w, 0, &self.flist_opts).await?;
-
-            // +1 gap matching rsync's flist_new() behavior.
-            self.inc_sender.next_ndx += 1;
 
             self.cursor += 1;
             sent += 1;
@@ -782,5 +807,75 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].entry_indices, vec![0, 1]);
         assert_eq!(groups[1].entry_indices.len(), 0); // empty subdir group
+    }
+
+    #[test]
+    fn test_dir_flist_indexing() {
+        // Regression test for the bug that caused interop failure:
+        // dir_ndx must use dir_flist numbering (directories only), NOT
+        // positions in the full entry list.
+        let entries = vec![
+            FileEntry {
+                name: b"file.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"dir_a".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"dir_a/child.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"dir_b".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+        ];
+        let tree = DirectoryTree::from_sorted_entries(&entries);
+        // Root: [file.txt, dir_a, dir_b]
+        assert_eq!(tree.groups.len(), 3); // root + dir_a + dir_b
+        assert_eq!(tree.groups[0].entry_indices, vec![0, 1, 3]);
+
+        // dir_a is the first directory -> dir_flist[0]
+        assert_eq!(tree.groups[1].dir_ndx, 0);
+        assert_eq!(tree.groups[1].entry_indices, vec![2]); // child.txt
+
+        // dir_b is the second directory -> dir_flist[1]
+        assert_eq!(tree.groups[2].dir_ndx, 1);
+        assert_eq!(tree.groups[2].entry_indices.len(), 0); // empty
+    }
+
+    #[test]
+    fn test_directory_tree_api() {
+        let entries = vec![
+            FileEntry {
+                name: b"a.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"sub".to_vec(),
+                mode: S_IFDIR | 0o755,
+                ..Default::default()
+            },
+            FileEntry {
+                name: b"sub/b.txt".to_vec(),
+                mode: S_IFREG | 0o644,
+                ..Default::default()
+            },
+        ];
+        let tree = DirectoryTree::from_sorted_entries(&entries);
+        assert!(tree.has_subdirs());
+        assert_eq!(tree.root().dir_ndx, -1);
+        assert_eq!(tree.root().entry_indices.len(), 2); // a.txt, sub
+
+        let pending = tree.into_pending_groups();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].dir_ndx, 0);
     }
 }

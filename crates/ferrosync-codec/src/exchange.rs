@@ -27,8 +27,8 @@ use crate::codec::{
 };
 use crate::entry::FileEntry;
 use crate::incremental::{
-    group_entries_by_directory, IncrementalReceiver, IncrementalSender, PendingSubFlists,
-    NDX_FLIST_EOF, NDX_FLIST_OFFSET,
+    DirectoryTree, IncrementalReceiver, IncrementalSender, PendingSubFlists, NDX_FLIST_EOF,
+    NDX_FLIST_OFFSET,
 };
 
 type Result<T> = std::result::Result<T, ProtocolError>;
@@ -130,9 +130,9 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     entries: &[FileEntry],
     opts: &FileListOptions,
 ) -> Result<(Vec<i32>, Option<PendingSubFlists>)> {
-    use crate::codec::{send_file_entry, write_end_of_flist, DeltaState, HardLinkEncoder};
+    use crate::codec::{DeltaState, HardLinkEncoder};
 
-    let groups = group_entries_by_directory(entries);
+    let tree = DirectoryTree::from_sorted_entries(entries);
 
     // Shared state across all sub-flists. rsync's encoder uses static
     // delta state that carries across all sub-flists.
@@ -145,51 +145,44 @@ async fn send_file_list_incremental<W: AsyncWrite + Unpin>(
     // NDX values are positional within each sub-flist with +1 gaps.
     let mut ndx_assignments = vec![0i32; entries.len()];
     let mut ndx_cursor: i32 = 1; // inc_recurse first sub-flist starts at 1
-    for group in &groups {
+    for group in &tree.groups {
         for (pos, &entry_idx) in group.entry_indices.iter().enumerate() {
             ndx_assignments[entry_idx] = ndx_cursor + pos as i32;
         }
         ndx_cursor += group.entry_indices.len() as i32 + 1; // +1 gap
     }
 
-    // Send ONLY the root sub-flist (group[0]).
-    let root = &groups[0];
-    let root_ndx_start: i32 = 1;
-    delta_state.ndx_start = root_ndx_start;
-    for (pos, &entry_idx) in root.entry_indices.iter().enumerate() {
-        let entry = &entries[entry_idx];
-        send_file_entry(
+    // Send root sub-flist via the shared encoder (no NDX marker prefix
+    // for the root, matching rsync's wire behavior).
+    let mut inc_sender = IncrementalSender {
+        next_ndx: 1, // inc_recurse first sub-flist starts at 1
+        ..Default::default()
+    };
+    inc_sender
+        .encode_sub_flist_entries(
             w,
-            entry,
+            entries,
+            &tree.root().entry_indices,
             &mut delta_state,
             opts,
             &mut hlink_encoder,
-            entry.hard_link_info(),
-            root_ndx_start + pos as i32,
-            None,
             &mut acl_encoder,
             &mut xattr_encoder,
         )
         .await?;
-    }
-    write_end_of_flist(w, 0, opts).await?;
-
-    // Build IncrementalSender for remaining groups, starting past root + gap.
-    let mut inc_sender = IncrementalSender {
-        next_ndx: root_ndx_start + root.entry_indices.len() as i32 + 1,
-        ..Default::default()
-    };
 
     // If no subdirectories, send EOF immediately.
-    if groups.len() <= 1 {
+    if !tree.has_subdirs() {
         inc_sender.write_flist_eof(w, opts.wire.int_codec).await?;
         return Ok((ndx_assignments, None));
     }
 
     // Build PendingSubFlists for remaining groups. These will be sent
     // during the sender loop, interleaved with file data transfer.
+    // TODO(#167): entries.to_vec() clones all entries. True zero-copy
+    // requires lifetime threading through sender_loop or Arc.
     let pending = PendingSubFlists::new(
-        groups.into_iter().skip(1).collect(),
+        tree.into_pending_groups(),
         entries.to_vec(),
         delta_state,
         hlink_encoder,
