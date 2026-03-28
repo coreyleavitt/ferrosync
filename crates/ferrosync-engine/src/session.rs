@@ -17,6 +17,7 @@ use tokio::io::AsyncRead;
 
 use crate::batch;
 use crate::delete;
+use crate::file_decision;
 use crate::progress::{ProgressEvent, ProgressTracker};
 use crate::wire_transfer::{self, LocalFileReader};
 use ferrosync_codec::entry::FileEntry;
@@ -141,6 +142,9 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     if opts.fuzzy() {
         condensed.push('y');
     }
+    if opts.backup() {
+        condensed.push('b');
+    }
     if opts.preserve_hard_links() {
         condensed.push('H');
     }
@@ -210,11 +214,21 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
         let gid = opts.chown_gid().map_or(String::new(), |g| g.to_string());
         args.push(format!("--chown={uid}:{gid}"));
     }
-    for path in opts.exclude_from() {
-        args.push(format!("--exclude-from={}", path.display()));
+    // NOTE: --exclude-from and --include-from are NOT sent as server args.
+    // rsync reads these files locally and sends the expanded patterns via
+    // the binary filter protocol (send_filter_list / collect_filter_list).
+    // Sending the local file path to the remote would fail because the
+    // remote can't access our local filesystem.
+    if let Some(dir) = opts.backup_dir() {
+        args.push(format!("--backup-dir={}", dir.display()));
     }
-    for path in opts.include_from() {
-        args.push(format!("--include-from={}", path.display()));
+    {
+        // Send --suffix only when it differs from the default.
+        // Default is "" when backup-dir is set, "~" otherwise.
+        let default_suffix = if opts.backup_dir().is_some() { "" } else { "~" };
+        if opts.suffix() != default_suffix {
+            args.push(format!("--suffix={}", opts.suffix()));
+        }
     }
     if opts.list_only() {
         args.push("--list-only".into());
@@ -267,6 +281,19 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
         }
         for dir in opts.link_dest() {
             args.push(format!("--link-dest={}", dir.display()));
+        }
+    }
+
+    // Remote-is-sender options: sent when the remote is the sender (our pull).
+    // These tell the remote sender how to filter/select files.
+    // C ref: options.c:2814-2817 (am_sender block in rsync, which means
+    // "the remote should be --sender")
+    if !am_sender {
+        if let Some(max) = opts.max_size() {
+            args.push(format!("--max-size={max}"));
+        }
+        if let Some(min) = opts.min_size() {
+            args.push(format!("--min-size={min}"));
         }
     }
 
@@ -391,6 +418,9 @@ pub fn parse_server_args_config(
             'F' => {
                 filter_merge_count = filter_merge_count.saturating_add(1);
             }
+            'b' => {
+                builder = builder.backup(true);
+            }
             'H' => {
                 builder = builder.preserve_hard_links(true);
             }
@@ -449,6 +479,14 @@ pub fn parse_server_args_config(
             }
             "--safe-links" => {
                 builder = builder.safe_links(true);
+            }
+            _ if opt.starts_with("--backup-dir=") => {
+                let dir = &opt["--backup-dir=".len()..];
+                builder = builder.backup_dir(std::path::PathBuf::from(dir));
+            }
+            _ if opt.starts_with("--suffix=") => {
+                let s = &opt["--suffix=".len()..];
+                builder = builder.suffix(s);
             }
             "--list-only" => {
                 builder = builder.list_only(true);
@@ -510,14 +548,8 @@ pub fn parse_server_args_config(
                     }
                 }
             }
-            _ if opt.starts_with("--exclude-from=") => {
-                let path = &opt["--exclude-from=".len()..];
-                builder = builder.exclude_from(std::path::PathBuf::from(path));
-            }
-            _ if opt.starts_with("--include-from=") => {
-                let path = &opt["--include-from=".len()..];
-                builder = builder.include_from(std::path::PathBuf::from(path));
-            }
+            // --exclude-from and --include-from are NOT parsed from server
+            // args -- they're handled via the binary filter protocol.
             _ if opt.starts_with("--link-dest=") => {
                 let dir = &opt["--link-dest=".len()..];
                 builder = builder.link_dest(std::path::PathBuf::from(dir));
@@ -525,6 +557,18 @@ pub fn parse_server_args_config(
             _ if opt.starts_with("--partial-dir=") => {
                 let dir = &opt["--partial-dir=".len()..];
                 builder = builder.partial_dir(std::path::PathBuf::from(dir));
+            }
+            _ if opt.starts_with("--max-size=") => {
+                let n = &opt["--max-size=".len()..];
+                if let Ok(val) = n.parse::<u64>() {
+                    builder = builder.max_size(val);
+                }
+            }
+            _ if opt.starts_with("--min-size=") => {
+                let n = &opt["--min-size=".len()..];
+                if let Ok(val) = n.parse::<u64>() {
+                    builder = builder.min_size(val);
+                }
             }
             _ => {}
         }
@@ -747,6 +791,14 @@ async fn run_push(
     // Build and send file list (MUX-framed).
     // C ref: send_file_list (flist.c), called from main.c:1153
     let mut entries = build_source_entries(fs, options)?;
+
+    // Sender-side size filtering: remove entries that exceed --max-size or
+    // fall below --min-size. These are sender-side filters (the sender
+    // excludes them from the file list before sending).
+    if options.max_size().is_some() || options.min_size().is_some() {
+        entries.retain(|e| !file_decision::check_size_limits(e, options));
+    }
+
     stats.total_files = entries.len() as u64;
     let total_bytes: ferrosync_types::types::FileSize = entries.iter().map(|e| e.len).sum();
     progress.set_totals(stats.total_files, total_bytes.as_u64());
@@ -1287,6 +1339,9 @@ fn collect_filter_list(options: &TransferConfig) -> Result<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Build FileEntry list from source paths in options.
+///
+/// If `--files-from` is set, reads the file list from the specified file
+/// instead of scanning the source directory tree.
 fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result<Vec<FileEntry>> {
     let source_paths = options.source();
     let mut filters = FilterRuleList::from_options(
@@ -1298,6 +1353,14 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result
     )?;
     if options.cvs_exclude() {
         filters.add_cvs_excludes();
+    }
+
+    // If --files-from is set, read the file list from the specified file
+    // instead of scanning the full source tree.
+    if let Some(files_from) = options.files_from() {
+        let items =
+            ferrosync_scanner::build_file_list_from_file(fs, source_paths, files_from, &filters)?;
+        return Ok(items.into_iter().map(|item| item.entry).collect());
     }
 
     let dir_mode = if options.recursive() {

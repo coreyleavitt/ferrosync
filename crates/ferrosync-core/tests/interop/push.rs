@@ -536,7 +536,6 @@ async fn test_interop_push_remove_source_files() {
 }
 
 #[tokio::test]
-#[ignore = "#177 sender-side max-size filter not applied"]
 async fn test_interop_push_max_size() {
     skip_if_no_ssh!();
 
@@ -558,7 +557,6 @@ async fn test_interop_push_max_size() {
 }
 
 #[tokio::test]
-#[ignore = "#177 sender-side min-size filter not applied"]
 async fn test_interop_push_min_size() {
     skip_if_no_ssh!();
 
@@ -651,7 +649,6 @@ async fn test_interop_push_compress_choice() {
 }
 
 #[tokio::test]
-#[ignore = "#179 exclude-from sends local path to remote"]
 async fn test_interop_push_exclude_from() {
     skip_if_no_ssh!();
 
@@ -725,7 +722,6 @@ async fn test_interop_push_filter_merge() {
 }
 
 #[tokio::test]
-#[ignore = "#176 files-from sends local path to remote"]
 async fn test_interop_push_files_from() {
     skip_if_no_ssh!();
 
@@ -752,7 +748,6 @@ async fn test_interop_push_files_from() {
 }
 
 #[tokio::test]
-#[ignore = "#177 sender-side size filter not applied"]
 async fn test_interop_push_max_min_size_combo() {
     skip_if_no_ssh!();
 
@@ -993,7 +988,6 @@ async fn test_interop_push_max_delete() {
 }
 
 #[tokio::test]
-#[ignore = "#181 backup args not sent to remote"]
 async fn test_interop_push_backup() {
     skip_if_no_ssh!();
 
@@ -1025,7 +1019,6 @@ async fn test_interop_push_backup() {
 }
 
 #[tokio::test]
-#[ignore = "#181 backup-dir args not sent to remote"]
 async fn test_interop_push_backup_dir() {
     skip_if_no_ssh!();
 
@@ -1310,7 +1303,6 @@ async fn test_interop_push_safe_links() {
 }
 
 #[tokio::test]
-#[ignore = "#179 include-from sends local path to remote"]
 async fn test_interop_push_include_from() {
     skip_if_no_ssh!();
 
