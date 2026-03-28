@@ -19,8 +19,8 @@ const FAKE_SUPER_XATTR: &[u8] = b"user.rsync.%stat";
 ///
 /// Instead of calling real `chown`/`chmod` syscalls (which require root),
 /// privileged metadata is stored as the `user.rsync.%stat` extended attribute.
-/// The xattr format is: `%o %u:%g %M:%m` where `%o` is the octal file mode,
-/// `%u:%g` is uid:gid, and `%M:%m` is device major:minor.
+/// The xattr format matches rsync: `%o %M,%m %u:%g` where `%o` is the octal
+/// file mode, `%M,%m` is device major,minor, and `%u:%g` is uid:gid.
 pub struct FakeSuperFs {
     inner: Box<dyn FileSystem>,
 }
@@ -32,31 +32,35 @@ impl FakeSuperFs {
     }
 
     /// Parse the `user.rsync.%stat` xattr value into (mode, uid, gid, rdev).
+    ///
+    /// Rsync format: `mode major,minor uid:gid` (e.g., `100644 0,0 1000:1000`).
     fn parse_stat(value: &[u8]) -> Option<(u32, u32, u32, u64)> {
         let s = std::str::from_utf8(value).ok()?;
         let mut parts = s.split_whitespace();
 
         let mode = u32::from_str_radix(parts.next()?, 8).ok()?;
 
-        let ug = parts.next()?;
-        let (uid_s, gid_s) = ug.split_once(':')?;
-        let uid = uid_s.parse::<u32>().ok()?;
-        let gid = gid_s.parse::<u32>().ok()?;
-
-        let dev = parts.next().unwrap_or("0:0");
-        let (maj_s, min_s) = dev.split_once(':').unwrap_or(("0", "0"));
+        let dev = parts.next().unwrap_or("0,0");
+        let (maj_s, min_s) = dev.split_once(',').unwrap_or(("0", "0"));
         let major = maj_s.parse::<u64>().ok()?;
         let minor = min_s.parse::<u64>().ok()?;
         let rdev = (major << 8) | minor;
+
+        let ug = parts.next().unwrap_or("0:0");
+        let (uid_s, gid_s) = ug.split_once(':')?;
+        let uid = uid_s.parse::<u32>().ok()?;
+        let gid = gid_s.parse::<u32>().ok()?;
 
         Some((mode, uid, gid, rdev))
     }
 
     /// Format metadata into the `user.rsync.%stat` xattr value.
+    ///
+    /// Rsync format: `mode major,minor uid:gid`.
     fn format_stat(mode: u32, uid: u32, gid: u32, rdev: u64) -> Vec<u8> {
         let major = rdev >> 8;
         let minor = rdev & 0xFF;
-        format!("{:o} {uid}:{gid} {major}:{minor}", mode).into_bytes()
+        format!("{:o} {major},{minor} {uid}:{gid}", mode).into_bytes()
     }
 
     /// Read and parse the fake-super xattr, returning `(mode, uid, gid, rdev)`.
@@ -107,13 +111,14 @@ impl FileSystem for FakeSuperFs {
         self.inner.read_file(path)
     }
 
-    fn write_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-        self.inner.write_file(path, data, mode)
+    fn write_file(&self, path: &Path, data: &[u8], _mode: Option<u32>) -> Result<()> {
+        // Real file gets 0o600; intended mode is stored via set_permissions.
+        self.inner.write_file(path, data, Some(0o600))
     }
 
     fn mkdir(&self, path: &Path, mode: u32) -> Result<()> {
         // Create with safe permissions, then store the intended mode in xattr.
-        self.inner.mkdir(path, 0o755)?;
+        self.inner.mkdir(path, 0o700)?;
         let stat_val = Self::format_stat(mode | 0o040000, 0, 0, 0);
         // Best-effort: if xattr write fails the directory still exists.
         let _ = self.inner.set_xattr(path, FAKE_SUPER_XATTR, &stat_val);
@@ -133,10 +138,8 @@ impl FileSystem for FakeSuperFs {
         let stat_val = Self::format_stat(mode, uid, gid, rdev);
         self.inner.set_xattr(path, FAKE_SUPER_XATTR, &stat_val)?;
 
-        // Apply a safe subset of permissions to the real file.
-        // Strip setuid/setgid/sticky bits; keep only rwx for owner/group/other.
-        let safe_mode = mode & 0o7777; // permission bits only
-        let real_mode = safe_mode & 0o755; // remove setuid/setgid/sticky
+        // Apply safe real permissions: 0o700 for directories, 0o600 for files.
+        let real_mode = if mode & 0o040000 != 0 { 0o700 } else { 0o600 };
         self.inner.set_permissions(path, real_mode)
     }
 
@@ -198,16 +201,16 @@ impl FileSystem for FakeSuperFs {
         self.inner.remove_xattr(path, name)
     }
 
-    fn write_file_inplace(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-        self.inner.write_file_inplace(path, data, mode)
+    fn write_file_inplace(&self, path: &Path, data: &[u8], _mode: Option<u32>) -> Result<()> {
+        self.inner.write_file_inplace(path, data, Some(0o600))
     }
 
-    fn write_file_sparse(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-        self.inner.write_file_sparse(path, data, mode)
+    fn write_file_sparse(&self, path: &Path, data: &[u8], _mode: Option<u32>) -> Result<()> {
+        self.inner.write_file_sparse(path, data, Some(0o600))
     }
 
-    fn append_file(&self, path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-        self.inner.append_file(path, data, mode)
+    fn append_file(&self, path: &Path, data: &[u8], _mode: Option<u32>) -> Result<()> {
+        self.inner.append_file(path, data, Some(0o600))
     }
 
     fn hard_link(&self, target: &Path, link_path: &Path) -> Result<()> {
@@ -230,16 +233,16 @@ impl FileSystem for FakeSuperFs {
         self.inner.read_file_stream(path)
     }
 
-    fn write_file_stream(&self, path: &Path, mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
-        self.inner.write_file_stream(path, mode)
+    fn write_file_stream(&self, path: &Path, _mode: Option<u32>) -> Result<Box<dyn Write + Send>> {
+        self.inner.write_file_stream(path, Some(0o600))
     }
 
     fn write_file_inplace_stream(
         &self,
         path: &Path,
-        mode: Option<u32>,
+        _mode: Option<u32>,
     ) -> Result<Box<dyn Write + Send>> {
-        self.inner.write_file_inplace_stream(path, mode)
+        self.inner.write_file_inplace_stream(path, Some(0o600))
     }
 }
 
@@ -249,7 +252,8 @@ mod tests {
 
     #[test]
     fn test_parse_stat() {
-        let val = b"100644 1000:1000 0:0";
+        // Rsync format: mode major,minor uid:gid
+        let val = b"100644 0,0 1000:1000";
         let (mode, uid, gid, rdev) = FakeSuperFs::parse_stat(val).unwrap();
         assert_eq!(mode, 0o100644);
         assert_eq!(uid, 1000);
@@ -258,19 +262,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_stat_no_device() {
-        let val = b"100755 0:0";
+    fn test_parse_stat_device() {
+        // Block device: major 8, minor 1
+        let val = b"60644 8,1 0:0";
         let (mode, uid, gid, rdev) = FakeSuperFs::parse_stat(val).unwrap();
-        assert_eq!(mode, 0o100755);
+        assert_eq!(mode, 0o60644);
         assert_eq!(uid, 0);
         assert_eq!(gid, 0);
-        assert_eq!(rdev, 0);
+        assert_eq!(rdev, (8 << 8) | 1);
     }
 
     #[test]
     fn test_format_stat() {
         let val = FakeSuperFs::format_stat(0o100644, 1000, 1000, 0);
-        assert_eq!(std::str::from_utf8(&val).unwrap(), "100644 1000:1000 0:0");
+        assert_eq!(std::str::from_utf8(&val).unwrap(), "100644 0,0 1000:1000");
     }
 
     #[test]
@@ -311,7 +316,16 @@ mod tests {
     fn test_parse_stat_malformed() {
         assert!(FakeSuperFs::parse_stat(b"garbage").is_none());
         assert!(FakeSuperFs::parse_stat(b"").is_none());
-        assert!(FakeSuperFs::parse_stat(b"100644").is_none());
-        assert!(FakeSuperFs::parse_stat(b"100644 bad").is_none());
+    }
+
+    #[test]
+    fn test_parse_stat_mode_only_defaults() {
+        // Mode-only input: device defaults to 0,0 and uid:gid to 0:0.
+        let val = b"100644";
+        let (mode, uid, gid, rdev) = FakeSuperFs::parse_stat(val).unwrap();
+        assert_eq!(mode, 0o100644);
+        assert_eq!(uid, 0);
+        assert_eq!(gid, 0);
+        assert_eq!(rdev, 0);
     }
 }

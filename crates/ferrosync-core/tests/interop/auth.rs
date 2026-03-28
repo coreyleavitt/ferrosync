@@ -46,21 +46,20 @@ async fn test_auth_password_pull() {
     skip_if_no_ssh!();
 
     // Set up a file on the remote (via root key-based auth).
-    let remote_dir = remote_tmpdir().await;
+    let remote = RemoteDir::new().await;
     let env = TestEnv::builder()
         .with_src_file("auth_test.txt", b"password auth works\n", None)
         .build();
-    push_archive(&env.src(), &remote_dir, 30).await;
+    push_archive(&env.src(), remote.path(), 30).await;
 
     // Make the remote dir world-readable so testpw can access it.
-    ssh_cmd(&["chmod", "-R", "o+rX", &remote_dir]).await;
+    ssh_cmd(&["chmod", "-R", "o+rX", remote.path()]).await;
 
     // Pull the file as the password-auth user.
     let pull_dest = TestEnv::builder().build();
-    let remote_path = format!("{remote_dir}/");
     pull_with_config(
         test_password_ssh_config(),
-        &remote_path,
+        &remote.path_slash(),
         &pull_dest.dst(),
         30,
     )
@@ -69,8 +68,6 @@ async fn test_auth_password_pull() {
     // Verify the file arrived with correct content.
     let content = std::fs::read_to_string(pull_dest.dst().join("auth_test.txt")).unwrap();
     assert_eq!(content, "password auth works\n");
-
-    remote_cleanup(&remote_dir).await;
 }
 
 #[tokio::test]
@@ -142,11 +139,11 @@ async fn test_auth_agent_pull() {
     std::env::set_var("SSH_AUTH_SOCK", auth_sock);
 
     // Set up a file on the remote.
-    let remote_dir = remote_tmpdir().await;
+    let remote = RemoteDir::new().await;
     let env = TestEnv::builder()
         .with_src_file("agent_test.txt", b"agent auth works\n", None)
         .build();
-    push_archive(&env.src(), &remote_dir, 30).await;
+    push_archive(&env.src(), remote.path(), 30).await;
 
     // Pull using agent auth: no identity files, agent enabled.
     let config = SshTransportConfig {
@@ -161,8 +158,7 @@ async fn test_auth_agent_pull() {
     };
 
     let pull_dest = TestEnv::builder().build();
-    let remote_path = format!("{remote_dir}/");
-    pull_with_config(config, &remote_path, &pull_dest.dst(), 30).await;
+    pull_with_config(config, &remote.path_slash(), &pull_dest.dst(), 30).await;
 
     // Verify file content.
     let content = std::fs::read_to_string(pull_dest.dst().join("agent_test.txt")).unwrap();
@@ -170,7 +166,6 @@ async fn test_auth_agent_pull() {
 
     // Clean up: kill the agent.
     std::env::remove_var("SSH_AUTH_SOCK");
-    remote_cleanup(&remote_dir).await;
 }
 
 // -------------------------------------------------------------------------

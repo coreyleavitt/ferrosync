@@ -36,7 +36,14 @@ fn create_test_tree(dir: &Path) {
 
 /// Run a transfer from source to dest using the direct engine.
 async fn run_transfer(opts: &TransferOptions) -> ferrosync_core::Result<()> {
-    let fs = test_filesystem();
+    run_transfer_with_fs(opts, test_filesystem()).await
+}
+
+/// Run a transfer with a custom filesystem implementation.
+async fn run_transfer_with_fs(
+    opts: &TransferOptions,
+    fs: Box<dyn ferrosync_core::fs::FileSystem>,
+) -> ferrosync_core::Result<()> {
     let mut progress = ProgressTracker::new();
     let ctx = ProtocolContext {
         seed: 0,
@@ -1867,5 +1874,163 @@ async fn test_transfer_timeout_fires() {
     assert!(
         err.contains("timed out") || err.contains("timeout"),
         "error should mention timeout, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fake-super tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_transfer_fake_super_stores_xattr() {
+    use std::os::unix::fs::PermissionsExt;
+    if !has_xattr_tools() {
+        eprintln!("SKIP: setfattr/getfattr not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("script.sh", b"#!/bin/sh\n", Some(1_700_000_000))
+        .build();
+
+    if !fs_supports_xattrs(&env.src()) {
+        eprintln!("SKIP: filesystem does not support user xattrs");
+        return;
+    }
+
+    // Set source file to mode 0755.
+    std::fs::set_permissions(
+        env.src().join("script.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let options = TransferOptions::builder()
+        .archive()
+        .preserve_xattrs(true)
+        .fake_super(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    let fs = crate::common::env::test_filesystem_fake_super();
+    run_transfer_with_fs(&options, fs).await.unwrap();
+
+    // Content should be correct.
+    assert_eq!(
+        std::fs::read(env.dst().join("script.sh")).unwrap(),
+        b"#!/bin/sh\n"
+    );
+
+    // Real file mode should be 0600 (fake-super safe mode).
+    let real_mode = std::fs::metadata(env.dst().join("script.sh"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert_eq!(
+        real_mode, 0o600,
+        "fake-super should set real file mode to 0600, got {real_mode:04o}"
+    );
+
+    // The xattr should store the intended mode (100755).
+    let output = std::process::Command::new("getfattr")
+        .args([
+            "--only-values",
+            "-n",
+            "user.rsync.%stat",
+            env.dst().join("script.sh").to_str().unwrap(),
+        ])
+        .output()
+        .expect("getfattr failed");
+    let xattr_val = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        xattr_val.starts_with("100755"),
+        "xattr should start with '100755', got: {xattr_val}"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_fake_super_directory_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    if !has_xattr_tools() {
+        eprintln!("SKIP: setfattr/getfattr not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("sub/file.txt", b"content\n", None)
+        .build();
+
+    if !fs_supports_xattrs(&env.src()) {
+        eprintln!("SKIP: filesystem does not support user xattrs");
+        return;
+    }
+
+    let options = TransferOptions::builder()
+        .archive()
+        .preserve_xattrs(true)
+        .fake_super(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    let fs = crate::common::env::test_filesystem_fake_super();
+    run_transfer_with_fs(&options, fs).await.unwrap();
+
+    // Real directory mode should be 0700.
+    let dir_mode = std::fs::metadata(env.dst().join("sub"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "fake-super should set real dir mode to 0700, got {dir_mode:04o}"
+    );
+}
+
+#[tokio::test]
+async fn test_transfer_fake_super_roundtrip() {
+    use std::os::unix::fs::PermissionsExt;
+    if !has_xattr_tools() {
+        eprintln!("SKIP: setfattr/getfattr not available");
+        return;
+    }
+
+    let env = TestEnv::builder()
+        .with_src_file("owned.txt", b"owned\n", Some(1_700_000_000))
+        .build();
+
+    if !fs_supports_xattrs(&env.src()) {
+        eprintln!("SKIP: filesystem does not support user xattrs");
+        return;
+    }
+
+    std::fs::set_permissions(
+        env.src().join("owned.txt"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let options = TransferOptions::builder()
+        .archive()
+        .preserve_xattrs(true)
+        .fake_super(true)
+        .source(env.src())
+        .dest(env.dst())
+        .build();
+
+    let fs = crate::common::env::test_filesystem_fake_super();
+    run_transfer_with_fs(&options, fs).await.unwrap();
+
+    // Read back through FakeSuperFs -- should see the intended mode, not 0600.
+    let reader_fs = crate::common::env::test_filesystem_fake_super();
+    let meta = reader_fs.lstat(&env.dst().join("owned.txt")).unwrap();
+    assert_eq!(
+        meta.mode & 0o7777,
+        0o755,
+        "FakeSuperFs::lstat should report intended mode 0755 from xattr, got {:04o}",
+        meta.mode & 0o7777
     );
 }

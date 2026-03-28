@@ -890,7 +890,7 @@ async fn run_sync(
     let insecure = flags.insecure;
     let verbose = flags.verbose;
 
-    let fs = create_filesystem();
+    let fs = create_filesystem(flags.fake_super);
 
     match remote {
         RemotePath::Local(remote_path) => {
@@ -1064,13 +1064,23 @@ fn build_progress_tracker(verbose: u8) -> ferrosync_core::engine::progress::Prog
 }
 
 /// Create the platform-appropriate filesystem implementation.
-fn create_filesystem() -> Box<dyn ferrosync_core::fs::FileSystem> {
+///
+/// When `fake_super` is true, wraps the real filesystem with `FakeSuperFs`
+/// so that privileged metadata is stored in xattrs instead of real syscalls.
+fn create_filesystem(fake_super: bool) -> Box<dyn ferrosync_core::fs::FileSystem> {
     #[cfg(unix)]
     {
-        Box::new(ferrosync_core::fs::unix::UnixFileSystem::new())
+        let fs: Box<dyn ferrosync_core::fs::FileSystem> =
+            Box::new(ferrosync_core::fs::unix::UnixFileSystem::new());
+        if fake_super {
+            Box::new(ferrosync_core::fs::fake_super::FakeSuperFs::new(fs))
+        } else {
+            fs
+        }
     }
     #[cfg(windows)]
     {
+        let _ = fake_super; // fake-super is Unix-only
         Box::new(ferrosync_core::fs::windows::WindowsFileSystem::new())
     }
     #[cfg(not(any(unix, windows)))]
