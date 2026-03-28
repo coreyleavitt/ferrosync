@@ -5,3 +5,6 @@
 pub mod assertions;
 pub mod env;
 pub mod ssh;
+
+// Re-export commonly used types to avoid verbose qualified paths in tests.
+pub use ferrosync_core::options::{DeleteMode, TransferOptions};

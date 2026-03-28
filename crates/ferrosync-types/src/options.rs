@@ -514,6 +514,12 @@ pub struct TransferConfigBuilder {
 }
 
 impl TransferConfigBuilder {
+    /// Initialize builder from an existing config, allowing selective overrides.
+    pub fn from(mut self, cfg: TransferConfig) -> Self {
+        self.cfg = cfg;
+        self
+    }
+
     /// Enable archive mode (`-a` = `-rlptgoD`).
     pub fn archive(mut self) -> Self {
         self.cfg.traversal.dir_mode = DirectoryMode::Recurse;

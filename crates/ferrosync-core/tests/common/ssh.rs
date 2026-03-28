@@ -164,6 +164,16 @@ pub async fn remote_exists(path: &str) -> bool {
     output.success()
 }
 
+/// Create the appropriate filesystem for the given options.
+/// Wraps with FakeSuperFs when --fake-super is set.
+fn fs_for_opts(opts: &TransferOptions) -> Box<dyn ferrosync_core::fs::FileSystem> {
+    #[cfg(unix)]
+    if opts.fake_super() {
+        return super::env::test_filesystem_fake_super();
+    }
+    test_filesystem()
+}
+
 /// Push with archive mode over SSH. Returns the transfer result.
 pub async fn push_archive(src: &Path, remote_dir: &str, timeout_secs: u64) -> TransferResult {
     let opts = TransferOptions::builder()
@@ -173,7 +183,7 @@ pub async fn push_archive(src: &Path, remote_dir: &str, timeout_secs: u64) -> Tr
 
     let server_opts = build_server_options(&opts, true);
     let transport = SshTransport::new(test_ssh_config(), true, &server_opts, Path::new(remote_dir));
-    let fs = test_filesystem();
+    let fs = fs_for_opts(&opts);
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -197,7 +207,7 @@ pub async fn pull_archive(remote_path: &str, dest: &Path, timeout_secs: u64) -> 
         &server_opts,
         Path::new(remote_path),
     );
-    let fs = test_filesystem();
+    let fs = fs_for_opts(&opts);
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -215,7 +225,7 @@ pub async fn push_with_opts(
 ) -> TransferResult {
     let server_opts = build_server_options(&opts, true);
     let transport = SshTransport::new(test_ssh_config(), true, &server_opts, Path::new(remote_dir));
-    let fs = test_filesystem();
+    let fs = fs_for_opts(&opts);
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Push);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -238,7 +248,7 @@ pub async fn pull_with_opts(
         &server_opts,
         Path::new(remote_path),
     );
-    let fs = test_filesystem();
+    let fs = fs_for_opts(&opts);
     let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
 
     match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), session.run()).await {
@@ -246,6 +256,181 @@ pub async fn pull_with_opts(
         Ok(Err(e)) => panic!("SSH pull failed: {e}"),
         Err(_) => panic!("SSH pull timed out after {timeout_secs}s"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// RemoteDir: typed remote path with Drop cleanup
+// ---------------------------------------------------------------------------
+
+/// A temporary directory on the remote SSH host.
+///
+/// Provides path joining (eliminating `format!("{remote_dir}/file")` noise)
+/// and automatic cleanup on drop via a background thread.
+pub struct RemoteDir {
+    path: String,
+}
+
+impl RemoteDir {
+    /// Create a new temp dir on the remote host.
+    pub async fn new() -> Self {
+        let path = remote_tmpdir().await;
+        Self { path }
+    }
+
+    /// Full path to a file/subdir within this remote directory.
+    pub fn join(&self, rel: &str) -> String {
+        format!("{}/{rel}", self.path)
+    }
+
+    /// The directory path itself (no trailing slash).
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The directory path with trailing slash (for pull source paths).
+    pub fn path_slash(&self) -> String {
+        format!("{}/", self.path)
+    }
+}
+
+impl Drop for RemoteDir {
+    fn drop(&mut self) {
+        let path = self.path.clone();
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(remote_cleanup(&path));
+        })
+        .join();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SshTestContext: bundles TestEnv + RemoteDir with transfer shortcuts
+// ---------------------------------------------------------------------------
+
+use super::env::TestEnv;
+
+/// Bundles TestEnv + RemoteDir and provides transfer shortcuts.
+///
+/// Fields are public -- tests access them directly for anything non-standard.
+/// Tests must still call `skip_if_no_ssh!()` explicitly before constructing.
+pub struct SshTestContext {
+    pub env: TestEnv,
+    pub remote: RemoteDir,
+}
+
+impl SshTestContext {
+    /// Create a context with the given test environment.
+    pub async fn new(env: TestEnv) -> Self {
+        Self {
+            env,
+            remote: RemoteDir::new().await,
+        }
+    }
+
+    /// Push env.src() to remote with archive mode.
+    pub async fn push(&self, timeout_secs: u64) -> TransferResult {
+        push_archive(&self.env.src(), self.remote.path(), timeout_secs).await
+    }
+
+    /// Push to remote with custom options.
+    /// Auto-injects `.source(env.src())` if source is empty.
+    pub async fn push_opts(
+        &self,
+        opts: TransferOptions,
+        timeout_secs: u64,
+    ) -> TransferResult {
+        let opts = if opts.paths.source.is_empty() {
+            TransferOptions::builder()
+                .from(opts)
+                .source(self.env.src())
+                .build()
+        } else {
+            opts
+        };
+        push_with_opts(opts, self.remote.path(), timeout_secs).await
+    }
+
+    /// Pull from remote into env.dst() with archive mode.
+    pub async fn pull(&self, timeout_secs: u64) -> TransferResult {
+        pull_archive(&self.remote.path_slash(), &self.env.dst(), timeout_secs).await
+    }
+
+    /// Pull from remote with custom options.
+    /// Auto-injects `.dest(env.dst())` if dest is None.
+    pub async fn pull_opts(
+        &self,
+        opts: TransferOptions,
+        timeout_secs: u64,
+    ) -> TransferResult {
+        let opts = if opts.paths.dest.is_none() {
+            TransferOptions::builder()
+                .from(opts)
+                .dest(self.env.dst())
+                .build()
+        } else {
+            opts
+        };
+        pull_with_opts(opts, &self.remote.path_slash(), timeout_secs).await
+    }
+
+    /// Push src to remote, then pull back to dst with archive mode.
+    pub async fn push_then_pull(&self, timeout_secs: u64) -> TransferResult {
+        self.push(timeout_secs).await;
+        self.pull(timeout_secs).await
+    }
+
+    /// Push src to remote, then pull back with custom options.
+    pub async fn push_then_pull_opts(
+        &self,
+        pull_opts: TransferOptions,
+        timeout_secs: u64,
+    ) -> TransferResult {
+        self.push(timeout_secs).await;
+        self.pull_opts(pull_opts, timeout_secs).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cancellable transfer helpers
+// ---------------------------------------------------------------------------
+
+/// Start a pull that can be cancelled. Returns the session future without awaiting it.
+/// Use with `tokio::select!` to cancel mid-transfer.
+pub fn start_pull(
+    opts: TransferOptions,
+    remote_path: &str,
+) -> Pin<Box<dyn Future<Output = ferrosync_core::Result<TransferResult>> + Send>> {
+    let server_opts = build_server_options(&opts, false);
+    let transport = SshTransport::new(
+        test_ssh_config(),
+        false,
+        &server_opts,
+        Path::new(remote_path),
+    );
+    let fs = fs_for_opts(&opts);
+    let session = SyncSession::new(transport, opts, fs, SyncDirection::Pull);
+    Box::pin(session.run())
+}
+
+// ---------------------------------------------------------------------------
+// Metadata verification helpers
+// ---------------------------------------------------------------------------
+
+/// Get POSIX ACL text for a remote file via getfacl.
+pub async fn remote_getfacl(path: &str) -> String {
+    ssh_cmd(&["getfacl", "--omit-header", path]).await
+}
+
+/// Get a single extended attribute value from a remote file.
+pub async fn remote_getfattr(path: &str, name: &str) -> String {
+    ssh_cmd(&["getfattr", "--only-values", "-n", name, path])
+        .await
+        .trim()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

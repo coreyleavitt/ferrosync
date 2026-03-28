@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
+    cap_add:
+      - SYS_ADMIN
     volumes:
       - ".:/workspace"
       - build-cache:/tmp/ferrosync-target

@@ -273,6 +273,127 @@ pub async fn assert_remote_exists(path: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Remote metadata assertions
+// ---------------------------------------------------------------------------
+
+/// Assert a remote file's mtime matches expected Unix timestamp.
+pub async fn assert_remote_mtime(path: &str, expected_unix: i64, tolerance_secs: i64) {
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%Y", path]).await;
+    let actual: i64 = output
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("failed to parse remote mtime for {path}: {output:?}"));
+    let diff = (expected_unix - actual).abs();
+    assert!(
+        diff <= tolerance_secs,
+        "remote mtime mismatch for {path}: expected {expected_unix}, got {actual} (diff {diff}s)"
+    );
+}
+
+/// Assert a remote file has the expected Unix permissions (octal mode & 0o7777).
+pub async fn assert_remote_permissions(path: &str, expected_mode: u32) {
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%a", path]).await;
+    let actual = u32::from_str_radix(output.trim(), 8)
+        .unwrap_or_else(|_| panic!("failed to parse remote permissions for {path}: {output:?}"));
+    assert_eq!(
+        actual, expected_mode,
+        "remote permission mismatch for {path}: expected {expected_mode:04o}, got {actual:04o}"
+    );
+}
+
+/// Assert a remote file has the expected size in bytes.
+pub async fn assert_remote_size(path: &str, expected_bytes: u64) {
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%s", path]).await;
+    let actual: u64 = output
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("failed to parse remote size for {path}: {output:?}"));
+    assert_eq!(
+        actual, expected_bytes,
+        "remote size mismatch for {path}: expected {expected_bytes}, got {actual}"
+    );
+}
+
+/// Assert a remote file has the expected uid:gid.
+pub async fn assert_remote_ownership(path: &str, expected_uid: u32, expected_gid: u32) {
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%u:%g", path]).await;
+    let parts: Vec<&str> = output.trim().split(':').collect();
+    let uid: u32 = parts[0].parse().unwrap();
+    let gid: u32 = parts[1].parse().unwrap();
+    assert_eq!(uid, expected_uid, "remote uid mismatch for {path}");
+    assert_eq!(gid, expected_gid, "remote gid mismatch for {path}");
+}
+
+/// Get the inode number of a remote file.
+pub async fn remote_inode(path: &str) -> u64 {
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%i", path]).await;
+    output
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("failed to parse remote inode for {path}: {output:?}"))
+}
+
+/// Assert two remote paths share an inode (are hard-linked).
+pub async fn assert_remote_hard_linked(a: &str, b: &str) {
+    let inode_a = remote_inode(a).await;
+    let inode_b = remote_inode(b).await;
+    assert_eq!(inode_a, inode_b, "remote {a} should be hard-linked to {b}");
+}
+
+/// Assert two remote paths do NOT share an inode.
+pub async fn assert_remote_not_hard_linked(a: &str, b: &str) {
+    let inode_a = remote_inode(a).await;
+    let inode_b = remote_inode(b).await;
+    assert_ne!(
+        inode_a, inode_b,
+        "remote {a} should NOT be hard-linked to {b}"
+    );
+}
+
+/// Assert a remote path is a directory.
+pub async fn assert_remote_is_dir(path: &str) {
+    let output =
+        crate::common::ssh::ssh_cmd(&["test", "-d", path, "&&", "echo", "yes"]).await;
+    assert_eq!(
+        output.trim(),
+        "yes",
+        "expected remote {path} to be a directory"
+    );
+}
+
+/// Get the number of 512-byte disk blocks allocated to a remote file.
+pub async fn remote_blocks(path: &str) -> u64 {
+    let output = crate::common::ssh::ssh_cmd(&["stat", "-c", "%b", path]).await;
+    output
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("failed to parse remote blocks for {path}: {output:?}"))
+}
+
+/// Assert a remote path is a regular file (not a symlink, directory, etc.).
+pub async fn assert_remote_is_regular_file(path: &str) {
+    let output =
+        crate::common::ssh::ssh_cmd(&["stat", "-c", "%F", path]).await;
+    assert_eq!(
+        output.trim(),
+        "regular file",
+        "expected remote {path} to be a regular file, got: {}",
+        output.trim()
+    );
+}
+
+/// Assert a remote path is a symlink.
+pub async fn assert_remote_is_symlink(path: &str) {
+    let output =
+        crate::common::ssh::ssh_cmd(&["test", "-L", path, "&&", "echo", "yes"]).await;
+    assert_eq!(
+        output.trim(),
+        "yes",
+        "expected remote {path} to be a symlink"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Hard-link assertions
 // ---------------------------------------------------------------------------
 
