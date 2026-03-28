@@ -321,6 +321,19 @@ pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
         entry_to_ndx[idx] = 1 + pos as i32; // root starts at NDX 1
     }
 
+    // Build a map from entry index to dir_flist index. In inc_recurse mode,
+    // rsync separates directories into dir_flist with their own numbering.
+    // The NDX markers in sub-flist headers reference dir_flist indices, NOT
+    // positions in the full entry list.
+    let mut entry_to_dir_ndx: Vec<i32> = vec![-1; entries.len()];
+    let mut dir_flist_counter: i32 = 0;
+    for &idx in &groups[0].entry_indices {
+        if entries[idx].mode & S_IFMT == S_IFDIR {
+            entry_to_dir_ndx[idx] = dir_flist_counter;
+            dir_flist_counter += 1;
+        }
+    }
+
     // Process directories in the order they appear in the root group,
     // then recursively process subdirectories.
     let mut dir_queue: Vec<(usize, Vec<u8>)> = Vec::new(); // (entry_index, dirname_prefix)
@@ -335,7 +348,7 @@ pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
         let (dir_entry_idx, prefix) = dir_queue[queue_pos].clone();
         queue_pos += 1;
 
-        let dir_ndx = entry_to_ndx[dir_entry_idx];
+        let dir_ndx = entry_to_dir_ndx[dir_entry_idx];
 
         // Collect children: entries whose name starts with "prefix/"
         let mut child_indices = Vec::new();
@@ -367,9 +380,11 @@ pub fn group_entries_by_directory(entries: &[FileEntry]) -> Vec<DirGroup> {
         // Advance next_ndx past this sub-flist + gap.
         next_ndx += child_indices.len() as i32 + 1;
 
-        // Queue subdirectories from this group.
+        // Queue subdirectories from this group and assign dir_flist indices.
         for &idx in &child_indices {
             if entries[idx].mode & S_IFMT == S_IFDIR {
+                entry_to_dir_ndx[idx] = dir_flist_counter;
+                dir_flist_counter += 1;
                 // Build full path for this subdirectory
                 let child_basename = &entries[idx].name[prefix_slash.len()..];
                 let mut full_name = prefix.clone();
@@ -707,7 +722,7 @@ mod tests {
         let groups = group_entries_by_directory(&entries);
         assert_eq!(groups.len(), 2); // root + subdir
         assert_eq!(groups[0].entry_indices, vec![0, 1]); // file.txt, subdir
-        assert_eq!(groups[1].dir_ndx, 2); // subdir is at NDX 2 (1-based: file.txt=1, subdir=2)
+        assert_eq!(groups[1].dir_ndx, 0); // subdir is dir_flist[0] (first directory)
         assert_eq!(groups[1].entry_indices, vec![2]); // inner.txt
     }
 

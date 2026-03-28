@@ -171,11 +171,7 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     // Capability string MUST be last in the condensed options, since `e`
     // consumes the remainder of the argument as its value.
     //
-    // Advertise incremental recursion ('i') for pull only. Push incremental
-    // sub-flist encoding causes early EOF against real rsync -- the wire
-    // format needs byte-level debugging via wire.rs conformance tests.
-    // Infrastructure (PendingSubFlists, sender_loop injection) is in place.
-    let use_inc_recurse = opts.recursive() && !am_sender;
+    let use_inc_recurse = opts.recursive();
     let caps = build_capability_string(use_inc_recurse, true, false);
     condensed.push('e');
     condensed.push_str(&caps);

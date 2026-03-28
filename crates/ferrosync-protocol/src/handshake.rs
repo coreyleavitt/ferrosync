@@ -247,13 +247,6 @@ where
         flags = varint::read_varint(r).await?;
     }
 
-    // Mask INC_RECURSE for push. Push incremental sub-flist encoding causes
-    // early EOF against real rsync -- wire format needs byte-level debugging.
-    // Infrastructure (PendingSubFlists, sender_loop injection) is in place.
-    if am_sender {
-        flags &= !compat_flags::INC_RECURSE;
-    }
-
     let do_negotiated_strings = flags & compat_flags::VARINT_FLIST_FLAGS != 0;
     let proper_seed_order = flags & compat_flags::CHKSUM_SEED_FIX != 0;
 
