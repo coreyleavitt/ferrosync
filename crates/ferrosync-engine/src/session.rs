@@ -26,7 +26,9 @@ use ferrosync_filter::FilterRuleList;
 use ferrosync_fs::FileSystem;
 use ferrosync_protocol::handshake::{self, build_capability_string, NegotiatedProtocol};
 use ferrosync_protocol::multiplex::MuxConnection;
-use ferrosync_scanner::{FileListScanner, ScanOptions, SymlinkEnricher};
+use ferrosync_scanner::{
+    AclEnricher, FileListScanner, ScanOptions, SymlinkEnricher, XattrEnricher,
+};
 use ferrosync_transport::Transport;
 use ferrosync_types::error::FsError;
 use ferrosync_types::options::{DeleteMode, TransferConfig, TransferOptions};
@@ -1379,6 +1381,14 @@ fn build_source_entries(fs: &dyn FileSystem, options: &TransferConfig) -> Result
     let mut scanner = FileListScanner::new(fs, scan_opts);
     if !options.copy_links() {
         scanner.add_enricher(Box::new(SymlinkEnricher::new(fs)));
+    }
+    #[cfg(unix)]
+    if options.preserve_acls() {
+        scanner.add_enricher(Box::new(AclEnricher::new(fs)));
+    }
+    #[cfg(unix)]
+    if options.preserve_xattrs() {
+        scanner.add_enricher(Box::new(XattrEnricher::new(fs)));
     }
     scanner
         .scan_entries(source_paths, &mut filters)

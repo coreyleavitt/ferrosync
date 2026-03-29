@@ -818,7 +818,6 @@ async fn test_interop_push_one_file_system() {
 }
 
 #[tokio::test]
-#[ignore = "#185 push xattr returns empty value"]
 async fn test_interop_push_xattr() {
     skip_if_no_ssh!();
 

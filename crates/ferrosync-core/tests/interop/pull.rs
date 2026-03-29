@@ -1747,7 +1747,6 @@ async fn test_interop_pull_keep_dirlinks() {
 }
 
 #[tokio::test]
-#[ignore = "#184 FakeSuperFs doesn't read back xattr after pull"]
 async fn test_interop_pull_fake_super() {
     skip_if_no_ssh!();
 
