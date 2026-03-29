@@ -859,7 +859,6 @@ async fn test_interop_push_xattr() {
 }
 
 #[tokio::test]
-#[ignore = "#184 ACL test needs uid 1000 in container"]
 async fn test_interop_push_acl() {
     skip_if_no_ssh!();
 

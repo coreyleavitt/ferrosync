@@ -1,5 +1,7 @@
 FROM rust:1.94-bookworm
 RUN apt-get update && apt-get install -y rsync openssh-client pkg-config libssl-dev acl attr && rm -rf /var/lib/apt/lists/*
+# Create a non-root user with fixed uid for ACL tests (setfacl -m u:1000:rw).
+RUN useradd -m -s /bin/bash -u 1000 testuser
 RUN mkdir -p /root/.ssh
 COPY tests/fixtures/ssh/test_key /root/.ssh/id_ed25519
 COPY tests/fixtures/ssh/test_key.pub /root/.ssh/id_ed25519.pub
