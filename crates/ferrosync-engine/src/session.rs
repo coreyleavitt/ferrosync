@@ -862,6 +862,22 @@ async fn run_push(
     )
     .await?;
 
+    // Delete source files after successful transfer (--remove-source-files).
+    // rsync deletes per-file in successful_send(); we batch after the full
+    // transfer completes. Only delete regular files, not directories.
+    if options.remove_source_files() && !options.dry_run() {
+        let base = options.source().first().cloned().unwrap_or_default();
+        for entry in &entries {
+            if entry.is_file() {
+                let name = std::str::from_utf8(&entry.name).unwrap_or("");
+                let path = base.join(name);
+                if let Err(e) = fs.remove_file(&path) {
+                    tracing::warn!(?path, %e, "failed to remove source file");
+                }
+            }
+        }
+    }
+
     // C ref: handle_stats (main.c:325) -- client sender does NOT write stats.
     // Stats are only written by the server sender (am_server && am_sender).
     // For push (client is sender, am_server=false), handle_stats(-1) is a no-op.

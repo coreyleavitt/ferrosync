@@ -1442,7 +1442,7 @@ async fn test_interop_pull_hardlinks_multiple_groups() {
 }
 
 #[tokio::test]
-#[ignore = "#178 remove-source-files not working on pull"]
+#[ignore = "#178 pull remove-source-files: receiver must acknowledge receipt for remote sender to delete"]
 async fn test_interop_pull_remove_source_files() {
     skip_if_no_ssh!();
 

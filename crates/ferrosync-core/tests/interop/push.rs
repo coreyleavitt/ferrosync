@@ -511,7 +511,6 @@ async fn test_interop_push_hardlinks() {
 }
 
 #[tokio::test]
-#[ignore = "#178 sender doesn't delete source files"]
 async fn test_interop_push_remove_source_files() {
     skip_if_no_ssh!();
 
