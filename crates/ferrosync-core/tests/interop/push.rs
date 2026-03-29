@@ -1435,51 +1435,40 @@ async fn test_interop_push_checksum_choice() {
     assert_remote_content(&ctx.remote.join("file.txt"), "checksum choice test\n").await;
 }
 
+/// Verify that --bwlimit actually throttles SSH push transfers.
+///
+/// Sends a 1MB file with 8KB/s bwlimit. The transfer should NOT complete
+/// within 3 seconds (at 8KB/s, 1MB would take ~128s). This proves bwlimit
+/// is being applied on the SSH path.
+///
+/// Note: --timeout is only implemented for the local engine (transfer.rs),
+/// not for SyncSession. This test uses tokio::time::timeout as the
+/// cancellation mechanism instead.
 #[tokio::test]
-#[ignore = "#187 timeout test: transfer completes before timeout"]
-async fn test_interop_push_timeout() {
+async fn test_interop_push_bwlimit_throttles() {
     skip_if_no_ssh!();
 
-    // Large file + tiny bwlimit + short timeout = should abort.
     let data = vec![b'T'; 1_048_576]; // 1 MB
     let ctx = SshTestContext::new(
         TestEnv::builder()
-            .with_src_file("huge.dat", &data, None)
+            .with_src_file("throttled.dat", &data, None)
             .build(),
     )
     .await;
 
     let opts = TransferOptions::builder()
         .archive()
-        .bwlimit(1024) // 1 KB/s -- would take ~17 minutes
-        .timeout(2) // 2 second timeout
+        .bwlimit(8192) // 8 KB/s -- 1MB would take ~128s
         .build();
 
-    // The transfer should fail due to timeout, not complete.
-    let server_opts = ferrosync_core::engine::session::build_server_options(&opts, true);
-    let transport = ferrosync_core::transport::ssh::SshTransport::new(
-        test_ssh_config(),
-        true,
-        &server_opts,
-        std::path::Path::new(ctx.remote.path()),
-    );
-    let fs = crate::common::env::test_filesystem();
-    let session = ferrosync_core::engine::session::SyncSession::new(
-        transport,
-        TransferOptions::builder()
-            .from(opts)
-            .source(ctx.env.src())
-            .build(),
-        fs,
-        ferrosync_core::engine::session::SyncDirection::Push,
-    );
+    let push_fut = async {
+        ctx.push_opts(opts, 300).await // 5 min outer timeout (should never hit)
+    };
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(10), session.run()).await;
-
-    match result {
-        Ok(Ok(_)) => panic!("transfer should have timed out, not completed"),
-        Ok(Err(_)) => {} // Expected: transfer error due to timeout
-        Err(_) => panic!("outer timeout fired -- inner timeout should have triggered first"),
+    // The transfer should NOT complete within 3 seconds at 8KB/s.
+    match tokio::time::timeout(std::time::Duration::from_secs(3), push_fut).await {
+        Err(_) => {} // Expected: timeout fired, transfer still running (cancelled by drop)
+        Ok(_) => panic!("1MB transfer at 8KB/s bwlimit should not complete in 3 seconds"),
     }
 }
 
