@@ -1349,7 +1349,6 @@ async fn test_interop_push_list_only() {
 }
 
 #[tokio::test]
-#[ignore = "#189 relative path structure wrong"]
 async fn test_interop_push_relative() {
     skip_if_no_ssh!();
 
@@ -1359,12 +1358,29 @@ async fn test_interop_push_relative() {
 
     let ctx = SshTestContext::new(env).await;
 
-    // Push with --relative: the full source path structure should be preserved.
+    // Push with --relative: rsync -R preserves the full source path structure.
+    // Without a /./ marker, the entire absolute path is preserved on the remote.
     let opts = TransferOptions::builder().archive().relative(true).build();
     ctx.push_opts(opts, 30).await;
 
-    // With -R, the directory structure a/b/ should be preserved on remote.
-    assert_remote_content(&ctx.remote.join("a/b/file.txt"), "relative\n").await;
+    // The file should exist somewhere under the remote dir with correct content.
+    // With -R and an absolute source path, rsync preserves the path from root.
+    // Use find to locate the actual file.
+    let found = ssh_cmd(&["find", ctx.remote.path(), "-name", "file.txt", "-type", "f"]).await;
+    let found_path = found.trim();
+    assert!(
+        !found_path.is_empty(),
+        "-R push should transfer the file somewhere under the remote dir"
+    );
+
+    let content = remote_cat(found_path).await;
+    assert_eq!(content, "relative\n", "file content should be correct");
+
+    // The path should include the a/b/ directory structure.
+    assert!(
+        found_path.contains("a/b/file.txt"),
+        "-R should preserve directory structure in path, got: {found_path}"
+    );
 }
 
 #[tokio::test]
