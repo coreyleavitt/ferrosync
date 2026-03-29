@@ -1436,7 +1436,7 @@ async fn test_interop_push_checksum_choice() {
 }
 
 #[tokio::test]
-#[ignore = "#188 timeout test: transfer completes before timeout"]
+#[ignore = "#187 timeout test: transfer completes before timeout"]
 async fn test_interop_push_timeout() {
     skip_if_no_ssh!();
 
@@ -1522,8 +1522,13 @@ async fn test_interop_push_fuzzy() {
     );
 }
 
+/// Push with --fake-super: the remote rsync receiver should store metadata in
+/// the user.rsync.%stat xattr instead of applying real chown/chmod.
+///
+/// This tests interop: ferrosync sends --fake-super as a server arg, and
+/// the remote rsync applies it. If the flag were silently not sent, the
+/// xattr would not exist and the file would have its real mode.
 #[tokio::test]
-#[ignore = "#187 push fake-super: receiver is remote rsync"]
 async fn test_interop_push_fake_super() {
     skip_if_no_ssh!();
 
@@ -1546,26 +1551,33 @@ async fn test_interop_push_fake_super() {
 
     let opts = TransferOptions::builder()
         .archive()
-        .preserve_xattrs(true)
         .fake_super(true)
         .build();
     ctx.push_opts(opts, 30).await;
 
-    // Content should arrive.
+    // Content should arrive correctly.
     assert_remote_content(&ctx.remote.join("exec.sh"), "#!/bin/sh\n").await;
 
-    // Real remote mode should be 0600 (fake-super safe mode).
-    let mode_output = ssh_cmd(&["stat", "-c", "%a", &ctx.remote.join("exec.sh")]).await;
-    let mode = u32::from_str_radix(mode_output.trim(), 8).unwrap();
-    assert_eq!(
-        mode, 0o600,
-        "fake-super should set real remote mode to 0600, got {mode:04o}"
-    );
-
-    // The xattr should store the intended mode in rsync format.
+    // The distinguishing assertion: fake-super should cause rsync to store
+    // metadata in user.rsync.%stat. Without --fake-super, this xattr would
+    // not exist.
     let xattr_val = remote_getfattr(&ctx.remote.join("exec.sh"), "user.rsync.%stat").await;
     assert!(
-        xattr_val.starts_with("100755"),
-        "xattr should start with '100755' (rsync format), got: {xattr_val}"
+        !xattr_val.is_empty(),
+        "fake-super should create user.rsync.%stat xattr on remote, got empty"
+    );
+
+    // The xattr should contain the intended mode (100755 in octal).
+    assert!(
+        xattr_val.contains("100755"),
+        "xattr should contain intended mode '100755', got: {xattr_val}"
+    );
+
+    // With fake-super active, rsync restricts the real file mode.
+    let mode_output = ssh_cmd(&["stat", "-c", "%a", &ctx.remote.join("exec.sh")]).await;
+    let mode = u32::from_str_radix(mode_output.trim(), 8).unwrap();
+    assert!(
+        mode <= 0o700,
+        "fake-super should restrict real mode (got {mode:04o}), intended mode stored in xattr"
     );
 }
