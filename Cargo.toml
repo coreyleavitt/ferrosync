@@ -28,8 +28,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fastcdc = "3"
 
 # Hashing
-md-5 = "0.10"
-md4 = "0.10"
+md-5 = "0.11"
+md4 = "0.11"
 blake3 = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
