@@ -20,7 +20,7 @@ use ferrosync_delta::{checksum, matcher, sum, token, ProtocolContext};
 use ferrosync_fs::{FileData, FileSystem};
 use ferrosync_protocol::compress::{Compressor, Decompressor};
 use ferrosync_protocol::handshake::{CompressType, NegotiatedProtocol};
-use ferrosync_protocol::multiplex::{BufferedMplexReader, MplexWriter, MuxConnection};
+use ferrosync_protocol::multiplex::{BufferedMplexReader, MplexWriter, MsgCode, MuxConnection};
 use ferrosync_protocol::varint;
 use ferrosync_types::error::ProtocolError;
 use ferrosync_types::stats::TransferStats;
@@ -671,6 +671,7 @@ where
     let mut demux_read = demux_read;
     let mut recv_ndx_state = varint::NdxState::default();
     let mut deferred_hardlinks: Vec<(usize, Vec<u8>)> = Vec::new();
+    let mut successful_ndxs: Vec<i32> = Vec::new();
 
     while let Some(item) = gen_rx.recv().await {
         match item {
@@ -797,6 +798,9 @@ where
                     literal_bytes,
                     matched_bytes: 0,
                 });
+
+                // Track successfully received files for MSG_SUCCESS.
+                successful_ndxs.push(entry_ndx[entry_idx]);
             }
             GeneratorItem::Done => break,
         }
@@ -804,11 +808,25 @@ where
 
     // Wait for generator task to complete and recover mplex_out.
     // We need mplex_out back for the phase exchange that follows.
-    let mplex_out = generator_handle.await.map_err(|e| {
+    let mut mplex_out = generator_handle.await.map_err(|e| {
         ferrosync_types::FerrosyncError::Protocol(ProtocolError::Handshake {
             message: format!("generator task panicked: {e}"),
         })
     })??;
+
+    // Send MSG_SUCCESS for each successfully received file. This tells the
+    // remote sender that the file was written correctly, enabling features
+    // like --remove-source-files (sender deletes after confirmation).
+    for ndx in &successful_ndxs {
+        mplex_out
+            .write_index(MsgCode::Success, *ndx)
+            .await
+            .map_err(ferrosync_types::FerrosyncError::Protocol)?;
+    }
+    mplex_out
+        .flush()
+        .await
+        .map_err(ferrosync_types::FerrosyncError::Protocol)?;
 
     // Create deferred hardlinks now that first occurrences are on disk.
     for (entry_idx, source_name) in &deferred_hardlinks {
