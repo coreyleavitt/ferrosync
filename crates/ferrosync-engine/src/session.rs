@@ -852,6 +852,7 @@ async fn run_push(
         progress,
         options.block_size(),
         options.dry_run(),
+        options.append() || options.append_verify(),
         pending_flists,
     )
     .await?;

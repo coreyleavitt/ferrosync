@@ -219,6 +219,7 @@ pub async fn sender_loop<R, W>(
     progress: &mut ProgressTracker,
     block_size_override: Option<i32>,
     dry_run: bool,
+    append_mode: bool,
     mut pending_flists: Option<ferrosync_codec::incremental::PendingSubFlists<'_>>,
 ) -> Result<()>
 where
@@ -325,7 +326,17 @@ where
         }
 
         // Read block signatures from generator.
-        let sums = sum::read_sums(mux).await?;
+        // In append mode, the generator sends only sum_head (no block signatures).
+        // rsync's sender.c returns early from receive_sums() when append_mode > 0.
+        let sums = if append_mode {
+            let head = sum::read_sum_head(mux).await?;
+            sum::SumStruct {
+                head,
+                sums: Vec::new(),
+            }
+        } else {
+            sum::read_sums(mux).await?
+        };
 
         progress.emit(ProgressEvent::FileStart {
             index: ndx,

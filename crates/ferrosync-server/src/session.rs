@@ -285,6 +285,7 @@ impl ServerSession {
             progress,
             None,
             false,
+            false, // append_mode
             pending_flists,
         )
         .await?;

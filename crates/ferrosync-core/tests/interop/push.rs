@@ -577,7 +577,7 @@ async fn test_interop_push_min_size() {
 }
 
 #[tokio::test]
-#[ignore = "#182 append-verify push hangs"]
+#[ignore = "#182 append-verify push hangs after file list (generator never responds)"]
 async fn test_interop_push_append_verify() {
     skip_if_no_ssh!();
 
