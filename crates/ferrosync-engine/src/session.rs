@@ -193,7 +193,12 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     if opts.numeric_ids() {
         args.push("--numeric-ids".into());
     }
-    if opts.append() {
+    if opts.append_verify() {
+        // rsync sends --append twice for append_mode=2 (verify mode).
+        // C ref: options.c:2933-2936
+        args.push("--append".into());
+        args.push("--append".into());
+    } else if opts.append() {
         args.push("--append".into());
     }
     if opts.safe_links() {
@@ -201,9 +206,6 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     }
     if opts.remove_source_files() {
         args.push("--remove-source-files".into());
-    }
-    if opts.append_verify() {
-        args.push("--append-verify".into());
     }
     if let Some(n) = opts.block_size() {
         args.push(format!("--block-size={n}"));
