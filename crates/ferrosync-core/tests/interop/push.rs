@@ -625,7 +625,6 @@ async fn test_interop_push_compress_level() {
 }
 
 #[tokio::test]
-#[ignore = "#180 compress-choice causes early eof"]
 async fn test_interop_push_compress_choice() {
     skip_if_no_ssh!();
 
@@ -1413,7 +1412,6 @@ async fn test_interop_push_modify_window() {
 }
 
 #[tokio::test]
-#[ignore = "#180 checksum-choice causes early eof"]
 async fn test_interop_push_checksum_choice() {
     skip_if_no_ssh!();
 

@@ -238,12 +238,12 @@ pub fn build_server_options_config(opts: &TransferConfig, am_sender: bool) -> Ve
     if opts.fake_super() {
         args.push("--fake-super".into());
     }
-    if let Some(cc) = opts.checksum_choice() {
-        args.push(format!("--checksum-choice={cc}"));
-    }
-    if let Some(zc) = opts.compress_choice() {
-        args.push(format!("--compress-choice={zc}"));
-    }
+    // --checksum-choice and --compress-choice are NOT sent as server args.
+    // rsync's negotiate_the_strings() skips sending the negotiation vstring
+    // when these are set via args, but our handshake unconditionally reads
+    // it, causing stream desync. The algorithm is negotiated via the wire
+    // protocol instead (handshake.rs sends the forced choice as the
+    // negotiation string).
     if let Some(charset) = opts.iconv() {
         args.push(format!("--iconv={charset}"));
     }
@@ -496,14 +496,8 @@ pub fn parse_server_args_config(
             "--fake-super" => {
                 builder = builder.fake_super(true);
             }
-            _ if opt.starts_with("--checksum-choice=") => {
-                let name = &opt["--checksum-choice=".len()..];
-                builder = builder.checksum_choice(name);
-            }
-            _ if opt.starts_with("--compress-choice=") => {
-                let name = &opt["--compress-choice=".len()..];
-                builder = builder.compress_choice(name);
-            }
+            // --checksum-choice and --compress-choice are negotiated via the
+            // wire protocol, not parsed from server args.
             _ if opt.starts_with("--iconv=") => {
                 let charset = &opt["--iconv=".len()..];
                 builder = builder.iconv(charset);
