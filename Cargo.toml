@@ -25,11 +25,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Delta algorithm
-fastcdc = "3"
+fastcdc = "4"
 
 # Hashing
-md-5 = "0.10"
-md4 = "0.10"
+md-5 = "0.11"
+md4 = "0.11"
 blake3 = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
@@ -42,7 +42,7 @@ zstd = "0.13"
 lz4_flex = "0.13"
 
 # SSH transport (native, pure Rust)
-russh = "0.58"
+russh = "0.60"
 ssh2-config = "0.7"
 
 # TLS transport
